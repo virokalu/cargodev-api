@@ -1,0 +1,677 @@
+// Owned by the CargoDev repo. Do not edit here.
+// CargoDev — Prisma Schema
+// Tasks: CD-D3-08 (Vehicle model), CD-D3-09 (lookup tables), CD-D3-10 (users, remarks, files, etc.)
+// Every table carries org_id. Every query MUST filter by org_id — this is the SaaS foundation.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // Connection URL is configured in prisma.config.ts (Prisma 7 requirement).
+  // For the PrismaClient at runtime, the URL is passed via @prisma/adapter-pg in lib/prisma.ts.
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+
+enum SerialPrefix {
+  FC // Export vehicles — full shipping lifecycle
+  FL // Local vehicles — shipping fields hidden, status not tracked
+}
+
+// Derived from data, never set manually by staff.
+// Transitions: PENDING → BOOKING_RECEIVED (ETD saved) → SHIPPED (daily cron once today > ETD)
+enum ShipmentStatus {
+  PENDING
+  BOOKING_RECEIVED
+  SHIPPED
+}
+
+// Method of transport per vehicle (validated against the chosen freight agent's capabilities)
+enum ShippingMethod {
+  RORO
+  CONTAINER
+}
+
+// Categorizes uploaded VehicleDocument rows. OTHER is the pre-existing
+// generic "Add Documents" bucket — kept as the default so every document
+// uploaded before this enum existed reads as OTHER, not as a data gap.
+enum VehicleDocumentType {
+  LC // Letter of Credit
+  EC // Export Certificate — completing this is the EC_RECEIVED shipment milestone (lib/shipment-milestones.ts)
+  ED // Export Declaration
+  BL // Bill of Lading (the scanned document — distinct from Vehicle.blNo, which is just the reference number)
+  INSPECTION_REPORT
+  SHAKEN_SHO // Japanese vehicle inspection certificate (車検証) — the vehicle's own
+  FREIGHT_INVOICE
+  PURCHASE_INVOICE // FL only — invoice from whoever the vehicle was bought from. Accepts image or PDF (lib/validation/upload.schema.ts)
+  SALES_INVOICE // FL only — invoice issued when the vehicle is sold locally
+  MEGI_HENKO // FL only — the customer's own shaken-sho, distinct from the vehicle's SHAKEN_SHO above. Was CUSTOMER_SHAKEN_SHO; renamed in 20261001_rename_customer_shaken_sho_to_megi_henko.
+  CASH_RECEIPT // FL only — accepts image or PDF, same as PURCHASE_INVOICE
+  OTHER
+}
+
+enum UserType {
+  STAFF
+  CUSTOMER
+}
+
+enum StaffRole {
+  ADMINISTRATOR
+  MANAGER
+  OPERATOR
+  VIEWER
+}
+
+// ─────────────────────────────────────────────
+// ORGANIZATION
+// ─────────────────────────────────────────────
+
+// Single org in Phase 1, but every table carries org_id for Phase 2 multi-tenancy.
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  users               User[]
+  vehicles            Vehicle[]
+  brands              Brand[]
+  auctionHalls        AuctionHall[]
+  suppliers           Supplier[]
+  transportCos        TransportCompany[]
+  vehicleLocations    VehicleLocation[]
+  freightAgents       FreightAgent[]
+  packingAgents       PackingAgent[]
+  rowStatuses         RowColourStatus[]
+  serialCounters      SerialCounter[]
+  notifications       Notification[]
+  activityLogs        ActivityLog[]
+  refreshTokens       RefreshToken[]
+  deviceTokens        DeviceToken[]
+  inspectionCompanies InspectionCompany[]
+  inspectionBy        InspectionBy[]
+}
+
+// ─────────────────────────────────────────────
+// USERS & CUSTOMERS (single table, two populations)
+// ─────────────────────────────────────────────
+
+model User {
+  id                  String     @id @default(cuid())
+  org_id              String
+  userType            UserType
+  name                String
+  email               String?
+  phone               String?
+  country             String?
+  address             String?
+  // null for CUSTOMER users until Phase 2 logins
+  password            String?
+  // true for staff, false for customers (Phase 1)
+  loginEnabled        Boolean    @default(false)
+  // null for CUSTOMER users
+  role                StaffRole?
+  lastActiveAt        DateTime?
+  // Login throttle (mobile + web share this — see lib/services/staff-auth.service.ts).
+  // Reset to 0/null on any successful login; never defaults to a locked state.
+  failedLoginAttempts Int        @default(0)
+  lockoutUntil        DateTime?
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  org Organization @relation(fields: [org_id], references: [id])
+
+  // CUSTOMER users can own vehicles; STAFF users cannot (enforced in service layer)
+  vehicles          Vehicle[]         @relation("CustomerVehicles")
+  activityLogs      ActivityLog[]
+  notifications     Notification[]
+  uploadedPhotos    VehiclePhoto[]
+  uploadedDocuments VehicleDocument[]
+  refreshTokens     RefreshToken[]
+  deviceTokens      DeviceToken[]
+
+  @@unique([org_id, email])
+  @@index([org_id, userType])
+}
+
+// ─────────────────────────────────────────────
+// SERIAL COUNTER
+// Transactional counter per org + prefix. Prevents duplicate serials even under concurrent saves.
+// ─────────────────────────────────────────────
+
+model SerialCounter {
+  id         String       @id @default(cuid())
+  org_id     String
+  prefix     SerialPrefix
+  // The highest serial number assigned so far for this prefix.
+  // Legacy entry mode: if a manually typed number > lastNumber, bump this up.
+  lastNumber Int          @default(0)
+  updatedAt  DateTime     @updatedAt
+
+  org Organization @relation(fields: [org_id], references: [id])
+
+  @@unique([org_id, prefix])
+}
+
+// ─────────────────────────────────────────────
+// LOOKUP TABLES
+// All use org_id so that in Phase 2 each tenant has its own lists.
+// Created ONLY through lookup services — never inline from feature code.
+// ─────────────────────────────────────────────
+
+model Brand {
+  id     String            @id @default(cuid())
+  org_id String
+  name   String
+  org    Organization      @relation(fields: [org_id], references: [id])
+  models VehicleModelRef[]
+
+  @@unique([org_id, name])
+}
+
+model VehicleModelRef {
+  id       String    @id @default(cuid())
+  org_id   String
+  brand_id String
+  name     String
+  brand    Brand     @relation(fields: [brand_id], references: [id])
+  grades   Grade[]
+  vehicles Vehicle[]
+
+  @@unique([org_id, brand_id, name])
+  @@index([org_id])
+}
+
+model Grade {
+  id       String          @id @default(cuid())
+  org_id   String
+  model_id String
+  name     String
+  model    VehicleModelRef @relation(fields: [model_id], references: [id])
+  vehicles Vehicle[]
+
+  @@unique([org_id, model_id, name])
+  @@index([org_id])
+}
+
+model AuctionHall {
+  id       String       @id @default(cuid())
+  org_id   String
+  name     String
+  org      Organization @relation(fields: [org_id], references: [id])
+  vehicles Vehicle[]
+
+  @@unique([org_id, name])
+}
+
+// FL only — an alternative source to Auction Hall for a locally-purchased
+// vehicle (Vehicle.auctionHallId and .supplierId are mutually exclusive,
+// enforced in vehicle.schema.ts). Same plain name-only lookup shape as
+// every other managed lookup in this file.
+model Supplier {
+  id       String       @id @default(cuid())
+  org_id   String
+  name     String
+  org      Organization @relation(fields: [org_id], references: [id])
+  vehicles Vehicle[]
+
+  @@unique([org_id, name])
+}
+
+model TransportCompany {
+  id       String       @id @default(cuid())
+  org_id   String
+  name     String
+  org      Organization @relation(fields: [org_id], references: [id])
+  vehicles Vehicle[]
+
+  @@unique([org_id, name])
+}
+
+model InspectionCompany {
+  id       String       @id @default(cuid())
+  org_id   String
+  name     String
+  org      Organization @relation(fields: [org_id], references: [id])
+  vehicles Vehicle[]
+
+  @@unique([org_id, name])
+}
+
+model InspectionBy {
+  id       String       @id @default(cuid())
+  org_id   String
+  name     String
+  org      Organization @relation(fields: [org_id], references: [id])
+  vehicles Vehicle[]
+
+  @@unique([org_id, name])
+}
+
+model VehicleLocation {
+  id       String       @id @default(cuid())
+  org_id   String
+  name     String
+  org      Organization @relation(fields: [org_id], references: [id])
+  vehicles Vehicle[]
+
+  @@unique([org_id, name])
+}
+
+model FreightAgent {
+  id              String       @id @default(cuid())
+  org_id          String
+  name            String
+  // These two flags determine which shipping methods can be selected per vehicle
+  offersRoro      Boolean      @default(false)
+  offersContainer Boolean      @default(false)
+  org             Organization @relation(fields: [org_id], references: [id])
+  vehicles        Vehicle[]
+
+  @@unique([org_id, name])
+}
+
+// Packing Agent — only relevant when a vehicle's shipping method is
+// CONTAINER (service layer nulls Vehicle.packingAgentId out otherwise).
+// Plain name-only managed lookup, same shape as TransportCompany/AuctionHall
+// — no capability flags like FreightAgent, since it isn't offered per
+// RORO/Container, it's simply inapplicable outside Container.
+model PackingAgent {
+  id       String       @id @default(cuid())
+  org_id   String
+  name     String
+  org      Organization @relation(fields: [org_id], references: [id])
+  vehicles Vehicle[]
+
+  @@unique([org_id, name])
+}
+
+// Row colour is data, not code — admins configure colours in Settings.
+// "Transport Complete" is special: colours only the Transport By cell, not the whole row.
+model RowColourStatus {
+  id                String       @id @default(cuid())
+  org_id            String
+  name              String
+  colour            String // e.g. "#f59e0b" — CSS hex colour
+  // When true, only the Transport By cell is coloured; the rest of the row is normal
+  transportCellOnly Boolean      @default(false)
+  org               Organization @relation(fields: [org_id], references: [id])
+  vehicles          Vehicle[]
+
+  @@unique([org_id, name])
+}
+
+// ─────────────────────────────────────────────
+// VEHICLE — the core entity (35 fields, §2 of tech doc)
+// ─────────────────────────────────────────────
+
+model Vehicle {
+  id     String @id @default(cuid())
+  org_id String
+
+  // ── Serial (§3) ────────────────────────────
+  // Stored in three columns: prefix, numeric part, and display string.
+  // Separate numeric part makes FC/FL filter and sorting cheap indexed queries.
+  serialPrefix SerialPrefix
+  serialNumber Int
+  serial       String // display string, e.g. "FC1024"
+
+  // FL vehicles that end up being exported instead of sold locally keep
+  // their FL-prefixed serial forever (re-numbering would erase real
+  // history and complicate the per-prefix counter) — this flag makes the
+  // vehicle *behave* as FC everywhere else instead. See
+  // lib/vehicle-track.ts's computeEffectiveTrack, the read-time
+  // counterpart to shipmentStatus's computeEffectiveShipmentStatus below.
+  // Always false for vehicles created as FC.
+  convertedToExport   Boolean   @default(false)
+  convertedToExportAt DateTime?
+
+  // Mirror of convertedToExport above — a native FC vehicle that ends up
+  // being sold locally instead of exported keeps its FC-prefixed serial
+  // forever, but behaves as FL everywhere else from this point on. Always
+  // false for vehicles created as FL.
+  convertedToLocal   Boolean   @default(false)
+  convertedToLocalAt DateTime?
+
+  // ── Core fields ────────────────────────────
+  auctionItemNo String?
+  chassisNo     String? // Unique per org (soft-warn on dup for legacy data — enforced in service)
+
+  // Shipment status: derived, never set manually. See §1 and the shipment service.
+  shipmentStatus ShipmentStatus @default(PENDING)
+
+  // Model hierarchy — all three levels are optional individually; grade requires model; model requires brand
+  modelId String?
+  gradeId String?
+
+  yom           Int? // Year of Manufacture
+  // FL only — mutually exclusive with supplierId below (enforced in
+  // vehicle.schema.ts), which source this vehicle was purchased through.
+  auctionHallId String?
+  supplierId    String?
+  purchaseDate  DateTime?
+
+  // Shipment dates (FC vehicles only — FL vehicles hide these in the UI and service ignores them)
+  etd DateTime? // Setting this triggers BOOKING_RECEIVED (in vehicle-update service)
+  eta DateTime?
+
+  auctionLotNo String?
+
+  // Customer must be a CUSTOMER-type User — enforced server-side
+  customerId String?
+
+  destination String? // Country name
+
+  blNo String? // Bill of Lading number
+
+  vesselName String? // FC only — applies to both RORO and Container shipments
+
+  // FC only — whether this vehicle needs/had an inspection. Plain Yes/No,
+  // same reasoning as hasPartnership below (whoever enters the vehicle
+  // always knows). The Inspection Report itself is a VehicleDocument row
+  // (documentType INSPECTION_REPORT), not a column here — this flag just
+  // controls whether that upload slot and the fields below are shown; it
+  // deliberately doesn't affect the separate, pre-existing "Inspection
+  // Completed" shipment-timeline milestone, which keeps inferring itself
+  // from the document upload alone (lib/shipment-milestones.ts).
+  hasInspection       Boolean   @default(false)
+  inspectionDate      DateTime?
+  inspectionCompanyId String?
+  inspectionById      String?
+
+  // FL only — was this purchase made with a partner. Unlike the tri-state
+  // flags below, this is a plain Yes/No: whoever enters the vehicle always
+  // knows whether there was a partner, there's no realistic "not entered
+  // yet" state the way there is for e.g. auctionBillPaid on a
+  // freshly-created row. partnerName only means something when true.
+  hasPartnership Boolean @default(false)
+  partnerName    String?
+
+  // Tri-state flags: null = not entered, true = Yes, false = No
+  // NEVER default to false — null means "unknown", false means "No", these are different.
+  auctionBillPaid Boolean? // #15 — labelled "Bill Paid" for FL, "Auction Bill Paid" for FC (vehicle-form.tsx); same column either way.
+  logBook         Boolean? // #18
+  extraKey        Boolean? // #19
+
+  // Auction sheet is a single image (R2 URL stored, not the file itself)
+  auctionSheetUrl String?
+
+  docsArrivedDate    DateTime?
+  nameChangeDeadline DateTime? // Drives deadline-approaching notifications
+
+  transportById     String? // FK → TransportCompany
+  vehicleLocationId String?
+  freightAgentId    String?
+  shippingMethod    ShippingMethod? // RORO or CONTAINER — validated against agent capabilities
+  // Only meaningful when shippingMethod = CONTAINER — service layer nulls
+  // this out otherwise, same treatment as the FC-only shipping fields above.
+  packingAgentId    String?
+  vanningDate       DateTime? // Container only — when the vehicle was loaded into its container; drives the Loaded shipment milestone
+  containerNumber   String? // Container only
+
+  massoDate      DateTime? // Deregistration (抹消) date
+  trackingNumber String? // Was named "Bill Number" — staff always used it to record the shipment tracking number, never a real bill number, so it was renamed to match (the old, separate FC-only "Tracking No" field was dropped as unused).
+  lcNo           String?
+
+  docSentDate    DateTime? // #30
+  docSentComment String?
+
+  recycleDate DateTime? // #31 — confirmed as a date field
+  jibaishake  String? // #32 — free text for now; can be structured later without migration pain
+
+  // Vehicle Remark — plain free-text note on the vehicle itself, overwritable
+  // (not the old append-only RemarkEntry thread). Same shape as docSentComment/jibaishake.
+  vehicleRemark String?
+
+  // ── Sold Details (FL only) ─────────────────
+  // Populated once a local vehicle actually sells. deliveryDate/sellingPrice
+  // are plain optional fields like the rest of this model; paidByCustomer is
+  // nullable (not tri-state UI — see hasPartnership above for the same
+  // reasoning) so an untouched FL vehicle doesn't wrongly read as "not paid".
+  deliveryDate         DateTime?
+  paidByCustomer       Boolean?
+  sellingPrice         Decimal?  @db.Decimal(12, 2)
+  // Plain string, not an enum — a small UI-owned option list (JPY/LKR/USD),
+  // same convention as destination being free text rather than a DB enum.
+  sellingPriceCurrency String?
+
+  rowColourStatusId String? // FK → RowColourStatus (nullable — no colour = no status set)
+
+  // Soft delete — null = active. Every read path (table, edit, chassis-dup
+  // check) filters this out; the row (and its serial, so the number is never
+  // reissued) stays in the database, just hidden from normal use.
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ──────────────────────────────
+  org               Organization       @relation(fields: [org_id], references: [id])
+  model             VehicleModelRef?   @relation(fields: [modelId], references: [id])
+  grade             Grade?             @relation(fields: [gradeId], references: [id])
+  auctionHall       AuctionHall?       @relation(fields: [auctionHallId], references: [id])
+  supplier          Supplier?          @relation(fields: [supplierId], references: [id])
+  customer          User?              @relation("CustomerVehicles", fields: [customerId], references: [id])
+  transportBy       TransportCompany?  @relation(fields: [transportById], references: [id])
+  vehicleLocation   VehicleLocation?   @relation(fields: [vehicleLocationId], references: [id])
+  freightAgent      FreightAgent?      @relation(fields: [freightAgentId], references: [id])
+  packingAgent      PackingAgent?      @relation(fields: [packingAgentId], references: [id])
+  rowColourStatus   RowColourStatus?   @relation(fields: [rowColourStatusId], references: [id])
+  inspectionCompany InspectionCompany? @relation(fields: [inspectionCompanyId], references: [id])
+  inspectionBy      InspectionBy?      @relation(fields: [inspectionById], references: [id])
+
+  photos        VehiclePhoto[]
+  documents     VehicleDocument[]
+  statusHistory StatusHistory[]
+
+  @@unique([org_id, serial])
+  @@unique([org_id, serialPrefix, serialNumber])
+  // chassisNo uniqueness is a soft-warn (legacy data may have dups), handled in service layer.
+  @@index([org_id, serialPrefix])
+  @@index([org_id, shipmentStatus])
+  @@index([org_id, customerId])
+  @@index([org_id, deletedAt])
+  // Supports the vehicle list filter panel (each is a direct equality filter).
+  @@index([org_id, auctionHallId])
+  @@index([org_id, supplierId])
+  @@index([org_id, freightAgentId])
+  @@index([org_id, packingAgentId])
+  @@index([org_id, vehicleLocationId])
+  @@index([org_id, inspectionCompanyId])
+  @@index([org_id, inspectionById])
+  @@index([org_id, modelId])
+  @@index([org_id, gradeId])
+  @@index([org_id, destination])
+  @@index([org_id, rowColourStatusId])
+  @@index([org_id, shippingMethod])
+}
+
+// ─────────────────────────────────────────────
+// FILES — R2 URLs stored in DB, never the files themselves
+// ─────────────────────────────────────────────
+
+// Multiple photos per vehicle
+model VehiclePhoto {
+  id           String   @id @default(cuid())
+  vehicleId    String
+  url          String // Cloudflare R2 URL (presigned for uploads, standard for reads)
+  uploadedById String
+  createdAt    DateTime @default(now())
+
+  vehicle    Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  uploadedBy User    @relation(fields: [uploadedById], references: [id])
+
+  @@index([vehicleId])
+}
+
+// Multiple documents per vehicle (B/L, export cert, invoices, etc.)
+model VehicleDocument {
+  id           String              @id @default(cuid())
+  vehicleId    String
+  url          String
+  name         String // Original filename shown in the UI
+  documentType VehicleDocumentType @default(OTHER)
+  uploadedById String
+  createdAt    DateTime            @default(now())
+
+  vehicle    Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  uploadedBy User    @relation(fields: [uploadedById], references: [id])
+
+  @@index([vehicleId])
+}
+
+// ─────────────────────────────────────────────
+// STATUS HISTORY
+// Every shipment status transition writes a row here: automated or manual revert.
+// ─────────────────────────────────────────────
+
+model StatusHistory {
+  id          String          @id @default(cuid())
+  vehicleId   String
+  fromStatus  ShipmentStatus?
+  toStatus    ShipmentStatus
+  // What caused the transition: "ETD_SAVED" | "ETD_CLEARED" | "CRON_JOB" | "COMPUTED_GUARD" | "LEGACY_ENTRY"
+  // LEGACY_ENTRY = staff picked the starting status by hand on a legacy-serial
+  // record (Tech Doc §3) because the vehicle wasn't tracked through the real
+  // ETD flow. It's the one documented exception to "derived, never manually
+  // set" — normal (non-legacy) vehicles never get this trigger.
+  trigger     String
+  // null when triggered by cron/system; set when a staff action caused it
+  triggeredBy String?
+  createdAt   DateTime        @default(now())
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId])
+}
+
+// ─────────────────────────────────────────────
+// NOTIFICATIONS (§8)
+// ─────────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(cuid())
+  org_id    String
+  userId    String // Recipient
+  // e.g. "BOOKING_RECEIVED" | "SHIPPED" | "NAME_CHANGE_DEADLINE" | "DOCUMENT_UPLOADED"
+  event     String
+  title     String
+  body      String
+  isRead    Boolean  @default(false)
+  // Optional link to the relevant vehicle
+  vehicleId String?
+  createdAt DateTime @default(now())
+
+  org  Organization @relation(fields: [org_id], references: [id])
+  user User         @relation(fields: [userId], references: [id])
+
+  @@index([org_id, userId, isRead])
+}
+
+// ─────────────────────────────────────────────
+// ACTIVITY LOG — change-order (§6, CD-D3-23)
+// Every mutation writes a row. Administrator-only viewer screen.
+// ─────────────────────────────────────────────
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  org_id    String
+  actorId   String // User who performed the action
+  action    String // e.g. "CREATE_VEHICLE", "UPDATE_VEHICLE", "DELETE_REMARK"
+  entity    String // e.g. "Vehicle", "RemarkEntry"
+  entityId  String
+  // JSON snapshots of the record before and after the change
+  before    Json?
+  after     Json?
+  createdAt DateTime @default(now())
+
+  org   Organization @relation(fields: [org_id], references: [id])
+  actor User         @relation(fields: [actorId], references: [id])
+
+  @@index([org_id, createdAt])
+  @@index([org_id, actorId])
+  @@index([org_id, entity, entityId])
+}
+
+// ─────────────────────────────────────────────
+// MOBILE AUTH — refresh tokens for the /api/v1 bearer-token flow.
+// Access tokens (short-lived, signed JWT) are never stored; only the
+// long-lived opaque refresh token is persisted here, hashed, so the DB never
+// holds anything a leaked backup could use directly. Rotated on every use
+// (see lib/services/mobile-auth.service.ts) so a stolen-but-unused old token
+// is a dead end.
+// ─────────────────────────────────────────────
+
+model RefreshToken {
+  id     String @id @default(cuid())
+  org_id String
+  userId String
+
+  // sha256 hex digest of the opaque token. The raw token is returned to the
+  // client exactly once (at login/refresh time) and never stored anywhere.
+  tokenHash String @unique
+
+  createdByIp String?
+  userAgent   String?
+
+  expiresAt         DateTime
+  // Set on logout, on rotation (superseded by a newer token), or when an
+  // account is deactivated / changes its password. Non-null = unusable.
+  revokedAt         DateTime?
+  // Informational pointer to the row that replaced this one on rotation —
+  // not a Prisma relation (a self-relation FK needs explicit onDelete
+  // behaviour to avoid ambiguous-cascade errors on Postgres, not worth the
+  // complexity for a field that's audit-trail-only).
+  replacedByTokenId String?
+
+  createdAt DateTime @default(now())
+
+  org  Organization @relation(fields: [org_id], references: [id])
+  user User         @relation(fields: [userId], references: [id])
+
+  @@index([org_id, userId])
+  @@index([expiresAt])
+}
+
+// ─────────────────────────────────────────────
+// PUSH NOTIFICATIONS — Expo device registration. One row per device (not
+// per user — a staff member can be logged into more than one phone/tablet,
+// and push has to reach all of them). notification.service.ts's
+// notifyRealtime() reads this table to fan out via expo-server-sdk
+// alongside its existing Pusher branch (lib/expo-push.ts).
+// ─────────────────────────────────────────────
+
+model DeviceToken {
+  id     String @id @default(cuid())
+  org_id String
+  userId String
+
+  // Expo's own push token format ("ExponentPushToken[...]"), validated at
+  // registration time with Expo.isExpoPushToken() (lib/services/device-
+  // token.service.ts) — not just a shape check, since a malformed token
+  // would silently fail every future send. Unique so re-registering the
+  // same physical device (token refresh, or a different staff member
+  // signing into a shared device) updates one row instead of accumulating
+  // duplicates that still point at whoever registered first.
+  expoPushToken String @unique
+
+  // "ios" | "android" — plain string, not an enum, same small-UI-owned-
+  // option-list convention as Vehicle.sellingPriceCurrency.
+  platform String
+
+  // Bumped on every re-registration (e.g. app foreground) — not currently
+  // used to expire anything, but gives a Settings-page "last seen" and a
+  // future cheap way to prune devices that stopped checking in.
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  org  Organization @relation(fields: [org_id], references: [id])
+  user User         @relation(fields: [userId], references: [id])
+
+  @@index([org_id, userId])
+}

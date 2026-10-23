@@ -1,0 +1,54 @@
+#!/bin/sh
+# ──────────────────────────────────────────────────────────────
+# Pre-commit secret scan
+# Blocks commits that contain patterns that look like hardcoded
+# secrets (API keys, passwords, tokens) in TypeScript/JS files.
+# ──────────────────────────────────────────────────────────────
+
+# Only scan files staged for this commit
+# `|| true` guards against `grep` exiting 1 when nothing matches — the
+# dispatcher in .husky/_/h runs this script with `sh -e`, so an unguarded
+# no-match here would kill the whole hook before it reaches the STAGED
+# empty-check below, failing every commit that touches no ts/tsx/js/mjs/yml
+# files.
+STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|tsx|js|mjs|yml)$' || true)
+
+if [ -z "$STAGED" ]; then
+  exit 0
+fi
+
+FOUND=0
+
+# Use while+read to handle filenames with spaces correctly
+while IFS= read -r FILE; do
+  # Skip build output and migration SQL
+  case "$FILE" in
+    node_modules/*|prisma/migrations/*|dist/*|coverage/*) continue ;;
+  esac
+
+  # Skip files that no longer exist on disk (e.g. deleted in this commit)
+  [ -f "$FILE" ] || continue
+
+  # Pattern: assignments that smell like hardcoded secrets
+  # e.g.  secret = "abc123..."   apiKey = 'sk-...'   password="hunter2"
+  # -Eo (not -Eon): omit line numbers so the pipe to grep -ivE works cleanly
+  # -- before $FILE guards against filenames that start with a dash
+  if grep -Eo \
+    "(password|secret|api_key|apikey|token|private_key)\s*[=:]\s*['\"][^'\"]{8,}['\"]" \
+    -- "$FILE" | grep -ivE "example|placeholder|changeme|your_|process\.env"; then
+    echo ""
+    echo "  Potential hardcoded secret in: $FILE"
+    echo "  Load it from process.env or src/config/env.ts instead."
+    FOUND=1
+  fi
+done <<EOF
+$STAGED
+EOF
+
+if [ "$FOUND" -eq 1 ]; then
+  echo ""
+  echo "Commit blocked. Fix the issues above and try again."
+  exit 1
+fi
+
+exit 0

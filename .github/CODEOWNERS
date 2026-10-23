@@ -1,0 +1,10 @@
+# Place this file at .github/CODEOWNERS
+# Last matching pattern wins. Replace/add owners as the team settles.
+
+*                      @virokalu
+/src/auth/             @virokalu
+/src/config/           @virokalu
+/prisma/               @virokalu
+/.github/              @virokalu
+/SECURITY.md           @virokalu
+/CLAUDE.md             @virokalu

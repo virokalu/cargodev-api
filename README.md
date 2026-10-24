@@ -34,12 +34,15 @@ Invoke-RestMethod http://localhost:4000/health
 | `npm run dev` | Start with auto-reload |
 | `npm run build` | Compile to `dist/` |
 | `npm run typecheck` | Type-check only |
-| `npm test` | Run tests once |
+| `npm test` | Run the unit tests once (no database needed) |
+| `npm run db:test:up` | Start a throwaway Postgres in Docker for the database tests |
+| `npm run test:db` | Run the real-Postgres tests (needs `TEST_DATABASE_URL`, see `docs/testing.md`) |
+| `npm run db:test:down` | Remove the throwaway Postgres |
 
 ## Rules you must know
 
 - Use a **separate dev database**. Never point this project at production.
-- **Never run `prisma migrate`** in this repo. The schema is owned by the CargoDev repo.
+- **Never run `prisma migrate dev`, `migrate deploy` or `db push`** in this repo. The schema is owned by the CargoDev repo. Database-changing commands are allowed only against the throwaway test container, and only through `npm run test:db`.
 - Never commit `.env` or any real secret. See `SECURITY.md`.
 - Read `CLAUDE.md` (project rules) and `CONTRIBUTING.md` (workflow) before your first PR.
 
@@ -49,7 +52,8 @@ Invoke-RestMethod http://localhost:4000/health
 - `docs/security-model.md` – threats and the tests that prove each defence
 - `docs/api-contract.md` – envelope, error codes, endpoints
 - `docs/env.md` – environment variables
-- `docs/testing.md` – what every route must test
+- `docs/testing.md` – what every route must test, and the real-database test harness
+- `docs/branch-protection.md` – the required status checks for `main`
 - `docs/runbook.md` – operational procedures (no live hostnames here)
 - `docs/adr/` – architecture decision records
 

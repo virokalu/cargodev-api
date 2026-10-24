@@ -12,6 +12,8 @@ import type { SessionUser } from "../lib/session-user.js";
 declare module "fastify" {
   interface FastifyRequest {
     user: SessionUser | null;
+    /** When the verified access token expires, in epoch milliseconds. Long-lived responses (streams) end then. */
+    tokenExpiresAt: number | null;
   }
 }
 
@@ -46,6 +48,7 @@ export function authenticate(roles?: readonly StaffRole[]) {
       throw new ServiceError("FORBIDDEN", "You don't have permission to access this resource.");
     }
     request.user = user;
+    request.tokenExpiresAt = payload.exp !== undefined ? payload.exp * 1000 : null;
   };
 }
 

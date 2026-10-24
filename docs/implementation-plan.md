@@ -22,7 +22,7 @@ existing system is a Next.js app whose business logic already lives in framework
 ## 2. Stack
 
 Node 20+ / TypeScript strict (no `any`), Fastify, Prisma 7 with `@prisma/adapter-pg`, zod 4,
-`jose` (JWT), `bcryptjs`, `expo-server-sdk` (mobile push), an S3-compatible object storage SDK (later), a scheduler route for cron. Vitest and supertest / `app.inject()` for
+`jose` (JWT), `bcryptjs`, `expo-server-sdk` (mobile push), an S3-compatible object storage SDK (later), an in-process scheduler (no external cron). Vitest and supertest / `app.inject()` for
 tests. Layering: `routes/` (thin) -> `services/` (all logic) -> Prisma.
 
 ## 3. What to port vs. what to build new
@@ -107,7 +107,7 @@ Suggested REST shape. Keep service signatures unchanged.
 | `POST/PATCH /staff`, `POST /staff/:id/active` | `user.service` | ADMINISTRATOR only |
 | `PATCH /profile`, `POST /profile/password` | `updateOwnProfileDetails`, `changeOwnPassword` | any staff |
 | lookup create / rename | `findOrCreate*`, `rename*` | check the source lookup actions for the allow-list |
-| `GET /api/cron/daily-vehicle-checks` | `runDailyVehicleChecks(orgId)` | `Authorization: Bearer $CRON_SECRET` |
+| `POST /admin/jobs/daily-checks` | `runDailyVehicleChecks(orgId)` via the scheduler | ADMINISTRATOR only (normal bearer auth, logged). No shared-secret endpoint. |
 
 Read the matching source Server Action files for the exact role arrays before wiring each
 route. Do not infer them.
@@ -130,7 +130,7 @@ These repeat `CLAUDE.md`. See it for the full list.
 
 - **FC vs FL:** use the effective track (`computeEffectiveTrack`, `buildTrackWhere` in `vehicle-track`), not `serialPrefix`. FL vehicles never store shipping fields (the service strips them) and shipment status is not tracked.
 - **Shipment status:** stored values are `PENDING | BOOKING_RECEIVED | SHIPPED`. `CANCELLED` is computed only (row colour "Unit Canceled" or "Resold in Auction", FC only). Use the read-time guard `computeEffectiveShipmentStatus`, and `buildEffectiveShipmentStatusWhere` for list filters. Every stored transition writes a `StatusHistory` row (`ETD_SAVED`, `ETD_CLEARED`, `CRON_JOB`, `LEGACY_ENTRY`, `CONVERTED_TO_EXPORT`, ...). Cron transitions have `triggeredBy = null`.
-- **Cron:** runs daily. It does the shipped-transition first, then the payment, rikso, LC, ETD and missing-document reminders, de-duplicated per vehicle and event per day. Trigger it from the host's scheduler against the protected route.
+- **Daily job:** runs inside this server (`DAILY_JOB_UTC_HOUR`, default 02:00 UTC), guarded by an in-process flag and a Postgres advisory lock. It does the shipped-transition first, then the payment, rikso, LC, ETD and missing-document reminders, de-duplicated per vehicle and event per day, for every org. It must be idempotent. A missed run is recovered on startup. See ADR 0003.
 - **Serial generation:** transactional `SerialCounter` increment inside the vehicle-create transaction (`serial.service`).
 - **Soft delete:** `Vehicle.deletedAt`. Every read path excludes deleted rows.
 - **Notifications:** `emit(tx, params)` inside the transaction, then `notifyRealtime(params)` after commit (Expo push to the recipients' registered devices). Recipients are ADMINISTRATOR/MANAGER staff with `loginEnabled`, minus the actor. Do not wait on delivery; swallow and log failures. There is no Pusher in this API: clients read missed notifications through `GET /notifications` and `/notifications/unread-count`. A live in-app stream (SSE) is a possible later addition.
@@ -153,7 +153,8 @@ Raise anything that tempts you into these in an issue first.
 
 ## 9. Config (names only)
 
-`DATABASE_URL`, `MOBILE_JWT_SECRET`, `ORG_ID`, `CRON_SECRET`, `CORS_ALLOWED_ORIGINS`,
+`DATABASE_URL`, `MOBILE_JWT_SECRET`, `ORG_ID`, `CORS_ALLOWED_ORIGINS`, `TRUST_PROXY_HOPS`,
+`SSE_MAX_CONNECTIONS`, `DAILY_JOB_UTC_HOUR`, `SCHEDULER_ENABLED`,
 `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`,
 `LOG_LEVEL`, `EXPO_ACCESS_TOKEN` (optional). Validate at startup in `src/config/env.ts`. Never commit values. See `docs/env.md`.
 
@@ -175,7 +176,7 @@ Raise anything that tempts you into these in an issue first.
 2. Port `ServiceError`, auth (login/refresh/logout), auth hook with role allow-lists.
 3. Port read services and all `GET` routes. Verify against `docs/api-contract.md`.
 4. Add mutation routes (vehicles, files, customers, staff, profile).
-5. Notifications fan-out (Expo push) and the cron route.
+5. Notifications fan-out (event bus, SSE stream, Expo push) and the in-process scheduler.
 6. Presign with Bearer auth.
 7. Tests (section 11), then compare responses against the running Next API for the same inputs.
 

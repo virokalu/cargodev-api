@@ -3,6 +3,11 @@
 // NOT SQL, constraints or locking: those need a real throwaway Postgres.
 // Fake data only. It throws on any `where` shape it does not understand, so a
 // test can never pass by silently ignoring a filter.
+//
+// Known difference from Postgres: a top-level `NOT: {...}` is plain boolean negation here, but
+// SQL three-valued logic makes `NOT (col = x)` drop NULL rows for a SCALAR condition. The code only
+// uses NOT around relation filters, where Postgres agrees with plain negation (checked in
+// tests/db/null-semantics.db.test.ts). Do not rely on the fake for NOT over nullable scalars.
 
 type Row = Record<string, unknown>;
 type Where = Record<string, unknown>;
@@ -16,6 +21,13 @@ interface Relation {
   model: string;
   /** Field on this row holding the related row's id. */
   fk: string;
+}
+
+/** Lets `where` and `orderBy` follow to-one relations (e.g. vehicle.model.brand_id). */
+interface MatchContext {
+  model: string;
+  relations: Record<string, Record<string, Relation>>;
+  lookup: (model: string, id: unknown) => Row | undefined;
 }
 
 export interface FakePrismaOptions {
@@ -49,6 +61,9 @@ function matchesField(actual: unknown, cond: unknown, key: string): boolean {
   if ("notIn" in cond && (cond["notIn"] as unknown[]).some((v) => sameValue(actual, v))) return false;
   if ("not" in cond) {
     const not = cond["not"];
+    // Like Postgres: `col <> x` is not true when col is NULL, so a scalar "not" EXCLUDES NULL rows
+    // (verified in tests/db/null-semantics.db.test.ts). `{ not: null }` means "has a value".
+    if (not !== null && actual == null) return false;
     if (isPlainObject(not) ? matchesField(actual, not, key) : sameValue(actual, not)) return false;
   }
   if ("contains" in cond) {
@@ -66,11 +81,12 @@ function matchesField(actual: unknown, cond: unknown, key: string): boolean {
 }
 
 /** Compound unique keys such as { org_id_email: { org_id, email } } are flattened. */
-function flatten(where: Where): Where {
+function flatten(where: Where, isRelation: (key: string) => boolean = () => false): Where {
   const out: Where = {};
   for (const [k, v] of Object.entries(where)) {
     if (
       isPlainObject(v) &&
+      !isRelation(k) &&
       k !== "AND" && k !== "OR" && k !== "NOT" &&
       !Object.keys(v).some((op) => OPERATORS.has(op))
     ) {
@@ -82,19 +98,25 @@ function flatten(where: Where): Where {
   return out;
 }
 
-export function matches(row: Row, whereIn: Where | undefined): boolean {
+export function matches(row: Row, whereIn: Where | undefined, ctx?: MatchContext): boolean {
   if (!whereIn) return true;
-  const where = flatten(whereIn);
+  const relationOf = (key: string) => ctx?.relations[ctx.model]?.[key];
+  const where = flatten(whereIn, (key) => relationOf(key) !== undefined);
   for (const [key, cond] of Object.entries(where)) {
     if (cond === undefined) continue;
     if (key === "AND") {
       const list = Array.isArray(cond) ? cond : [cond];
-      if (!list.every((w) => matches(row, w as Where))) return false;
+      if (!list.every((w) => matches(row, w as Where, ctx))) return false;
     } else if (key === "OR") {
-      if (!(cond as Where[]).some((w) => matches(row, w))) return false;
+      if (!(cond as Where[]).some((w) => matches(row, w, ctx))) return false;
     } else if (key === "NOT") {
       const list = Array.isArray(cond) ? cond : [cond];
-      if (list.some((w) => matches(row, w as Where))) return false;
+      if (list.some((w) => matches(row, w as Where, ctx))) return false;
+    } else if (ctx && relationOf(key) && isPlainObject(cond)) {
+      const rel = relationOf(key)!;
+      const related = ctx.lookup(rel.model, row[rel.fk]);
+      // A missing related row never satisfies a condition on it.
+      if (!related || !matches(related, cond, { ...ctx, model: rel.model })) return false;
     } else if (!matchesField(row[key], cond, key)) {
       return false;
     }
@@ -140,15 +162,27 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
     return out;
   }
 
-  function sorted(rows: Row[], orderBy: unknown): Row[] {
+  /** Resolves an orderBy entry such as { name: "asc" } or { model: { name: "asc" } } to [value, dir]. */
+  function sortValue(model: string, row: Row, spec: Row): [unknown, "asc" | "desc"] {
+    const [field, dirOrNested] = Object.entries(spec)[0] as [string, unknown];
+    if (typeof dirOrNested === "string") return [row[field], dirOrNested as "asc" | "desc"];
+    const rel = options.relations?.[model]?.[field];
+    if (!rel) throw new Error(`fake-prisma: no relation configured for orderBy ${model}.${field}`);
+    const related = table(rel.model).find((r) => r["id"] === row[rel.fk]);
+    return related ? sortValue(rel.model, related, dirOrNested as Row) : [undefined, "asc"];
+  }
+
+  function sorted(model: string, rows: Row[], orderBy: unknown): Row[] {
     const list = Array.isArray(orderBy) ? orderBy : orderBy ? [orderBy] : [];
     if (list.length === 0) return rows;
     return [...rows].sort((a, b) => {
       for (const o of list as Row[]) {
-        const [field, dir] = Object.entries(o)[0] as [string, "asc" | "desc"];
-        const av = a[field] as number | string | Date;
-        const bv = b[field] as number | string | Date;
+        const [av, dir] = sortValue(model, a, o) as [number | string | Date | null | undefined, "asc" | "desc"];
+        const [bv] = sortValue(model, b, o) as [number | string | Date | null | undefined, "asc" | "desc"];
         if (av === bv) continue;
+        // Nulls sort last ascending, first descending (PostgreSQL default).
+        if (av == null) return dir === "asc" ? 1 : -1;
+        if (bv == null) return dir === "asc" ? -1 : 1;
         const cmp = av > bv ? 1 : -1;
         return dir === "desc" ? -cmp : cmp;
       }
@@ -156,14 +190,21 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
     });
   }
 
+  const ctxFor = (model: string): MatchContext => ({
+    model,
+    relations: options.relations ?? {},
+    lookup: (m, id) => table(m).find((r) => r["id"] === id),
+  });
+
   function modelApi(model: string) {
     const rec = (method: string, args: unknown) => calls.push({ model, method, args });
-    const find = (args: { where?: Where } | undefined) => table(model).filter((r) => matches(r, args?.where));
+    const find = (args: { where?: Where } | undefined) =>
+      table(model).filter((r) => matches(r, args?.where, ctxFor(model)));
 
     return {
       async findFirst(args?: { where?: Where; select?: Row; orderBy?: unknown }) {
         rec("findFirst", args);
-        const row = sorted(find(args), args?.orderBy)[0];
+        const row = sorted(model, find(args), args?.orderBy)[0];
         return row ? project(model, row, args?.select) : null;
       },
       async findUnique(args: { where: Where; select?: Row }) {
@@ -179,7 +220,7 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
       },
       async findMany(args?: { where?: Where; select?: Row; orderBy?: unknown; take?: number; skip?: number; distinct?: string[] }) {
         rec("findMany", args);
-        let rows = sorted(find(args), args?.orderBy);
+        let rows = sorted(model, find(args), args?.orderBy);
         if (args?.distinct) {
           const seen = new Set<string>();
           rows = rows.filter((r) => {

@@ -45,7 +45,9 @@ Status: `todo` / `done`. Roles column is the allow-list. Taken from the CargoDev
 | GET | /health | public | done |
 | POST | /api/v1/auth/login | public | done |
 | POST | /api/v1/auth/refresh | public | done |
-| POST | /api/v1/auth/logout | public | done |
+| POST | /api/v1/auth/logout `{ "refreshToken", "expoPushToken"? }` | public | done |
+
+Logout is idempotent. If `expoPushToken` is sent, that device token is removed, but only if it belongs to the user and org the refresh token was issued to, so signing out can never unregister someone else's device.
 
 ### Customers
 
@@ -112,17 +114,55 @@ All `any staff`, and every endpoint acts only on the token's own user and org.
 | GET | /api/v1/notifications/unread-count | done |
 | POST | /api/v1/notifications/read-all | done |
 | POST | /api/v1/notifications/:id/read (idempotent; an id that is not yours changes nothing) | done |
-| POST | /api/v1/device-tokens `{ "expoPushToken", "platform" }` | done |
-| DELETE | /api/v1/device-tokens `{ "expoPushToken" }` (idempotent) | done |
+| POST | /api/v1/device-tokens `{ "expoPushToken", "platform" }` (20/min per IP) | done |
+| DELETE | /api/v1/device-tokens `{ "expoPushToken" }` (idempotent, 20/min per IP) | done |
+
+A device token moves to the most recent user who registers it (shared phones). Token values are never written to logs or error responses.
+
+### Vehicles (read)
+
+All `any staff`. Every query is scoped to the token's org and excludes soft-deleted vehicles. Track and shipment status are the *effective* ones (a converted vehicle follows its new track; CANCELLED is computed for FC only).
+
+| Method | Path | Status |
+|---|---|---|
+| GET | /api/v1/vehicles | done |
+| GET | /api/v1/vehicles/filter-options | done |
+| GET | /api/v1/vehicles/destinations | done |
+| GET | /api/v1/vehicles/:serial (404 for another org's, deleted or unknown serial) | done |
+| GET | /api/v1/vehicles/:serial/status-history | done |
+
+`GET /vehicles` query: `page`, `pageSize` (max 100, default 50), `track` (FC default, FL, ALL), `q`, `status` (repeatable: PENDING, BOOKING_RECEIVED, SHIPPED, CANCELLED), `destination`, `partner`, `customer`, `rowColour`, `rowColourNot`, `brand`, `model`, `grade`, `hall`, `supplier`, `agent`, `packingAgent`, `location`, `transport`, `method` (RORO, CONTAINER), `billPaid`/`logBook`/`extraKey`/`paidByCustomer` (YES, NO, BLANK), `partnership`, `converted`, `convertedLocal` (YES, NO), `currency`, `etdFrom`/`etdTo`/`etaFrom`/`etaTo` (YYYY-MM-DD, inclusive), `sort`, `dir`. Tri-state values keep BLANK (not entered) distinct from NO (false). `sort=shipmentStatus` orders by the effective status.
+
+### Live notification stream
+
+`GET /api/v1/notifications/stream` (any staff role). Server-Sent Events: `Content-Type: text/event-stream`, `Cache-Control: no-store`.
+
+- **Auth:** `Authorization: Bearer <accessToken>` header only. A token in the URL is never accepted (URLs end up in logs).
+- **Frames:** `id: <event id>`, `event: <type>`, `data: <json>`. The stream opens with `retry: 5000` and a `: connected` comment, then a `: ping` comment every 25 seconds.
+- **`event: notification`** data: `{ id, event, title, body, vehicleId, createdAt }` (`id` is the notification id).
+- **`event: reauth`** (`{"reason":"token_expired"}`) is sent just before the server closes the stream when the access token expires. Reconnect with a fresh token.
+- **`event: closed`** (`{"reason":"replaced"}`): you opened a 4th stream, so the oldest is closed (limit 3 per user).
+- **`event: shutdown`**: the server is stopping. Reconnect after a short delay.
+- **Errors:** 401 without a valid token. 429 `RATE_LIMITED` (with `Retry-After`) when the server is at its stream limit or you reconnect too fast (30/min per IP).
+- **Catch-up:** the stream is a convenience and has **no replay**. After connecting or reconnecting, call `GET /notifications` (and `/notifications/unread-count`) to get anything you missed.
+
+### Admin jobs
+
+| Method | Path | Roles | Status |
+|---|---|---|---|
+| POST | /api/v1/admin/jobs/daily-checks | ADMINISTRATOR | done (job body pending, see below) |
+
+Runs the daily job now, taking the same lock as the scheduled run. Idempotent: calling it twice, or while the scheduler runs it, creates no duplicates. Returns `{ data: { status, durationMs, result? } }` where `status` is `ran`, `skipped_overlap` (a run is in progress in this process), `skipped_locked` (another instance holds the lock) or `failed` (the detail is in the server log, never in the response). Every call is written to the activity log with who triggered it. Answers 404 until the daily checks are ported.
 
 ### Not built yet
 
 | Area | Why |
 |---|---|
-| Vehicles (list, detail, filters, mutations, files) | `vehicle.service` is not ported yet. |
+| Vehicle create, update, delete | Slice 2 of the `vehicle.service` port. |
+| Vehicle conversions, row colour, auction-bill-paid, serial correction | Slice 3 of the port. |
+| Vehicle files (`/vehicles/:serial/files`, `/pdf-images`) and uploads | `file.service` is not ported (needs an object-storage SDK). |
 | File presign | Needs an S3-compatible SDK. |
-| Cron | Depends on `reminder.service`, which needs `vehicle.service`. |
-| Live in-app notification stream | Not built. Mobile gets Expo push; clients poll `/notifications/unread-count`. |
+| Daily job body (`runDailyVehicleChecks`) | Needs `reminder.service` and `vehicle.service`'s shipped-transition (later slices). The scheduler, lock and admin trigger are built and tested; no job is registered until then. |
 
 ## Known doc drift
 

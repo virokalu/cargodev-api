@@ -38,6 +38,16 @@ export function createFakeSerialDb() {
       row.lastNumber = typeof next === "number" ? next : row.lastNumber + next.increment;
       return { ...row };
     },
+    async updateMany(args: {
+      where: { org_id: string; prefix: Prefix; lastNumber: { lt: number } };
+      data: { lastNumber: number };
+    }) {
+      const rows = counters.filter(
+        (c) => c.org_id === args.where.org_id && c.prefix === args.where.prefix && c.lastNumber < args.where.lastNumber.lt
+      );
+      for (const row of rows) row.lastNumber = args.data.lastNumber;
+      return { count: rows.length };
+    },
     async findUniqueOrThrow(args: { where: CounterKey }) {
       const row = findCounter(args.where);
       if (!row) throw new Error("No SerialCounter found");

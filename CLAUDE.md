@@ -38,9 +38,10 @@ This file is the contract. If a change breaks a rule here, change the rule in a 
 
 ## Database safety
 
-- Schema is owned by the CargoDev repo. This repo only runs `prisma generate`.
-- Never run database-changing commands against any shared or production database. They are allowed only against a local or CI throwaway Postgres container.
-- Local development uses your own dev database.
+- Schema is owned by the CargoDev repo. This repo never runs `migrate dev`, `migrate deploy` or `db push`. It runs `prisma generate`, and `prisma migrate diff` (offline and read-only: it only prints SQL) to build the test schema.
+- Never run database-changing commands against any shared or production database. They are allowed **only against a local or CI throwaway Postgres container**, and in this repo only through the test harness (`npm run test:db`).
+- The harness connects through `TEST_DATABASE_URL` only and never reads `DATABASE_URL`. It refuses to run unless the host is localhost/127.0.0.1/::1 (or the CI service container), the database name starts with `cargodev_test`, and the database is empty or was created by the harness. Do not weaken or bypass this check (`tests/db/guard.ts`).
+- Seed data in tests is fake. Local development uses your own dev database.
 
 ## Out of scope for now
 
@@ -48,4 +49,4 @@ Customer accounts/login, public website API, chat, email/WhatsApp, new price/cat
 
 ## Definition of done
 
-Typecheck passes, tests pass (including 401/403/404 cases for new routes), docs updated if behaviour or contract changed.
+Typecheck passes, tests pass (including 401/403/404 cases for new routes), docs updated if behaviour or contract changed. Anything that depends on real SQL behaviour (NULL handling, locks, constraints, concurrency) gets a test in `tests/db`, because the in-memory fake cannot prove it. `npm run test:db` passes (CI runs it in the `ci` job).

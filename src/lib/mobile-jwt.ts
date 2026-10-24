@@ -14,6 +14,8 @@ export interface AccessTokenPayload {
   role: StaffRole;
   name: string;
   email: string | null;
+  /** Expiry as seconds since the epoch. Only set on payloads read back from a verified token. */
+  exp?: number;
 }
 
 function getSecret(): Uint8Array {
@@ -53,6 +55,7 @@ export async function verifyAccessToken(token: string): Promise<AccessTokenPaylo
       role: payload.role as StaffRole,
       name: payload.name,
       email: (payload.email as string | null | undefined) ?? null,
+      ...(typeof payload.exp === "number" ? { exp: payload.exp } : {}),
     };
   } catch (error) {
     if (error instanceof joseErrors.JOSEError) {

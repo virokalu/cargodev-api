@@ -4,6 +4,7 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from "fastify";
 import { HTTP_STATUS, ServiceError } from "./errors.js";
 import { errorBody } from "./response.js";
+import { safeError } from "./redact.js";
 
 export function errorHandler(error: FastifyError | Error, request: FastifyRequest, reply: FastifyReply) {
   if (error instanceof ServiceError) {
@@ -20,7 +21,8 @@ export function errorHandler(error: FastifyError | Error, request: FastifyReques
     return reply.status(429).send(errorBody("RATE_LIMITED", "Too many requests. Try again later."));
   }
 
-  request.log.error({ err: error }, "unexpected error");
+  // Redacted: library error messages can carry tokens or connection details.
+  request.log.error({ err: safeError(error) }, "unexpected error");
   return reply.status(500).send(errorBody("INTERNAL", "Something went wrong."));
 }
 

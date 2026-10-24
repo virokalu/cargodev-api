@@ -12,11 +12,13 @@ See `README.md`. Use your own dev database. Never use production credentials.
    ```powershell
    npm run typecheck
    npm test
+   npm run db:test:up        # once; needs Docker. Prints the TEST_DATABASE_URL to set
+   npm run test:db
    ```
 4. Open a pull request and fill in the checklist.
 5. Address review comments, resolve every thread, then squash merge.
 
-`main` is protected: no direct pushes, 1 approval, passing CI, code-owner review for sensitive paths.
+`main` is protected: no direct pushes, 1 approval, code-owner review for sensitive paths, and two required status checks that must pass: **`ci`** (typecheck, unit tests, real-Postgres tests, runtime audit) and **`secret-scan`**. See `docs/branch-protection.md`. `git commit --no-verify` skips the local secret scan but not the `secret-scan` job.
 
 ## Review expectations
 

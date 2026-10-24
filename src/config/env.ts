@@ -11,6 +11,19 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   // Comma-separated browser origins allowed by CORS. Empty means none. Never "*".
   CORS_ALLOWED_ORIGINS: z.string().default(""),
+  // How many reverse proxies in front of this server we control and trust to set
+  // X-Forwarded-For. 0 (default) trusts none: the client IP is the socket address
+  // and the header is ignored, so it cannot be spoofed to dodge rate limits.
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
+  // Most simultaneous GET /notifications/stream connections on this instance.
+  SSE_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(100000).default(500),
+  // UTC hour (0-23) the daily job runs at.
+  DAILY_JOB_UTC_HOUR: z.coerce.number().int().min(0).max(23).default(2),
+  // false on instances (and in tests) that must not run scheduled jobs.
+  SCHEDULER_ENABLED: z
+    .enum(["true", "false"], { error: "SCHEDULER_ENABLED must be true or false" })
+    .default("true")
+    .transform((value) => value === "true"),
   // Optional. Only raises Expo push rate limits; push works without it.
   EXPO_ACCESS_TOKEN: z.string().min(1).optional(),
   // Signs access tokens. Long and random, unique per environment.

@@ -215,11 +215,31 @@ export async function logoutMobile(rawBody: unknown): Promise<void> {
   }
 
   const tokenHash = hashToken(parsed.data.refreshToken);
+  const { expoPushToken } = parsed.data;
+
+  // The logout endpoint is public, so the refresh token is the only proof of who
+  // is signing out. It decides whose device token may be removed.
+  const owner = expoPushToken
+    ? await getPrisma().refreshToken.findUnique({
+        where: { tokenHash },
+        select: { org_id: true, userId: true },
+      })
+    : null;
+
   // Idempotent — an already-revoked or unknown token isn't an error, since
   // the end state ("this token no longer works") already holds either way.
-  await getPrisma().refreshToken.updateMany({
-    where: { tokenHash, revokedAt: null },
-    data: { revokedAt: new Date() },
+  await getPrisma().$transaction(async (tx) => {
+    await tx.refreshToken.updateMany({
+      where: { tokenHash, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    if (expoPushToken && owner) {
+      // Scoped to the refresh token's own org and user: signing out can never
+      // unregister someone else's device, even if its token is known.
+      await tx.deviceToken.deleteMany({
+        where: { expoPushToken, org_id: owner.org_id, userId: owner.userId },
+      });
+    }
   });
 }
 

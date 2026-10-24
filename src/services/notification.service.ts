@@ -9,6 +9,9 @@
 // read missed notifications through the REST endpoints.
 
 import type { Prisma } from "@prisma/client";
+import { randomUUID } from "node:crypto";
+import { getEventBus } from "../lib/events.js";
+import { safeError } from "../lib/redact.js";
 import { getPrisma } from "../lib/prisma.js";
 import { sendExpoPushNotifications } from "../lib/expo-push.js";
 import { listDeviceTokensForUsers } from "./device-token.service.js";
@@ -99,12 +102,44 @@ export async function emit(tx: TxClient, params: EmitParams): Promise<void> {
   params.recipientNotificationIds = Object.fromEntries(created.map((row) => [row.userId, row.id]));
 }
 
-/** Post-commit, best-effort mobile push — never awaited by callers, never
- * throws into the request path. The notification is already durably saved by
- * emit() regardless of whether this succeeds; a delivery failure just means
- * the recipient sees it on next refresh instead of as an OS push. */
+/** Post-commit, best-effort delivery. Call it AFTER the transaction that ran emit()
+ * has committed, with the same params object. It never throws and is never awaited:
+ * the notification is already durably saved by emit(), so a delivery failure only
+ * means the recipient sees it on their next read instead of live.
+ *
+ * Two channels: (1) one event per recipient on the event bus, which feeds any open
+ * GET /notifications/stream connection; (2) Expo push to their registered devices. */
 export function notifyRealtime(params: EmitParams): void {
-  sendMobilePush(params).catch((e: unknown) => console.error("Expo push failed", e));
+  publishNotificationEvents(params);
+  sendMobilePush(params).catch((e: unknown) => console.error("Expo push failed", safeError(e)));
+}
+
+/** Plain, whitelisted fields only: this is what leaves the server over a stream. */
+function publishNotificationEvents(params: EmitParams): void {
+  try {
+    const bus = getEventBus();
+    const createdAt = new Date().toISOString();
+    for (const userId of params.recipientUserIds) {
+      const notificationId = params.recipientNotificationIds?.[userId] ?? null;
+      bus.publish({
+        type: "notification",
+        orgId: params.orgId,
+        userId,
+        id: notificationId ?? randomUUID(),
+        payload: {
+          id: notificationId,
+          event: params.event,
+          title: params.title,
+          body: params.body,
+          vehicleId: params.vehicleId ?? null,
+          createdAt,
+        },
+      });
+    }
+  } catch (error) {
+    // Publishing must never reach the caller.
+    console.error("Notification event publish failed", safeError(error));
+  }
 }
 
 async function sendMobilePush(params: EmitParams): Promise<void> {

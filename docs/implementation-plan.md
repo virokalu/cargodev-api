@@ -22,8 +22,7 @@ existing system is a Next.js app whose business logic already lives in framework
 ## 2. Stack
 
 Node 20+ / TypeScript strict (no `any`), Fastify, Prisma 7 with `@prisma/adapter-pg`, zod 4,
-`jose` (JWT), `bcryptjs`, an S3-compatible object storage SDK (later), `pusher` and
-`expo-server-sdk` (later), a scheduler route for cron. Vitest and supertest / `app.inject()` for
+`jose` (JWT), `bcryptjs`, `expo-server-sdk` (mobile push), an S3-compatible object storage SDK (later), a scheduler route for cron. Vitest and supertest / `app.inject()` for
 tests. Layering: `routes/` (thin) -> `services/` (all logic) -> Prisma.
 
 ## 3. What to port vs. what to build new
@@ -104,7 +103,7 @@ Suggested REST shape. Keep service signatures unchanged.
 | `POST /vehicles/:id/photos`, `/documents`, `PUT /vehicles/:id/auction-sheet` | `file.service` add/set | ADMINISTRATOR, MANAGER, OPERATOR |
 | `DELETE /vehicles/:id/photos/:photoId`, `/documents/:docId` | `file.service` delete | check the source Server Action for the exact allow-list |
 | `POST /uploads/presign` | object-storage presign (section 7) | ADMINISTRATOR, MANAGER, OPERATOR |
-| `POST/PATCH /customers` | `createCustomerFull`, `updateCustomer` | ADMINISTRATOR, MANAGER, OPERATOR |
+| `POST/PATCH /customers` | `createCustomerFull`, `updateCustomer` | ADMINISTRATOR, MANAGER |
 | `POST/PATCH /staff`, `POST /staff/:id/active` | `user.service` | ADMINISTRATOR only |
 | `PATCH /profile`, `POST /profile/password` | `updateOwnProfileDetails`, `changeOwnPassword` | any staff |
 | lookup create / rename | `findOrCreate*`, `rename*` | check the source lookup actions for the allow-list |
@@ -134,7 +133,7 @@ These repeat `CLAUDE.md`. See it for the full list.
 - **Cron:** runs daily. It does the shipped-transition first, then the payment, rikso, LC, ETD and missing-document reminders, de-duplicated per vehicle and event per day. Trigger it from the host's scheduler against the protected route.
 - **Serial generation:** transactional `SerialCounter` increment inside the vehicle-create transaction (`serial.service`).
 - **Soft delete:** `Vehicle.deletedAt`. Every read path excludes deleted rows.
-- **Notifications:** `emit(tx, params)` inside the transaction, then `notifyRealtime(params)` after commit (Pusher channel `private-user-<id>` plus Expo push). Recipients are ADMINISTRATOR/MANAGER staff with `loginEnabled`, minus the actor. Do not wait on delivery; swallow and log failures. The Pusher private-channel auth endpoint must only authorize the caller's own channel, and for a Bearer-token API it must accept the Bearer token.
+- **Notifications:** `emit(tx, params)` inside the transaction, then `notifyRealtime(params)` after commit (Expo push to the recipients' registered devices). Recipients are ADMINISTRATOR/MANAGER staff with `loginEnabled`, minus the actor. Do not wait on delivery; swallow and log failures. There is no Pusher in this API: clients read missed notifications through `GET /notifications` and `/notifications/unread-count`. A live in-app stream (SSE) is a possible later addition.
 - **Org:** the single-org default (`ORG_ID`) is used only by login lookup and cron. Keep that for phase 1 but isolate it in one config module. Login should ideally resolve the org via the user row. Never hardcode an org id in code, tests or docs.
 
 ## 7. Files (object storage)
@@ -156,8 +155,7 @@ Raise anything that tempts you into these in an issue first.
 
 `DATABASE_URL`, `MOBILE_JWT_SECRET`, `ORG_ID`, `CRON_SECRET`, `CORS_ALLOWED_ORIGINS`,
 `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`,
-`PUSHER_APP_ID`, `PUSHER_KEY`, `PUSHER_SECRET`, `PUSHER_CLUSTER`, `EXPO_ACCESS_TOKEN`
-(optional). Validate at startup in `src/config/env.ts`. Never commit values. See `docs/env.md`.
+`LOG_LEVEL`, `EXPO_ACCESS_TOKEN` (optional). Validate at startup in `src/config/env.ts`. Never commit values. See `docs/env.md`.
 
 ## 10. Safety
 
@@ -177,7 +175,7 @@ Raise anything that tempts you into these in an issue first.
 2. Port `ServiceError`, auth (login/refresh/logout), auth hook with role allow-lists.
 3. Port read services and all `GET` routes. Verify against `docs/api-contract.md`.
 4. Add mutation routes (vehicles, files, customers, staff, profile).
-5. Notifications fan-out (Pusher and Expo) and the cron route.
+5. Notifications fan-out (Expo push) and the cron route.
 6. Presign with Bearer auth.
 7. Tests (section 11), then compare responses against the running Next API for the same inputs.
 

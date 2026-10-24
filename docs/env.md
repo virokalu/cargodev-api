@@ -15,7 +15,6 @@ Variables are validated at startup in `src/config/env.ts`. The app refuses to st
 | ORG_ID | Default org for login lookup and cron only | with auth |
 | CRON_SECRET | Protects the cron route | with cron |
 | R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, R2_PUBLIC_URL | File storage | with files |
-| PUSHER_APP_ID, PUSHER_KEY, PUSHER_SECRET, PUSHER_CLUSTER | Realtime notifications | with notifications |
 | EXPO_ACCESS_TOKEN | Expo push (optional) | no |
 
 ## Rules

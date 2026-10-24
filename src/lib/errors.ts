@@ -7,12 +7,12 @@ export type ServiceErrorCode =
   | "FORBIDDEN"
   | "VALIDATION"
   | "CONFLICT"
-  | "UNAUTHENTICATED"
   | "INTERNAL";
 
+// No UNAUTHENTICATED code on purpose: services only run for an already
+// authenticated actor, so only the auth hook can answer 401.
 export const HTTP_STATUS: Record<ServiceErrorCode, number> = {
   VALIDATION: 400,
-  UNAUTHENTICATED: 401,
   FORBIDDEN: 403,
   NOT_FOUND: 404,
   CONFLICT: 409,

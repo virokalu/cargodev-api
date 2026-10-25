@@ -27,6 +27,18 @@ Variables are validated at startup in `src/config/env.ts`. The app refuses to st
 |---|---|
 | TEST_DATABASE_URL | The throwaway database for `npm run test:db`. Read only by the test harness, never by the app. Must point at localhost (or the CI service container) and a database named `cargodev_test...`; the harness refuses anything else. Never set this to a real database. |
 
+## Migration-only variables
+
+Read only by `npm run migrate` (`scripts/migrate.ts`), never by the app. See `docs/testing.md`.
+
+| Variable | Purpose |
+|---|---|
+| MIGRATION_DATABASE_URL | The designated test database, **direct (non-pooled)** connection. Never the runtime database |
+| MIGRATION_ALLOWED_HOST | The one host migrations may run against. Must equal the URL's host exactly |
+| MIGRATION_ALLOWED_DB | The one database name migrations may run against. Must equal the URL's database exactly |
+
+Migrations never use `DATABASE_URL` or `DIRECT_URL`. If `MIGRATION_DATABASE_URL` is the same server and database as either, the guard refuses.
+
 ## Rules
 
 - Adding a variable: update `env.ts`, `.env.example`, this file and the CI dummy env in the same PR.

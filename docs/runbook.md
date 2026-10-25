@@ -45,5 +45,6 @@ Notes:
 
 ## Database
 
-- Never run migrations from this repo. The only database-changing commands here run against the throwaway test container, through `npm run test:db` (see `docs/testing.md`).
-- Restore drills and backup procedures are owned by the CargoDev project.
+- This repo owns the schema. Its migration tooling (`npm run migrate`) refuses everything except the designated test database; it never touches production. To change production, **a maintainer** applies the reviewed migration files from `prisma/migrations/` by hand, after reading the SQL, taking a backup, and confirming the old Next.js app still works with it (every migration is additive-first).
+- Run the test-harness commands only against the throwaway container, through `npm run test:db` (see `docs/testing.md`).
+- Restore drills and backup procedures are owned by the CargoDev project until that backend is retired.

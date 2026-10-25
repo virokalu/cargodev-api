@@ -41,6 +41,11 @@ jobs:
       # The ONLY database the tests touch. The harness refuses anything but localhost or
       # this service container, and never reads DATABASE_URL.
       TEST_DATABASE_URL: "postgresql://postgres:example-ci-throwaway@localhost:5432/cargodev_test"
+      # Dummy values for the migration guard tests (tests/migrate-guard.test.ts). CI never runs migrations
+      # against anything but its own service container.
+      MIGRATION_DATABASE_URL: "postgresql://postgres:example-ci-throwaway@localhost:5432/cargodev_test"
+      MIGRATION_ALLOWED_HOST: "localhost"
+      MIGRATION_ALLOWED_DB: "cargodev_test"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

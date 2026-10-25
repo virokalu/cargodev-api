@@ -63,7 +63,7 @@ docker run -d --rm --name cargodev-api-test-db -e POSTGRES_PASSWORD=example-thro
 
 ### How the schema gets there
 
-`tests/db/global-setup.ts` runs `prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script`, which only **prints** SQL (it never connects), and applies it to the throwaway database. It never runs `migrate dev`, `migrate deploy` or `db push`. The schema is rebuilt from `prisma/schema.prisma` on every run, so it cannot drift from the schema file. Each test starts from empty tables.
+`tests/db/global-setup.ts` runs `prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script`, which only **prints** SQL (it never connects), and applies it to the throwaway database. It never runs `migrate dev`, `migrate deploy` or `db push`. The schema is rebuilt from `prisma/schema.prisma` on every run, so it cannot drift from the schema file (and, once migrations exist, a test should confirm that applying them gives the same schema). Each test starts from empty tables.
 
 ### The safety guard
 
@@ -78,10 +78,24 @@ It never prints the connection string (it contains a password).
 
 If you see "The database test harness refused to run", read the message: it says which rule failed and nothing was changed.
 
+## Migrations (separate from the test harness)
+
+`npm run migrate -- <command>` is the only way to run migration commands. It runs the guard (`scripts/migrate-guard.ts`, tested by `tests/migrate-guard.test.ts`) first and refuses unless all of these hold:
+
+1. `MIGRATION_DATABASE_URL`, `MIGRATION_ALLOWED_HOST` and `MIGRATION_ALLOWED_DB` are all set. The URL's host equals the allowed host and its database equals the allowed database, exactly.
+2. The URL is not the runtime `DATABASE_URL` or `DIRECT_URL` (same string, or same host, port and database). Those two are only compared, never used or printed, and are removed from the environment of the Prisma process.
+3. It is a direct connection: poolers (port 6543, `pooler`/`pgbouncer`) and redirecting parameters (`host=`, `hostaddr=`, `service=`, `options=`) are refused.
+
+Commands: `create <name>` (generates a migration, does **not** apply it), `diff-script <name>` (same, without a shadow database), `scan`, `deploy`, `status`. There is no way to pass raw flags, so `reset`, `db push`, `--force-reset` and `--accept-data-loss` cannot be used.
+
+Flow: `create` → read the printed SQL and scan → `deploy` (scans again, applies only pending migrations to the test database) → `npm run test:db`. The scan flags DROP, ALTER COLUMN TYPE, RENAME, TRUNCATE, DELETE, NOT NULL without DEFAULT, and a new table missing `org_id`, an `org_id`-first index or row level security. A flagged migration is not applied until a maintainer lists it in `prisma/migrations/scan-approved.txt`.
+
+If `migrate dev` cannot create its shadow database, do not loosen permissions: use `diff-script <name>`. If it reports drift or asks to reset, stop and ask.
+
 ## Rules
 
 - Test data is fake. No real names, org ids, hostnames or customer data.
-- Database-changing commands run **only** against a local or CI throwaway container, **only** through `npm run test:db`. Never against a shared or production database.
+- Test-harness commands run **only** against a local or CI throwaway container, through `npm run test:db`. Migrations run only through the guarded `npm run migrate`, against the designated test database. Never against a shared or production database.
 - Do not build secret-looking fixtures as string literals (`password: "..."`): the secret scan has no allow-list. Build them at runtime or use an obviously fake value containing `example`.
 - Anything that depends on real SQL behaviour (NULLs, locks, constraints, concurrency) gets a test in `tests/db`.
 - Fix a bug by first writing the test that reproduces it.

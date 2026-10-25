@@ -42,7 +42,7 @@ Invoke-RestMethod http://localhost:4000/health
 ## Rules you must know
 
 - Use a **separate dev database**. Never point this project at production.
-- **Never run `prisma migrate dev`, `migrate deploy` or `db push`** in this repo. The schema is owned by the CargoDev repo. Database-changing commands are allowed only against the throwaway test container, and only through `npm run test:db`.
+- **Migrations only through `npm run migrate -- <command>`**, which is guarded and aims only at the designated test database (`docs/testing.md`, ADR 0004). Never run `prisma migrate` directly, and never `migrate reset`, `db push` or `--accept-data-loss`. Other environments are migrated by a maintainer.
 - Never commit `.env` or any real secret. See `SECURITY.md`.
 - Read `CLAUDE.md` (project rules) and `CONTRIBUTING.md` (workflow) before your first PR.
 

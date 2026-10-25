@@ -83,5 +83,5 @@ mutation (service)
 
 - Services are framework-free so they can be shared/ported and tested without HTTP.
 - `orgId` always comes from the token, so a client cannot choose another tenant.
-- The schema is owned by the CargoDev repo; this service stays schema-compatible and only runs `prisma generate`.
+- This repo owns the schema and `prisma/migrations/` (ADR 0004). Migrations are additive-first because the old Next.js app may still be using the same database, and they only ever run against the designated test database through a guard.
 - File URL generation is isolated behind one function so signed URLs can replace public ones later.

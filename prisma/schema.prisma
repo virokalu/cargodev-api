@@ -1,4 +1,4 @@
-// Owned by the CargoDev repo. Do not edit here.
+// Schema owned by this repo. Changes go through reviewed migrations.
 // CargoDev — Prisma Schema
 // Tasks: CD-D3-08 (Vehicle model), CD-D3-09 (lookup tables), CD-D3-10 (users, remarks, files, etc.)
 // Every table carries org_id. Every query MUST filter by org_id — this is the SaaS foundation.

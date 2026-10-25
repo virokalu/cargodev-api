@@ -446,9 +446,21 @@ describe("the daily job wrapper", () => {
     expect(order).toEqual([`run ${ORG_A}`, "other work", `run ${ORG_B}`]);
   });
 
-  // The per-org body owns idempotency (shipped transition + reminders de-duplicated per
-  // vehicle and event per day). It is not ported yet, so this cannot be proven here.
-  it.todo("running the real daily checks twice in one day creates no duplicate StatusHistory or Notification rows");
+  // Idempotency of the real body is proved against Postgres in tests/db/daily-checks.db.test.ts.
+
+  it("an org whose checks reported errors counts as failed, but its successful counts are kept", async () => {
+    const reported: string[] = [];
+    const wrapped = createDailyChecksJob({
+      listOrgIds: async () => [ORG_A, ORG_B],
+      runForOrg: async (orgId) =>
+        orgId === ORG_A
+          ? { counts: { shipped: 1, reminders: 2 }, errors: ["lcReminders: boom"] }
+          : { counts: { shipped: 1, reminders: 1 }, errors: [] },
+      onOrgError: (orgId, error) => reported.push(`${orgId}: ${(error as Error).message}`),
+    });
+    expect(await wrapped.run()).toEqual({ orgs: 2, failedOrgs: 1, counts: { shipped: 2, reminders: 3 } });
+    expect(reported).toEqual([`${ORG_A}: lcReminders: boom`]);
+  });
 
   it("running the wrapper twice calls the body once per org per run (the body must be idempotent)", async () => {
     const calls: string[] = [];

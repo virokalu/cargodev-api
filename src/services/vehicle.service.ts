@@ -1,31 +1,41 @@
 // Vehicle service.
 //
-// Ported in three slices. THIS FILE CURRENTLY HOLDS SLICE 1 ONLY: the read paths
-// (list, detail, status history, distinct destinations/partner names, filter
-// options). Every query is scoped by orgId and excludes soft-deleted vehicles.
+// Vehicle reads (list, detail, status history, distinct destinations, filter options) and writes
+// (create, update, soft delete, quick edits, conversions, serial correction, the daily shipped
+// transition). Every query is scoped by orgId and excludes soft-deleted vehicles; every mutation
+// writes its ActivityLog row in the same transaction.
 //
-// Seams left for later slices (do not add logic for them here until then):
-//   Slice 2: createVehicle, updateVehicle, deleteVehicle, hasDuplicateChassisNo
-//   Slice 3: convert*/revert*, updateVehicleRowColourStatus,
-//            updateVehicleAuctionBillPaid, correctVehicleSerialNumber
-//   Later:   runDailyShipmentStatusTransitions (with reminder.service)
-//   File-related (file.service is not ported; needs the object-storage SDK):
-//            listVehicleFiles, getVehiclePdfImages, photo/document/auction-sheet
-//            mutations
+// Hardened versus the CargoDev source (see docs/security-model.md):
+//   - every lookup id is checked against the caller's org on create AND update
+//   - file URLs are accepted only from the caller's own org folder (lib/object-storage.ts)
+//   - a unique-constraint race on the serial becomes a CONFLICT, not a 500
+//   - the daily Shipped transition is one conditional update, so it can only happen once
+//
+// Files themselves (photos, documents, auction sheet) live in file.service.ts.
 
-import type { Prisma, SerialPrefix, ShipmentStatus, ShippingMethod } from "@prisma/client";
+import { Prisma, type SerialPrefix, type ShipmentStatus, type ShippingMethod, type Vehicle } from "@prisma/client";
 // The raw Vehicle.shipmentStatus column only ever holds the 3 Prisma-enum
 // values above. CANCELLED is a computed, FC-only, display-only status (see
 // lib/shipment-status.ts) — fields that hold an *effective* status use this
 // wider app-level type instead.
 import type { ShipmentStatus as EffectiveShipmentStatus } from "../lib/constants/shipment-status.js";
 import { SHIPMENT_STATUS_ORDER, SHIPMENT_STATUS_META } from "../lib/constants/shipment-status.js";
+import { DOCUMENT_TYPE_META } from "../lib/constants/document-type.js";
 import { SHIPPING_METHODS, TRI_STATE_VALUES, TWO_STATE_VALUES, SOLD_CURRENCIES } from "../lib/vehicle-list-url.js";
 import { getPrisma } from "../lib/prisma.js";
 import { ServiceError } from "../lib/errors.js";
+import type { SessionUser } from "../lib/session-user.js";
+import { safeError } from "../lib/redact.js";
+import { checkNewFileUrl, type FileKind } from "../lib/object-storage.js";
+import { vehicleCreateSchema, vehicleUpdateSchema, flattenFieldErrors } from "../validation/vehicle.schema.js";
+import { assignNextSerial, assignLegacySerial, correctSerialNumber } from "./serial.service.js";
+import * as activityLog from "./activity-log.service.js";
+import * as notificationService from "./notification.service.js";
 import { buildTrackWhere, computeEffectiveTrack, type TrackFilter } from "../lib/vehicle-track.js";
 import {
   computeEffectiveShipmentStatus,
+  computeShipmentStatusAfterEtdChange,
+  deriveShipmentStatusFromEtd,
   isCancelShipmentRowColour,
   todayAtMidnight,
   CANCEL_SHIPMENT_ROW_COLOUR_NAMES,
@@ -364,6 +374,1145 @@ export async function listVehicleStatusHistory(orgId: string, vehicleId: string)
     triggeredByName: row.triggeredBy ? (actorNameById.get(row.triggeredBy) ?? null) : null,
     createdAt: row.createdAt,
   }));
+}
+
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// Slices 2 and 3: create / update / delete, quick edits, conversions, serial correction.
+// Shared guards first.
+// ─────────────────────────────────────────────────────────────────────────
+
+type VehicleLookupFields = {
+  modelId?: string | null | undefined;
+  gradeId?: string | null | undefined;
+  auctionHallId?: string | null | undefined;
+  supplierId?: string | null | undefined;
+  transportById?: string | null | undefined;
+  vehicleLocationId?: string | null | undefined;
+  rowColourStatusId?: string | null | undefined;
+  inspectionCompanyId?: string | null | undefined;
+  inspectionById?: string | null | undefined;
+};
+
+/** Every lookup id on a vehicle must belong to the caller's org. One failure lists every bad field. */
+async function assertLookupIdsInOrg(orgId: string, input: VehicleLookupFields): Promise<void> {
+  const db = getPrisma();
+  const own = { org_id: orgId };
+  const checks: Array<[string, string | null | undefined, string, (id: string) => Promise<{ id: string } | null>]> = [
+    ["modelId", input.modelId, "Select a valid model.", (id) => db.vehicleModelRef.findFirst({ where: { id, ...own }, select: { id: true } })],
+    ["gradeId", input.gradeId, "Select a valid grade.", (id) => db.grade.findFirst({ where: { id, ...own }, select: { id: true } })],
+    ["auctionHallId", input.auctionHallId, "Select a valid auction hall.", (id) => db.auctionHall.findFirst({ where: { id, ...own }, select: { id: true } })],
+    ["supplierId", input.supplierId, "Select a valid supplier.", (id) => db.supplier.findFirst({ where: { id, ...own }, select: { id: true } })],
+    ["transportById", input.transportById, "Select a valid transport company.", (id) => db.transportCompany.findFirst({ where: { id, ...own }, select: { id: true } })],
+    ["vehicleLocationId", input.vehicleLocationId, "Select a valid vehicle location.", (id) => db.vehicleLocation.findFirst({ where: { id, ...own }, select: { id: true } })],
+    ["rowColourStatusId", input.rowColourStatusId, "Select a valid row colour.", (id) => db.rowColourStatus.findFirst({ where: { id, ...own }, select: { id: true } })],
+    ["inspectionCompanyId", input.inspectionCompanyId, "Select a valid inspection company.", (id) => db.inspectionCompany.findFirst({ where: { id, ...own }, select: { id: true } })],
+    ["inspectionById", input.inspectionById, "Select a valid inspector.", (id) => db.inspectionBy.findFirst({ where: { id, ...own }, select: { id: true } })],
+  ];
+
+  const pending = checks.filter(([, id]) => id);
+  const found = await Promise.all(pending.map(([, id, , find]) => find(id as string)));
+  const fieldErrors: Record<string, string> = {};
+  pending.forEach(([field, , message], i) => {
+    if (!found[i]) fieldErrors[field] = message;
+  });
+  if (Object.keys(fieldErrors).length > 0) {
+    throw new ServiceError("VALIDATION", "Please fix the highlighted fields.", fieldErrors);
+  }
+}
+
+/** Files attached while creating a vehicle must be uploads staged for THIS org. */
+function assertNewFileUrls(
+  orgId: string,
+  input: { auctionSheetUrl: string | null; photoUrls: string[]; documents: Array<{ url: string }> }
+): void {
+  const fieldErrors: Record<string, string> = {};
+  const check = (field: string, url: string, kind: FileKind) => {
+    const message = checkNewFileUrl(orgId, url, kind);
+    if (message) fieldErrors[field] = message;
+  };
+  if (input.auctionSheetUrl) check("auctionSheetUrl", input.auctionSheetUrl, "AUCTION_SHEET");
+  input.photoUrls.forEach((url, i) => check(`photoUrls.${i}`, url, "VEHICLE_PHOTO"));
+  input.documents.forEach((doc, i) => check(`documents.${i}.url`, doc.url, "VEHICLE_DOCUMENT"));
+  if (Object.keys(fieldErrors).length > 0) {
+    throw new ServiceError("VALIDATION", "One or more files are not valid uploads.", fieldErrors);
+  }
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+}
+
+/**
+ * Two people can pass the "does this serial exist?" check together; the (org_id, serial) unique
+ * constraint is what stops the second one. Turn that database error into the same CONFLICT field
+ * error the application check produces, instead of a 500.
+ */
+async function mapSerialConflict<T>(
+  track: SerialPrefix,
+  legacyNumber: number | null | undefined,
+  run: () => Promise<T>
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error;
+    if (legacyNumber != null) {
+      const message = `Serial ${track}${legacyNumber} already exists.`;
+      throw new ServiceError("CONFLICT", message, { legacySerialNumber: message });
+    }
+    throw new ServiceError("CONFLICT", "That serial number was just taken. Please try again.");
+  }
+}
+
+async function mapCorrectionConflict<T>(track: SerialPrefix, newNumber: number, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (!isUniqueViolation(error)) throw error;
+    const message = `Serial ${track}${newNumber} already exists.`;
+    throw new ServiceError("CONFLICT", message, { serialNumber: message });
+  }
+}
+
+type TxClient = Prisma.TransactionClient;
+
+/** No notification of any kind (event-driven or cron) fires for a vehicle
+ * whose row colour status is a cancel status — a fallen-through deal doesn't
+ * need staff chasing payment/transport/LC for it anymore. Checked against
+ * the vehicle's row colour *after* whatever mutation is in flight, so an
+ * edit that cancels the vehicle in the same request also suppresses that
+ * request's other notifications. */
+async function isCancelledRowColour(tx: TxClient, rowColourStatusId: string | null): Promise<boolean> {
+  if (!rowColourStatusId) return false;
+  const status = await tx.rowColourStatus.findUnique({ where: { id: rowColourStatusId }, select: { name: true } });
+  return isCancelShipmentRowColour(status?.name);
+}
+
+export async function createVehicle(user: SessionUser, rawInput: unknown): Promise<Vehicle> {
+  const parsed = vehicleCreateSchema.safeParse(rawInput);
+  if (!parsed.success) {
+    throw new ServiceError(
+      "VALIDATION",
+      "Please fix the highlighted fields.",
+      flattenFieldErrors(parsed.error)
+    );
+  }
+  const input = parsed.data;
+
+  if (input.isLegacyEntry && input.legacySerialNumber == null) {
+    throw new ServiceError("VALIDATION", "Legacy serial number is required.", {
+      legacySerialNumber: "Enter the legacy serial number",
+    });
+  }
+  const legacySerialNumber = input.legacySerialNumber;
+
+  // FL vehicles never carry shipping fields — strip regardless of what was
+  // posted (never trust the UI alone to have hidden them). Tech Doc §1 line 16.
+  const isFC = input.track === "FC";
+  const etd = isFC ? input.etd : null;
+  const eta = isFC ? input.eta : null;
+  const blNo = isFC ? input.blNo : null;
+  const vesselName = isFC ? input.vesselName : null;
+  const freightAgentId = isFC ? input.freightAgentId : null;
+  const shippingMethod = isFC ? (input.shippingMethod ?? null) : null;
+  // Packing agent, vanning date, and container number only ever apply to
+  // Container shipments — same strip-regardless-of-what-was-posted
+  // treatment as the fields above.
+  const packingAgentId = shippingMethod === "CONTAINER" ? input.packingAgentId : null;
+  const vanningDate = shippingMethod === "CONTAINER" ? input.vanningDate : null;
+  const containerNumber = shippingMethod === "CONTAINER" ? input.containerNumber : null;
+  const hasInspection = isFC ? input.hasInspection : false;
+  const inspectionDate = isFC ? input.inspectionDate : null;
+  const inspectionCompanyId = isFC ? input.inspectionCompanyId : null;
+  const inspectionById = isFC ? input.inspectionById : null;
+
+  // Freight agent capability re-check — server never trusts the client alone
+  // to have filtered the RORO/Container options (CLAUDE.md rule 4).
+  if (shippingMethod && freightAgentId) {
+    const agent = await getPrisma().freightAgent.findUnique({ where: { id: freightAgentId } });
+    if (!agent || agent.org_id !== user.orgId) {
+      throw new ServiceError("VALIDATION", "Selected freight agent not found.", {
+        freightAgentId: "Select a valid freight agent.",
+      });
+    }
+    const agentOffersMethod = shippingMethod === "RORO" ? agent.offersRoro : agent.offersContainer;
+    if (!agentOffersMethod) {
+      throw new ServiceError(
+        "VALIDATION",
+        `${agent.name} does not offer ${shippingMethod === "RORO" ? "RORO" : "Container"} shipping.`,
+        { shippingMethod: "This agent doesn't offer that method." }
+      );
+    }
+  }
+
+  // Packing agent is required for Container shipments — re-checked
+  // server-side same as everything else the client only enforces in the UI.
+  if (shippingMethod === "CONTAINER") {
+    if (!packingAgentId) {
+      throw new ServiceError("VALIDATION", "Packing agent is required for Container shipments.", {
+        packingAgentId: "Select a packing agent.",
+      });
+    }
+    const packingAgent = await getPrisma().packingAgent.findUnique({ where: { id: packingAgentId } });
+    if (!packingAgent || packingAgent.org_id !== user.orgId) {
+      throw new ServiceError("VALIDATION", "Selected packing agent not found.", {
+        packingAgentId: "Select a valid packing agent.",
+      });
+    }
+  }
+
+  // Customer must resolve to a CUSTOMER-type user — reject staff IDs even
+  // though the UI only ever lists customers (server refuses what the UI hides).
+  if (input.customerId) {
+    const customer = await getPrisma().user.findUnique({ where: { id: input.customerId } });
+    if (!customer || customer.org_id !== user.orgId || customer.userType !== "CUSTOMER") {
+      throw new ServiceError("VALIDATION", "Selected customer is not valid.", {
+        customerId: "Select a valid customer.",
+      });
+    }
+  }
+
+  // Every lookup id must belong to THIS org. The source only checked freight agent, packing agent
+  // and customer, so a vehicle could point at another org's model, hall, supplier... and reading it
+  // back would join that org's data.
+  await assertLookupIdsInOrg(user.orgId, input);
+  // File URLs are stored and later fetched/deleted by the server: only our own org's uploads.
+  assertNewFileUrls(user.orgId, input);
+
+  const vehicle = await mapSerialConflict(input.track, input.isLegacyEntry ? legacySerialNumber : null, () =>
+    getPrisma().$transaction(async (tx) => {
+    const { serialNumber, serial } = input.isLegacyEntry
+      ? await assignLegacySerial(tx, user.orgId, input.track, legacySerialNumber!)
+      : await assignNextSerial(tx, user.orgId, input.track);
+
+    // Shipment status is derived, never set manually (Tech Doc §1) — with one
+    // documented exception: a legacy-serial FC record wasn't tracked through
+    // the real ETD flow, so staff pick the status it actually reached instead
+    // of every backfilled vehicle starting at a wrong "Pending". Everything
+    // else still starts derived: a new FC vehicle created with an ETD already
+    // filled in starts at Booking Received, not Pending — the rest of the
+    // automation (revert on clear, daily cron to Shipped, computed-guard-on-
+    // read) belongs to the separate shipment-status service that runs on
+    // *edits*, not creation.
+    const startsBookingReceived = isFC && etd !== null;
+    let legacyStatus = input.isLegacyEntry && isFC ? input.shipmentStatus : null;
+    // A legacy record can be hand-marked Pending or Booking Received even
+    // though an ETD was also entered that contradicts it (e.g. Booking
+    // Received picked but the ETD is already in the past — that vehicle
+    // has shipped, whatever was picked). Re-derive from the ETD instead of
+    // trusting a pick that doesn't match it, whenever an ETD is actually
+    // present — but never override an explicit Shipped, and never touch
+    // this when no ETD was entered at all (see deriveShipmentStatusFromEtd
+    // for why this can't just be fixed later).
+    if (legacyStatus && legacyStatus !== "SHIPPED" && etd !== null) {
+      legacyStatus = deriveShipmentStatusFromEtd(etd);
+    }
+    const initialStatus = legacyStatus ?? (startsBookingReceived ? "BOOKING_RECEIVED" : "PENDING");
+
+    const created = await tx.vehicle.create({
+      data: {
+        org_id: user.orgId,
+        serialPrefix: input.track,
+        serialNumber,
+        serial,
+        shipmentStatus: initialStatus,
+        // Create-only field, staged via the presigned-upload flow before the
+        // vehicle exists — see vehicle.schema.ts for why this isn't in
+        // vehicleSharedFields (edits go through the Files panel instead).
+        auctionSheetUrl: input.auctionSheetUrl,
+
+        auctionItemNo: input.auctionItemNo,
+        chassisNo: input.chassisNo,
+        modelId: input.modelId,
+        gradeId: input.gradeId,
+        yom: input.yom ?? null,
+        auctionHallId: input.auctionHallId,
+        supplierId: input.supplierId,
+        purchaseDate: input.purchaseDate,
+        auctionLotNo: input.auctionLotNo,
+        customerId: input.customerId,
+        destination: input.destination,
+        hasPartnership: input.hasPartnership,
+        partnerName: input.hasPartnership ? input.partnerName : null,
+
+        etd,
+        eta,
+        blNo,
+        vesselName,
+        freightAgentId,
+        shippingMethod,
+        packingAgentId,
+        vanningDate,
+        containerNumber,
+        hasInspection,
+        inspectionDate,
+        inspectionCompanyId,
+        inspectionById,
+
+        transportById: input.transportById,
+        vehicleLocationId: input.vehicleLocationId,
+        massoDate: input.massoDate,
+        trackingNumber: input.trackingNumber,
+        lcNo: input.lcNo,
+        docsArrivedDate: input.docsArrivedDate,
+
+        auctionBillPaid: input.auctionBillPaid,
+        logBook: input.logBook,
+        extraKey: input.extraKey,
+        nameChangeDeadline: input.nameChangeDeadline,
+        rowColourStatusId: input.rowColourStatusId,
+        docSentDate: input.docSentDate,
+        docSentComment: input.docSentComment,
+        recycleDate: input.recycleDate,
+        jibaishake: input.jibaishake,
+        vehicleRemark: input.vehicleRemark,
+
+        deliveryDate: input.deliveryDate,
+        paidByCustomer: input.paidByCustomer,
+        sellingPrice: input.sellingPrice,
+        sellingPriceCurrency: input.sellingPrice !== null ? (input.sellingPriceCurrency ?? "JPY") : null,
+      },
+    });
+
+    // Admin/Manager, minus the person doing the creating — resolved once and
+    // reused for every notification kind below (same recipients either way).
+    const recipientUserIds = await notificationService.listNotifiableStaffIds(tx, user.orgId, user.id);
+    // A vehicle can in principle be created already cancelled (row colour set
+    // at creation time) — nothing about its creation needs chasing then.
+    const cancelled = await isCancelledRowColour(tx, input.rowColourStatusId);
+    let bookingReceivedNotification: notificationService.EmitParams | null = null;
+    let documentUploadedNotification: notificationService.EmitParams | null = null;
+    let vehiclePurchasedNotification: notificationService.EmitParams | null = null;
+    let auctionBillPaidNotification: notificationService.EmitParams | null = null;
+
+    if (legacyStatus && legacyStatus !== "PENDING") {
+      await tx.statusHistory.create({
+        data: {
+          vehicleId: created.id,
+          fromStatus: null,
+          toStatus: legacyStatus,
+          trigger: "LEGACY_ENTRY",
+          triggeredBy: user.id,
+        },
+      });
+    } else if (!legacyStatus && startsBookingReceived) {
+      await tx.statusHistory.create({
+        data: {
+          vehicleId: created.id,
+          fromStatus: null,
+          toStatus: "BOOKING_RECEIVED",
+          trigger: "ETD_SAVED",
+          triggeredBy: user.id,
+        },
+      });
+      if (!cancelled) {
+        bookingReceivedNotification = {
+          orgId: user.orgId,
+          event: "BOOKING_RECEIVED",
+          title: "Booking Received",
+          body: `${serial} moved to Booking Received (ETD ${etd!.toISOString().slice(0, 10)}).`,
+          vehicleId: created.id,
+          recipientUserIds,
+        };
+        await notificationService.emit(tx, bookingReceivedNotification);
+      }
+    }
+
+    if (input.purchaseDate !== null && !cancelled) {
+      vehiclePurchasedNotification = {
+        orgId: user.orgId,
+        event: "VEHICLE_PURCHASED",
+        title: "Vehicle Purchased",
+        body: `${serial} was purchased on ${input.purchaseDate.toISOString().slice(0, 10)}.`,
+        vehicleId: created.id,
+        recipientUserIds,
+      };
+      await notificationService.emit(tx, vehiclePurchasedNotification);
+    }
+
+    if (input.auctionBillPaid === true && !cancelled) {
+      auctionBillPaidNotification = {
+        orgId: user.orgId,
+        event: "AUCTION_BILL_PAID",
+        title: "Auction Bill Paid",
+        body: `${serial}'s auction bill has been paid.`,
+        vehicleId: created.id,
+        recipientUserIds,
+      };
+      await notificationService.emit(tx, auctionBillPaidNotification);
+    }
+
+    // Photos/Documents staged via the presigned-upload flow before the
+    // vehicle existed (like auctionSheetUrl above) — attach them now that
+    // created.id exists, still inside this transaction. Logged with the same
+    // action names file.service.ts uses for the post-creation path, so the
+    // audit trail reads the same either way.
+    let attachedFileCount = 0;
+    for (const url of input.photoUrls) {
+      const photo = await tx.vehiclePhoto.create({ data: { vehicleId: created.id, url, uploadedById: user.id } });
+      attachedFileCount += 1;
+      await activityLog.record(tx, {
+        orgId: user.orgId,
+        actorId: user.id,
+        action: "ADD_VEHICLE_PHOTO",
+        entity: "VehiclePhoto",
+        entityId: photo.id,
+        after: { url },
+      });
+    }
+    for (const document of input.documents) {
+      const createdDocument = await tx.vehicleDocument.create({
+        data: {
+          vehicleId: created.id,
+          url: document.url,
+          name: document.name,
+          documentType: document.documentType,
+          uploadedById: user.id,
+        },
+      });
+      attachedFileCount += 1;
+      await activityLog.record(tx, {
+        orgId: user.orgId,
+        actorId: user.id,
+        action: "ADD_VEHICLE_DOCUMENT",
+        entity: "VehicleDocument",
+        entityId: createdDocument.id,
+        after: { url: document.url, name: document.name, documentType: document.documentType },
+      });
+    }
+
+    // One combined notification for the whole creation, not one per file —
+    // a 5-photo staged upload shouldn't burst 5 separate bell entries. Names
+    // each document's type (same DOCUMENT_TYPE_META labels file.service.ts's
+    // addVehicleDocument notification uses) instead of just a bare file
+    // count, so "what got uploaded" is visible without opening the vehicle.
+    if (attachedFileCount > 0) {
+      const parts: string[] = [];
+      if (input.photoUrls.length > 0) {
+        parts.push(`${input.photoUrls.length} ${input.photoUrls.length === 1 ? "photo" : "photos"}`);
+      }
+      parts.push(...input.documents.map((document) => DOCUMENT_TYPE_META[document.documentType].label));
+      documentUploadedNotification = {
+        orgId: user.orgId,
+        event: "DOCUMENT_UPLOADED",
+        title: "Files attached",
+        body: `${user.name} attached ${parts.join(", ")} to ${serial}.`,
+        vehicleId: created.id,
+        recipientUserIds,
+      };
+      await notificationService.emit(tx, documentUploadedNotification);
+    }
+
+    await activityLog.record(tx, {
+      orgId: user.orgId,
+      actorId: user.id,
+      action: "CREATE_VEHICLE",
+      entity: "Vehicle",
+      entityId: created.id,
+      // Snapshot through JSON to turn Date objects into plain ISO strings —
+      // the ActivityLog.after column is Json, not a live Prisma model.
+      after: JSON.parse(JSON.stringify(created)),
+    });
+
+    return {
+      created,
+      bookingReceivedNotification,
+      documentUploadedNotification,
+      vehiclePurchasedNotification,
+      auctionBillPaidNotification,
+    };
+  }));
+
+  // Real-time delivery (event bus + Expo push) happens after the transaction has committed:
+  // it is best effort and has no place inside a database transaction (see notifyRealtime).
+  if (vehicle.bookingReceivedNotification) notificationService.notifyRealtime(vehicle.bookingReceivedNotification);
+  if (vehicle.documentUploadedNotification) notificationService.notifyRealtime(vehicle.documentUploadedNotification);
+  if (vehicle.vehiclePurchasedNotification) notificationService.notifyRealtime(vehicle.vehiclePurchasedNotification);
+  if (vehicle.auctionBillPaidNotification) notificationService.notifyRealtime(vehicle.auctionBillPaidNotification);
+
+  return vehicle.created;
+}
+
+/** Soft-warn only — legacy data may have real duplicate chassis numbers, so
+ * this never blocks a save (Tech Doc §2, field 3). */
+export async function hasDuplicateChassisNo(
+  orgId: string,
+  chassisNo: string,
+  excludeId?: string
+): Promise<boolean> {
+  const trimmed = chassisNo.trim();
+  if (!trimmed) return false;
+  const count = await getPrisma().vehicle.count({
+    where: {
+      org_id: orgId,
+      deletedAt: null,
+      chassisNo: { equals: trimmed, mode: "insensitive" },
+      // Editing a vehicle without touching its chassis number shouldn't flag
+      // it as a duplicate of itself.
+      ...(excludeId ? { id: { not: excludeId } } : {}),
+    },
+  });
+  return count > 0;
+}
+
+
+async function assertVehicleInOrg(orgId: string, id: string) {
+  // One query that filters by org (CLAUDE.md rule 1). A soft-deleted vehicle is NOT_FOUND for every
+  // write path, the same as one that never existed or belongs to another org (rules 2 and 10).
+  const existing = await getPrisma().vehicle.findFirst({ where: { id, org_id: orgId, deletedAt: null } });
+  if (!existing) {
+    throw new ServiceError("NOT_FOUND", "Vehicle not found.");
+  }
+  return existing;
+}
+
+export async function updateVehicle(user: SessionUser, id: string, rawInput: unknown): Promise<Vehicle> {
+  const existing = await assertVehicleInOrg(user.orgId, id);
+
+  const parsed = vehicleUpdateSchema.safeParse(rawInput);
+  if (!parsed.success) {
+    throw new ServiceError(
+      "VALIDATION",
+      "Please fix the highlighted fields.",
+      flattenFieldErrors(parsed.error)
+    );
+  }
+  const input = parsed.data;
+
+  // Track is fixed at creation — driven by the existing row, never the
+  // client, same as createVehicle strips FL shipping fields regardless of
+  // what's posted. Uses the effective track (lib/vehicle-track.ts), not the
+  // raw serialPrefix, so a vehicle converted to export stops having its
+  // shipping fields stripped from the moment it's converted.
+  const isFC =
+    computeEffectiveTrack(existing.serialPrefix, existing.convertedToExport, existing.convertedToLocal) === "FC";
+  const etd = isFC ? input.etd : null;
+  const eta = isFC ? input.eta : null;
+  const blNo = isFC ? input.blNo : null;
+  const vesselName = isFC ? input.vesselName : null;
+  const freightAgentId = isFC ? input.freightAgentId : null;
+  const shippingMethod = isFC ? (input.shippingMethod ?? null) : null;
+  const packingAgentId = shippingMethod === "CONTAINER" ? input.packingAgentId : null;
+  const vanningDate = shippingMethod === "CONTAINER" ? input.vanningDate : null;
+  const containerNumber = shippingMethod === "CONTAINER" ? input.containerNumber : null;
+  const hasInspection = isFC ? input.hasInspection : false;
+  const inspectionDate = isFC ? input.inspectionDate : null;
+  const inspectionCompanyId = isFC ? input.inspectionCompanyId : null;
+  const inspectionById = isFC ? input.inspectionById : null;
+
+  if (shippingMethod && freightAgentId) {
+    const agent = await getPrisma().freightAgent.findUnique({ where: { id: freightAgentId } });
+    if (!agent || agent.org_id !== user.orgId) {
+      throw new ServiceError("VALIDATION", "Selected freight agent not found.", {
+        freightAgentId: "Select a valid freight agent.",
+      });
+    }
+    const agentOffersMethod = shippingMethod === "RORO" ? agent.offersRoro : agent.offersContainer;
+    if (!agentOffersMethod) {
+      throw new ServiceError(
+        "VALIDATION",
+        `${agent.name} does not offer ${shippingMethod === "RORO" ? "RORO" : "Container"} shipping.`,
+        { shippingMethod: "This agent doesn't offer that method." }
+      );
+    }
+  }
+
+  if (shippingMethod === "CONTAINER") {
+    if (!packingAgentId) {
+      throw new ServiceError("VALIDATION", "Packing agent is required for Container shipments.", {
+        packingAgentId: "Select a packing agent.",
+      });
+    }
+    const packingAgent = await getPrisma().packingAgent.findUnique({ where: { id: packingAgentId } });
+    if (!packingAgent || packingAgent.org_id !== user.orgId) {
+      throw new ServiceError("VALIDATION", "Selected packing agent not found.", {
+        packingAgentId: "Select a valid packing agent.",
+      });
+    }
+  }
+
+  if (input.customerId) {
+    const customer = await getPrisma().user.findUnique({ where: { id: input.customerId } });
+    if (!customer || customer.org_id !== user.orgId || customer.userType !== "CUSTOMER") {
+      throw new ServiceError("VALIDATION", "Selected customer is not valid.", {
+        customerId: "Select a valid customer.",
+      });
+    }
+  }
+
+  await assertLookupIdsInOrg(user.orgId, input);
+
+  // ETD-driven status transition (Tech Doc §1) lives here by design — the
+  // manual legacy-entry override only ever applies at creation time
+  // (createVehicle above), never on a later edit.
+  let nextStatus = existing.shipmentStatus;
+  let statusTransition: { from: ShipmentStatus; to: ShipmentStatus; trigger: string } | null = null;
+
+  if (isFC) {
+    const hadEtd = existing.etd !== null;
+    const hasEtd = etd !== null;
+    nextStatus = computeShipmentStatusAfterEtdChange(existing.shipmentStatus, hadEtd, hasEtd);
+    if (nextStatus !== existing.shipmentStatus) {
+      statusTransition = {
+        from: existing.shipmentStatus,
+        to: nextStatus,
+        trigger: nextStatus === "PENDING" ? "ETD_CLEARED" : "ETD_SAVED",
+      };
+    }
+  }
+
+  // Most fields below are written unconditionally regardless of whether they
+  // actually changed (same as always) — these two are the exceptions that
+  // need an explicit before/after diff purely to decide whether to notify.
+  const purchaseDateChanged =
+    input.purchaseDate !== null &&
+    (existing.purchaseDate === null || existing.purchaseDate.getTime() !== input.purchaseDate.getTime());
+  const auctionBillNewlyPaid = input.auctionBillPaid === true && existing.auctionBillPaid !== true;
+
+  const updated = await getPrisma().$transaction(async (tx) => {
+    const result = await tx.vehicle.update({
+      where: { id },
+      data: {
+        auctionItemNo: input.auctionItemNo,
+        chassisNo: input.chassisNo,
+        modelId: input.modelId,
+        gradeId: input.gradeId,
+        yom: input.yom ?? null,
+        auctionHallId: input.auctionHallId,
+        supplierId: input.supplierId,
+        purchaseDate: input.purchaseDate,
+        auctionLotNo: input.auctionLotNo,
+        customerId: input.customerId,
+        destination: input.destination,
+        hasPartnership: input.hasPartnership,
+        partnerName: input.hasPartnership ? input.partnerName : null,
+
+        etd,
+        eta,
+        blNo,
+        vesselName,
+        freightAgentId,
+        shippingMethod,
+        packingAgentId,
+        vanningDate,
+        containerNumber,
+        hasInspection,
+        inspectionDate,
+        inspectionCompanyId,
+        inspectionById,
+
+        transportById: input.transportById,
+        vehicleLocationId: input.vehicleLocationId,
+        massoDate: input.massoDate,
+        trackingNumber: input.trackingNumber,
+        lcNo: input.lcNo,
+        docsArrivedDate: input.docsArrivedDate,
+
+        auctionBillPaid: input.auctionBillPaid,
+        logBook: input.logBook,
+        extraKey: input.extraKey,
+        nameChangeDeadline: input.nameChangeDeadline,
+        rowColourStatusId: input.rowColourStatusId,
+        docSentDate: input.docSentDate,
+        docSentComment: input.docSentComment,
+        recycleDate: input.recycleDate,
+        jibaishake: input.jibaishake,
+        vehicleRemark: input.vehicleRemark,
+
+        deliveryDate: input.deliveryDate,
+        paidByCustomer: input.paidByCustomer,
+        sellingPrice: input.sellingPrice,
+        sellingPriceCurrency: input.sellingPrice !== null ? (input.sellingPriceCurrency ?? "JPY") : null,
+
+        shipmentStatus: nextStatus,
+      },
+    });
+
+    let bookingReceivedNotification: notificationService.EmitParams | null = null;
+    let revertedToPendingNotification: notificationService.EmitParams | null = null;
+    let vehiclePurchasedNotification: notificationService.EmitParams | null = null;
+    let auctionBillPaidNotification: notificationService.EmitParams | null = null;
+
+    if (statusTransition) {
+      await tx.statusHistory.create({
+        data: {
+          vehicleId: id,
+          fromStatus: statusTransition.from,
+          toStatus: statusTransition.to,
+          trigger: statusTransition.trigger,
+          triggeredBy: user.id,
+        },
+      });
+    }
+
+    // Resolved once and reused below — every notification this update might
+    // fire shares the same recipients (CLAUDE.md: no notification of any
+    // kind fires for a vehicle the edit itself just cancelled).
+    const needsNotification =
+      statusTransition !== null || purchaseDateChanged || auctionBillNewlyPaid;
+    if (needsNotification) {
+      const cancelled = await isCancelledRowColour(tx, result.rowColourStatusId);
+      if (!cancelled) {
+        const recipientUserIds = await notificationService.listNotifiableStaffIds(tx, user.orgId, user.id);
+
+        if (statusTransition?.trigger === "ETD_SAVED") {
+          bookingReceivedNotification = {
+            orgId: user.orgId,
+            event: "BOOKING_RECEIVED",
+            title: "Booking Received",
+            body: `${existing.serial} moved to Booking Received (ETD ${etd!.toISOString().slice(0, 10)}).`,
+            vehicleId: id,
+            recipientUserIds,
+          };
+          await notificationService.emit(tx, bookingReceivedNotification);
+        } else if (statusTransition?.trigger === "ETD_CLEARED") {
+          revertedToPendingNotification = {
+            orgId: user.orgId,
+            event: "SHIPMENT_REVERTED_TO_PENDING",
+            title: "Reverted to Pending",
+            body: `${existing.serial} reverted to Pending (ETD cleared).`,
+            vehicleId: id,
+            recipientUserIds,
+          };
+          await notificationService.emit(tx, revertedToPendingNotification);
+        }
+
+        if (purchaseDateChanged) {
+          vehiclePurchasedNotification = {
+            orgId: user.orgId,
+            event: "VEHICLE_PURCHASED",
+            title: "Vehicle Purchased",
+            body: `${existing.serial} was purchased on ${input.purchaseDate!.toISOString().slice(0, 10)}.`,
+            vehicleId: id,
+            recipientUserIds,
+          };
+          await notificationService.emit(tx, vehiclePurchasedNotification);
+        }
+
+        if (auctionBillNewlyPaid) {
+          auctionBillPaidNotification = {
+            orgId: user.orgId,
+            event: "AUCTION_BILL_PAID",
+            title: "Auction Bill Paid",
+            body: `${existing.serial}'s auction bill has been paid.`,
+            vehicleId: id,
+            recipientUserIds,
+          };
+          await notificationService.emit(tx, auctionBillPaidNotification);
+        }
+      }
+    }
+
+    await activityLog.record(tx, {
+      orgId: user.orgId,
+      actorId: user.id,
+      action: "UPDATE_VEHICLE",
+      entity: "Vehicle",
+      entityId: id,
+      before: JSON.parse(JSON.stringify(existing)),
+      after: JSON.parse(JSON.stringify(result)),
+    });
+
+    return {
+      result,
+      bookingReceivedNotification,
+      revertedToPendingNotification,
+      vehiclePurchasedNotification,
+      auctionBillPaidNotification,
+    };
+  });
+
+  if (updated.bookingReceivedNotification) notificationService.notifyRealtime(updated.bookingReceivedNotification);
+  if (updated.revertedToPendingNotification) notificationService.notifyRealtime(updated.revertedToPendingNotification);
+  if (updated.vehiclePurchasedNotification) notificationService.notifyRealtime(updated.vehiclePurchasedNotification);
+  if (updated.auctionBillPaidNotification) notificationService.notifyRealtime(updated.auctionBillPaidNotification);
+
+  return updated.result;
+}
+
+/** Soft delete — sets deletedAt instead of removing the row, so the serial
+ * number is never reissued and the record stays recoverable. Every read
+ * path (table, edit, chassis-dup check) filters deletedAt out, so a
+ * soft-deleted vehicle behaves like it's gone everywhere it's used. */
+export async function deleteVehicle(orgId: string, actorId: string, id: string): Promise<void> {
+  const existing = await assertVehicleInOrg(orgId, id);
+
+  await getPrisma().$transaction(async (tx) => {
+    const deleted = await tx.vehicle.update({ where: { id }, data: { deletedAt: new Date() } });
+    await activityLog.record(tx, {
+      orgId,
+      actorId,
+      action: "DELETE_VEHICLE",
+      entity: "Vehicle",
+      entityId: id,
+      before: JSON.parse(JSON.stringify(existing)),
+      after: JSON.parse(JSON.stringify(deleted)),
+    });
+  });
+}
+
+/** Quick inline-edit from the vehicle table — same validation/audit
+ * guarantees as the full edit form, just for this one field. */
+export async function updateVehicleRowColourStatus(
+  orgId: string,
+  actorId: string,
+  id: string,
+  rowColourStatusId: string | null
+): Promise<void> {
+  const existing = await assertVehicleInOrg(orgId, id);
+
+  if (rowColourStatusId) {
+    const status = await getPrisma().rowColourStatus.findUnique({ where: { id: rowColourStatusId } });
+    if (!status || status.org_id !== orgId) {
+      throw new ServiceError("VALIDATION", "Row colour status not found.");
+    }
+  }
+
+  await getPrisma().$transaction(async (tx) => {
+    await tx.vehicle.update({ where: { id }, data: { rowColourStatusId } });
+    await activityLog.record(tx, {
+      orgId,
+      actorId,
+      action: "UPDATE_VEHICLE_ROW_COLOUR",
+      entity: "Vehicle",
+      entityId: id,
+      before: { rowColourStatusId: existing.rowColourStatusId },
+      after: { rowColourStatusId },
+    });
+  });
+}
+
+/** Quick inline-edit from the vehicle table — same validation/audit
+ * guarantees as the full edit form, just for this one field. `null` is a
+ * real, distinct value here (CLAUDE.md tri-state rule: "not entered yet"),
+ * never coerced to false. */
+export async function updateVehicleAuctionBillPaid(
+  orgId: string,
+  actorId: string,
+  id: string,
+  auctionBillPaid: boolean | null
+): Promise<void> {
+  const existing = await assertVehicleInOrg(orgId, id);
+  const auctionBillNewlyPaid = auctionBillPaid === true && existing.auctionBillPaid !== true;
+
+  const notification = await getPrisma().$transaction(async (tx) => {
+    await tx.vehicle.update({ where: { id }, data: { auctionBillPaid } });
+    await activityLog.record(tx, {
+      orgId,
+      actorId,
+      action: "UPDATE_VEHICLE_AUCTION_BILL_PAID",
+      entity: "Vehicle",
+      entityId: id,
+      before: { auctionBillPaid: existing.auctionBillPaid },
+      after: { auctionBillPaid },
+    });
+
+    if (!auctionBillNewlyPaid) return null;
+    // This quick-edit doesn't touch row colour, so "cancelled" is just
+    // whatever the vehicle's row colour already was.
+    if (await isCancelledRowColour(tx, existing.rowColourStatusId)) return null;
+
+    const recipientUserIds = await notificationService.listNotifiableStaffIds(tx, orgId, actorId);
+    const params: notificationService.EmitParams = {
+      orgId,
+      event: "AUCTION_BILL_PAID",
+      title: "Auction Bill Paid",
+      body: `${existing.serial}'s auction bill has been paid.`,
+      vehicleId: id,
+      recipientUserIds,
+    };
+    await notificationService.emit(tx, params);
+    return params;
+  });
+
+  if (notification) notificationService.notifyRealtime(notification);
+}
+
+/** An FL vehicle that ends up being exported instead of sold locally keeps
+ * its FL-prefixed serial forever (see lib/vehicle-track.ts's
+ * computeEffectiveTrack for why), but needs to behave as a full export
+ * vehicle from this point on. Reversible via revertVehicleToLocal below,
+ * for an accidental conversion. Destination is collected here (rather than
+ * left for staff to fill in later via the now-unlocked FC form) since it
+ * only becomes meaningful the moment the vehicle stops being sold locally.
+ * The StatusHistory row (fromStatus null, same as a fresh vehicle's very
+ * first row) marks the moment real shipment-status tracking begins for
+ * this vehicle, since FL vehicles never track it before this. */
+export async function convertVehicleToExport(
+  orgId: string,
+  actorId: string,
+  id: string,
+  destination: string
+): Promise<void> {
+  const existing = await assertVehicleInOrg(orgId, id);
+
+  if (existing.serialPrefix !== "FL") {
+    throw new ServiceError("VALIDATION", "Only local (FL) vehicles can be converted to export.");
+  }
+  if (existing.convertedToExport) {
+    throw new ServiceError("VALIDATION", "This vehicle has already been converted to export.");
+  }
+  if (!destination.trim()) {
+    throw new ServiceError("VALIDATION", "Destination is required to convert to export.");
+  }
+
+  await getPrisma().$transaction(async (tx) => {
+    await tx.vehicle.update({
+      where: { id },
+      data: { convertedToExport: true, convertedToExportAt: new Date(), destination },
+    });
+    await tx.statusHistory.create({
+      data: {
+        vehicleId: id,
+        fromStatus: null,
+        toStatus: "PENDING",
+        trigger: "CONVERTED_TO_EXPORT",
+        triggeredBy: actorId,
+      },
+    });
+    await activityLog.record(tx, {
+      orgId,
+      actorId,
+      action: "CONVERT_VEHICLE_TO_EXPORT",
+      entity: "Vehicle",
+      entityId: id,
+      before: { convertedToExport: false, destination: existing.destination },
+      after: { convertedToExport: true, destination },
+    });
+  });
+}
+
+/** Reverses convertVehicleToExport, by request — despite that function's own
+ * "one-way" docs, staff need to undo an accidental conversion. Deliberately
+ * only flips convertedToExport back to false: every FC-only field this
+ * vehicle picked up while converted (ETD/ETA/BL, shipment status,
+ * StatusHistory rows) is left exactly as-is in the DB. Nothing needs
+ * clearing because every FC/FL check in this file (and the form/detail
+ * view) reads computeEffectiveTrack(), which goes back to reading "FL" the
+ * instant this flag flips — so those fields simply stop being shown or
+ * tracked. Re-running convertVehicleToExport later picks up cleanly since
+ * nothing here was cleared, and the old StatusHistory rows stay as an
+ * audit trail of when it was previously tracked. */
+export async function revertVehicleToLocal(orgId: string, actorId: string, id: string): Promise<void> {
+  const existing = await assertVehicleInOrg(orgId, id);
+
+  if (existing.serialPrefix !== "FL") {
+    throw new ServiceError("VALIDATION", "Only local (FL) vehicles can be reverted to local.");
+  }
+  if (!existing.convertedToExport) {
+    throw new ServiceError("VALIDATION", "This vehicle hasn't been converted to export.");
+  }
+
+  await getPrisma().$transaction(async (tx) => {
+    await tx.vehicle.update({
+      where: { id },
+      data: { convertedToExport: false },
+    });
+    await activityLog.record(tx, {
+      orgId,
+      actorId,
+      action: "REVERT_VEHICLE_TO_LOCAL",
+      entity: "Vehicle",
+      entityId: id,
+      before: { convertedToExport: true },
+      after: { convertedToExport: false },
+    });
+  });
+}
+
+/** Mirror of convertVehicleToExport above — a native FC vehicle that ends
+ * up being sold locally instead of exported keeps its FC-prefixed serial
+ * forever, but needs to behave as a full local vehicle from this point on.
+ * Reversible via revertVehicleToExport below. Unlike convertVehicleToExport,
+ * no destination is collected (that's an FC-only concept) and no
+ * StatusHistory row is written: an FC-rooted vehicle already has real
+ * shipment-status history from before any conversion, so there's no
+ * "tracking begins" moment to mark — it just stops being read once
+ * computeEffectiveTrack starts returning "FL" for it. */
+export async function convertVehicleToLocal(orgId: string, actorId: string, id: string): Promise<void> {
+  const existing = await assertVehicleInOrg(orgId, id);
+
+  if (existing.serialPrefix !== "FC") {
+    throw new ServiceError("VALIDATION", "Only export (FC) vehicles can be converted to local.");
+  }
+  if (existing.convertedToLocal) {
+    throw new ServiceError("VALIDATION", "This vehicle has already been converted to local.");
+  }
+
+  await getPrisma().$transaction(async (tx) => {
+    await tx.vehicle.update({
+      where: { id },
+      data: { convertedToLocal: true, convertedToLocalAt: new Date() },
+    });
+    await activityLog.record(tx, {
+      orgId,
+      actorId,
+      action: "CONVERT_VEHICLE_TO_LOCAL",
+      entity: "Vehicle",
+      entityId: id,
+      before: { convertedToLocal: false },
+      after: { convertedToLocal: true },
+    });
+  });
+}
+
+/** Reverses convertVehicleToLocal, by request — same "undo an accidental
+ * conversion" reasoning as revertVehicleToLocal above. Deliberately only
+ * flips convertedToLocal back to false: nothing needs clearing, since every
+ * FC/FL check in this file (and the form/detail view) reads
+ * computeEffectiveTrack(), which goes back to reading "FC" the instant this
+ * flag flips. */
+export async function revertVehicleToExport(orgId: string, actorId: string, id: string): Promise<void> {
+  const existing = await assertVehicleInOrg(orgId, id);
+
+  if (existing.serialPrefix !== "FC") {
+    throw new ServiceError("VALIDATION", "Only export (FC) vehicles can be reverted to export.");
+  }
+  if (!existing.convertedToLocal) {
+    throw new ServiceError("VALIDATION", "This vehicle hasn't been converted to local.");
+  }
+
+  await getPrisma().$transaction(async (tx) => {
+    await tx.vehicle.update({
+      where: { id },
+      data: { convertedToLocal: false },
+    });
+    await activityLog.record(tx, {
+      orgId,
+      actorId,
+      action: "REVERT_VEHICLE_TO_EXPORT",
+      entity: "Vehicle",
+      entityId: id,
+      before: { convertedToLocal: true },
+      after: { convertedToLocal: false },
+    });
+  });
+}
+
+/**
+ * Corrects a typo in the numeric part of a serial shortly after creation —
+ * the one documented exception to "serial is read-only after creation"
+ * (Tech Doc §3). Restricted to Administrator (see actions.ts): unlike a
+ * normal field edit, this rewrites SerialCounter state and the unique
+ * org+serial key other tables may already reference by value (ActivityLog
+ * snapshots, generated PDFs) keep showing the old serial, which is
+ * correct for those as a historical record. The prefix/track never
+ * changes, only serialNumber and the derived serial string.
+ */
+export async function correctVehicleSerialNumber(
+  orgId: string,
+  actorId: string,
+  id: string,
+  newNumber: number
+): Promise<{ serial: string }> {
+  const existing = await assertVehicleInOrg(orgId, id);
+
+  if (!Number.isInteger(newNumber) || newNumber <= 0) {
+    throw new ServiceError("VALIDATION", "Serial number must be a positive whole number.");
+  }
+
+  const newSerial = `${existing.serialPrefix}${newNumber}`;
+  if (newSerial === existing.serial) {
+    throw new ServiceError("VALIDATION", "That's already this vehicle's serial number.");
+  }
+
+  return mapCorrectionConflict(existing.serialPrefix, newNumber, () => getPrisma().$transaction(async (tx) => {
+    const { serial } = await correctSerialNumber(tx, orgId, existing.serialPrefix, newNumber, id);
+
+    await tx.vehicle.update({
+      where: { id },
+      data: { serialNumber: newNumber, serial },
+    });
+
+    await activityLog.record(tx, {
+      orgId,
+      actorId,
+      action: "CORRECT_VEHICLE_SERIAL",
+      entity: "Vehicle",
+      entityId: id,
+      before: { serial: existing.serial },
+      after: { serial },
+    });
+
+    return { serial };
+  }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Daily shipment-status transition (Tech Doc §1: "daily Vercel Cron once
+// today > ETD") — called once a day from app/api/cron/daily-vehicle-checks
+// via lib/services/reminder.service.ts. Until this function existed,
+// "Shipped" was only ever a display-time guard (computeEffectiveShipment
+// Status), never actually written — this is the real transition.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Flips every FC vehicle (including an FL vehicle converted to export —
+ * lib/vehicle-track.ts) whose ETD has passed from Booking Received to
+ * Shipped for real, writes the StatusHistory row (trigger "CRON_JOB",
+ * triggeredBy null — no human actor, so this can't go through activityLog
+ * .record, which requires a real User; StatusHistory is the one audit trail
+ * already designed to hold system-triggered transitions), and notifies.
+ * Idempotent for free: once a vehicle is SHIPPED it no longer matches this
+ * query's shipmentStatus filter, so re-running the same day (or any day
+ * after) never reprocesses it. One vehicle failing doesn't stop the rest. */
+export async function runDailyShipmentStatusTransitions(orgId: string): Promise<number> {
+  const today = todayAtMidnight();
+  const candidates = await getPrisma().vehicle.findMany({
+    where: {
+      org_id: orgId,
+      deletedAt: null,
+      OR: [{ serialPrefix: "FC" }, { convertedToExport: true }],
+      convertedToLocal: false,
+      shipmentStatus: "BOOKING_RECEIVED",
+      etd: { lt: today },
+    },
+    select: { id: true, serial: true, etd: true, rowColourStatus: { select: { name: true } } },
+  });
+
+  let transitioned = 0;
+  for (const vehicle of candidates) {
+    if (isCancelShipmentRowColour(vehicle.rowColourStatus?.name)) continue;
+    try {
+      const notification = await getPrisma().$transaction(async (tx) => {
+        // Conditional on the status still being BOOKING_RECEIVED: if another run (or an edit) got
+        // here first, nothing is written, so the history row and the notification happen exactly once.
+        const flipped = await tx.vehicle.updateMany({
+          where: { id: vehicle.id, org_id: orgId, deletedAt: null, shipmentStatus: "BOOKING_RECEIVED" },
+          data: { shipmentStatus: "SHIPPED" },
+        });
+        if (flipped.count === 0) return null;
+        await tx.statusHistory.create({
+          data: {
+            vehicleId: vehicle.id,
+            fromStatus: "BOOKING_RECEIVED",
+            toStatus: "SHIPPED",
+            trigger: "CRON_JOB",
+            triggeredBy: null,
+          },
+        });
+        const recipientUserIds = await notificationService.listNotifiableStaffIds(tx, orgId);
+        const params: notificationService.EmitParams = {
+          orgId,
+          event: "SHIPPED",
+          title: "Shipped",
+          body: `${vehicle.serial} has been marked Shipped (ETD ${vehicle.etd!.toISOString().slice(0, 10)} has passed).`,
+          vehicleId: vehicle.id,
+          recipientUserIds,
+        };
+        await notificationService.emit(tx, params);
+        return params;
+      });
+      if (notification) {
+        notificationService.notifyRealtime(notification);
+        transitioned++;
+      }
+    } catch (error) {
+      console.error(`Shipped transition failed for vehicle ${vehicle.id}`, safeError(error));
+    }
+  }
+  return transitioned;
 }
 
 

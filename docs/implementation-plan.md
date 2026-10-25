@@ -94,7 +94,7 @@ Suggested REST shape. Keep service signatures unchanged.
 | Endpoint | Service | Roles |
 |---|---|---|
 | `POST /vehicles` | `createVehicle(user, body)` | ADMINISTRATOR, MANAGER |
-| `PATCH /vehicles/:id` | `updateVehicle(user, id, body)` | ADMINISTRATOR, MANAGER |
+| `PUT /vehicles/:id` (full replace, not a patch) | `updateVehicle(user, id, body)` | ADMINISTRATOR, MANAGER |
 | `DELETE /vehicles/:id` (soft) | `deleteVehicle` | ADMINISTRATOR, MANAGER |
 | `PATCH /vehicles/:id/row-colour` | `updateVehicleRowColourStatus` | ADMINISTRATOR, MANAGER, OPERATOR |
 | `PATCH /vehicles/:id/auction-bill-paid` (`true`, `false` or `null`) | `updateVehicleAuctionBillPaid` | ADMINISTRATOR, MANAGER, OPERATOR |

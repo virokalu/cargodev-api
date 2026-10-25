@@ -7,18 +7,23 @@
 // de-duplicated per vehicle and event per day. IT OWNS IDEMPOTENCY: running twice in a
 // day must create no duplicate StatusHistory or Notification rows.
 //
-// NOT WIRED YET: reminder.service and vehicle.service's runDailyShipmentStatusTransitions
-// are not ported (vehicle slices 2-3, then reminder). Until they are, no job is
-// registered (see ./index.ts), so nothing runs and the admin endpoint answers 404.
+// Wired in ./index.ts to reminder.service's runDailyVehicleChecks.
 
 import { getPrisma } from "../lib/prisma.js";
 import type { JobResult, ScheduledJob } from "./scheduler.js";
 
 export const DAILY_CHECKS_JOB = "daily-checks";
 
+/** Plain counts, or counts plus the errors of individual checks that failed (those orgs count as failed). */
+export type OrgRunResult = Record<string, number> | { counts: Record<string, number>; errors: string[] };
+
+function isDetailed(result: OrgRunResult): result is { counts: Record<string, number>; errors: string[] } {
+  return typeof (result as { counts?: unknown }).counts === "object";
+}
+
 export interface DailyChecksDeps {
   /** Runs the checks for one org and returns counts such as { shipped: 3, reminders: 7 }. */
-  runForOrg(orgId: string): Promise<Record<string, number>>;
+  runForOrg(orgId: string): Promise<OrgRunResult>;
   /** Defaults to every organization in the database. */
   listOrgIds?: () => Promise<string[]>;
   onOrgError?: (orgId: string, error: unknown) => void;
@@ -41,8 +46,14 @@ export function createDailyChecksJob(deps: DailyChecksDeps): ScheduledJob {
 
       for (const orgId of orgIds) {
         try {
-          const orgCounts = await deps.runForOrg(orgId);
+          const result = await deps.runForOrg(orgId);
+          const orgCounts = isDetailed(result) ? result.counts : result;
           for (const [key, value] of Object.entries(orgCounts)) counts[key] = (counts[key] ?? 0) + value;
+          // Some checks failed even though the org ran: report it, but keep what did succeed.
+          if (isDetailed(result) && result.errors.length > 0) {
+            failedOrgs += 1;
+            deps.onOrgError?.(orgId, new Error(result.errors.join("; ")));
+          }
         } catch (error) {
           // One org failing must not stop the others.
           failedOrgs += 1;

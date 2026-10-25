@@ -178,10 +178,3 @@ describe("GET /vehicles/filter-options and /destinations", () => {
   });
 });
 
-describe("files are a marked seam, not silently missing", () => {
-  it.each(["/api/v1/vehicles/FC101/files", "/api/v1/vehicles/FC101/pdf-images"])("%s is not routed yet (404 envelope)", async (url) => {
-    const res = await get(url);
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe("NOT_FOUND");
-  });
-});

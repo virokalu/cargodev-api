@@ -38,6 +38,7 @@ The daily job runs inside this server (default 02:00 UTC, `DAILY_JOB_UTC_HOUR`).
 4. Re-running is safe: the job de-duplicates per vehicle and event per day, and the call takes the same lock as the scheduled run.
 
 Notes:
+- Run the server with `TZ=UTC`. The checks compare dates at local midnight, so a different server timezone moves "today" and shifts the ETD and reminder day counts.
 - Only one process needs `SCHEDULER_ENABLED=true`. If several have it, the database lock still lets only one run at a time. Deploys briefly overlap, so two instances may both try; the second skips, or, if the first has already finished, does harmless idempotent work.
 - `SCHEDULER_ENABLED=false` stops an instance running scheduled jobs; the manual endpoint still works on it.
 - While the Next.js app still runs the same jobs, do not enable this scheduler (duplicate reminders). Turn the old one off first.

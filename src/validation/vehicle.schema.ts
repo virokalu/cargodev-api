@@ -394,3 +394,37 @@ export const vehicleListQuerySchema = z
   }));
 
 export type VehicleListQuery = z.infer<typeof vehicleListQuerySchema>;
+
+// ---------------------------------------------------------------------------
+// Small action bodies / queries for the vehicle write endpoints.
+// ---------------------------------------------------------------------------
+
+export const rowColourBodySchema = z.object({
+  rowColourStatusId: z.string("rowColourStatusId must be a string or null").min(1).nullable(),
+});
+
+// null is a real value ("not entered"), so the field must be present: omitting it is an error, not a null.
+export const auctionBillPaidBodySchema = z.object({
+  auctionBillPaid: z.boolean("auctionBillPaid must be true, false or null").nullable(),
+});
+
+export const convertToExportBodySchema = z.object({
+  destination: z.string("destination is required").trim().min(1, "destination is required").max(200),
+});
+
+export const serialCorrectionBodySchema = z.object({
+  serialNumber: z
+    .number("serialNumber must be a number")
+    .int("serialNumber must be a whole number")
+    .positive("serialNumber must be positive")
+    .max(999_999_999),
+});
+
+export const checkChassisQuerySchema = z.object({
+  chassisNo: z.string("chassisNo is required").trim().min(1, "chassisNo is required").max(100),
+  excludeId: z.string().min(1).optional(),
+});
+
+export const nextSerialQuerySchema = z.object({
+  track: z.enum(["FC", "FL"], "track must be FC or FL"),
+});

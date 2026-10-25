@@ -133,6 +133,42 @@ All `any staff`. Every query is scoped to the token's org and excludes soft-dele
 
 `GET /vehicles` query: `page`, `pageSize` (max 100, default 50), `track` (FC default, FL, ALL), `q`, `status` (repeatable: PENDING, BOOKING_RECEIVED, SHIPPED, CANCELLED), `destination`, `partner`, `customer`, `rowColour`, `rowColourNot`, `brand`, `model`, `grade`, `hall`, `supplier`, `agent`, `packingAgent`, `location`, `transport`, `method` (RORO, CONTAINER), `billPaid`/`logBook`/`extraKey`/`paidByCustomer` (YES, NO, BLANK), `partnership`, `converted`, `convertedLocal` (YES, NO), `currency`, `etdFrom`/`etdTo`/`etaFrom`/`etaTo` (YYYY-MM-DD, inclusive), `sort`, `dir`. Tri-state values keep BLANK (not entered) distinct from NO (false). `sort=shipmentStatus` orders by the effective status.
 
+### Vehicles (write)
+
+Every write is scoped to the token's org by id; another org's, a deleted or an unknown id is 404. Each one writes an ActivityLog row in the same transaction.
+
+| Method | Path | Roles | Notes |
+|---|---|---|---|
+| POST | /api/v1/vehicles | ADMINISTRATOR, MANAGER | 201. Returns the vehicle. Serial is assigned by the server (legacy entry: `isLegacyEntry` + `legacySerialNumber`) |
+| PUT | /api/v1/vehicles/:id | ADMINISTRATOR, MANAGER | **Full replace**, not a patch: an omitted optional field is cleared. Serial and track cannot be changed here |
+| DELETE | /api/v1/vehicles/:id | ADMINISTRATOR, MANAGER | Soft delete |
+| PATCH | /api/v1/vehicles/:id/row-colour | ADMINISTRATOR, MANAGER, OPERATOR | `{ "rowColourStatusId": string \| null }` |
+| PATCH | /api/v1/vehicles/:id/auction-bill-paid | ADMINISTRATOR, MANAGER, OPERATOR | `{ "auctionBillPaid": true \| false \| null }`. The key is required; `null` means "not entered" |
+| POST | /api/v1/vehicles/:id/convert-to-export | ADMINISTRATOR, MANAGER | `{ "destination" }`. FL vehicles only |
+| POST | /api/v1/vehicles/:id/revert-to-local, /convert-to-local, /revert-to-export | ADMINISTRATOR, MANAGER | No body |
+| PATCH | /api/v1/vehicles/:id/serial | ADMINISTRATOR | `{ "serialNumber": positive integer }`. 409 `CONFLICT` if another vehicle has it |
+| GET | /api/v1/vehicles/check-chassis?chassisNo=&excludeId= | any staff | `{ duplicate }`. A warning only, never blocks a save |
+| GET | /api/v1/vehicles/next-serial?track=FC\|FL | any staff | `{ serial }`, a hint; the real number is assigned at save |
+
+Every id in a create or update body (model, grade, hall, supplier, customer, agents, locations, row colour, inspection) must belong to the caller's org, otherwise 400 with a field error. A 409 `CONFLICT` means the serial was taken by a concurrent save; retry.
+
+### Vehicle files
+
+File bytes never pass through this API; the database stores URLs. A URL is accepted only if it is under `R2_PUBLIC_URL` and inside the caller's own org folder: `org/<orgId>/uploads/staging/` when creating a vehicle, or `org/<orgId>/vehicles/<vehicleId>/{photos|documents|auction-sheet}/` for an existing one. Anything else is 400 with `fieldErrors.url`. When `R2_PUBLIC_URL` is not set, every file URL is refused.
+
+| Method | Path | Roles | Notes |
+|---|---|---|---|
+| GET | /api/v1/vehicles/:serial/files | any staff | Auction sheet, photos, documents |
+| GET | /api/v1/vehicles/:serial/pdf-images | any staff | Auction sheet and photos as data URLs for the PDF export. The server re-checks each stored URL, refuses redirects, caps size (15 MB) and time (10 s), and returns images only; a failed image is skipped |
+| POST | /api/v1/vehicles/:id/photos | ADMINISTRATOR, MANAGER, OPERATOR | `{ url }`, 201 |
+| POST | /api/v1/vehicles/:id/photos-added | ADMINISTRATOR, MANAGER, OPERATOR | `{ count }`. One notification for a batch of photos |
+| POST | /api/v1/vehicles/:id/documents | ADMINISTRATOR, MANAGER, OPERATOR | `{ url, name, documentType }`, 201 |
+| PUT | /api/v1/vehicles/:id/auction-sheet | ADMINISTRATOR, MANAGER, OPERATOR | `{ url }`. Replaces the sheet |
+| DELETE | /api/v1/vehicles/:id/photos/:photoId | ADMINISTRATOR, MANAGER | |
+| DELETE | /api/v1/vehicles/:id/documents/:docId | ADMINISTRATOR, MANAGER | |
+
+Deleting removes the database row. Removing the stored object needs the object-storage SDK and is not done yet; the object is left in place.
+
 ### Live notification stream
 
 `GET /api/v1/notifications/stream` (any staff role). Server-Sent Events: `Content-Type: text/event-stream`, `Cache-Control: no-store`.
@@ -150,19 +186,16 @@ All `any staff`. Every query is scoped to the token's org and excludes soft-dele
 
 | Method | Path | Roles | Status |
 |---|---|---|---|
-| POST | /api/v1/admin/jobs/daily-checks | ADMINISTRATOR | done (job body pending, see below) |
+| POST | /api/v1/admin/jobs/daily-checks | ADMINISTRATOR | done |
 
-Runs the daily job now, taking the same lock as the scheduled run. Idempotent: calling it twice, or while the scheduler runs it, creates no duplicates. Returns `{ data: { status, durationMs, result? } }` where `status` is `ran`, `skipped_overlap` (a run is in progress in this process), `skipped_locked` (another instance holds the lock) or `failed` (the detail is in the server log, never in the response). Every call is written to the activity log with who triggered it. Answers 404 until the daily checks are ported.
+Runs the daily job now, taking the same lock as the scheduled run. Idempotent: calling it twice, or while the scheduler runs it, creates no duplicates. Returns `{ data: { status, durationMs, result? } }` where `status` is `ran`, `skipped_overlap` (a run is in progress in this process), `skipped_locked` (another instance holds the lock) or `failed` (the detail is in the server log, never in the response). Every call is written to the activity log with who triggered it.
 
 ### Not built yet
 
 | Area | Why |
 |---|---|
-| Vehicle create, update, delete | Slice 2 of the `vehicle.service` port. |
-| Vehicle conversions, row colour, auction-bill-paid, serial correction | Slice 3 of the port. |
-| Vehicle files (`/vehicles/:serial/files`, `/pdf-images`) and uploads | `file.service` is not ported (needs an object-storage SDK). |
-| File presign | Needs an S3-compatible SDK. |
-| Daily job body (`runDailyVehicleChecks`) | Needs `reminder.service` and `vehicle.service`'s shipped-transition (later slices). The scheduler, lock and admin trigger are built and tested; no job is registered until then. |
+| File presign (`POST /uploads/presign`) and deleting stored objects | Needs an S3-compatible SDK, not added yet. Until then clients cannot upload through this API. |
+| Customer accounts and login | Out of scope (CLAUDE.md, ADR 0001). Customers exist only as records. |
 
 ## Known doc drift
 

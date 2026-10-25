@@ -18,7 +18,11 @@ export const VEHICLE_RELATIONS = {
     rowColourStatus: { model: "rowColourStatus", fk: "rowColourStatusId" },
     inspectionCompany: { model: "inspectionCompany", fk: "inspectionCompanyId" },
     inspectionBy: { model: "inspectionBy", fk: "inspectionById" },
+    photos: { model: "vehiclePhoto", fk: "vehicleId", many: true },
+    documents: { model: "vehicleDocument", fk: "vehicleId", many: true },
   },
+  vehiclePhoto: { uploadedBy: { model: "user", fk: "uploadedById" } },
+  vehicleDocument: { uploadedBy: { model: "user", fk: "uploadedById" } },
   vehicleModelRef: { brand: { model: "brand", fk: "brand_id" } },
   statusHistory: { vehicle: { model: "vehicle", fk: "vehicleId" } },
 } as const;

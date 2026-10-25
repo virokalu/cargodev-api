@@ -19,8 +19,10 @@ const OPERATORS = new Set([
 
 interface Relation {
   model: string;
-  /** Field on this row holding the related row's id. */
+  /** To-one: field on this row holding the related row's id. To-many: field on the child row holding THIS row's id. */
   fk: string;
+  /** A to-many relation (e.g. vehicle.photos). Only selectable, not usable in where/orderBy. */
+  many?: boolean;
 }
 
 /** Lets `where` and `orderBy` follow to-one relations (e.g. vehicle.model.brand_id). */
@@ -130,6 +132,18 @@ export interface RecordedCall {
   args: unknown;
 }
 
+/** Object.assign, plus Prisma's { increment } / { decrement } number operations. */
+function applyData(row: Row, data: Row): void {
+  for (const [key, value] of Object.entries(data)) {
+    if (isPlainObject(value) && ("increment" in value || "decrement" in value)) {
+      const current = Number(row[key] ?? 0);
+      row[key] = "increment" in value ? current + Number(value["increment"]) : current - Number(value["decrement"]);
+    } else {
+      row[key] = value;
+    }
+  }
+}
+
 export function createFakePrisma(options: FakePrismaOptions = {}) {
   const tables = new Map<string, Row[]>();
   const calls: RecordedCall[] = [];
@@ -155,6 +169,14 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
       } else if (isPlainObject(sel)) {
         const rel = options.relations?.[model]?.[field];
         if (!rel) throw new Error(`fake-prisma: no relation configured for ${model}.${field}`);
+        if (rel.many) {
+          const children = table(rel.model).filter((r) => r[rel.fk] === row["id"]);
+          // Newest first when the caller asks for createdAt ordering; otherwise insertion order.
+          const order = (sel as Row)["orderBy"] as Row | undefined;
+          const ordered = order?.["createdAt"] === "desc" ? [...children].reverse() : children;
+          out[field] = ordered.map((c) => project(rel.model, c, sel["select"] as Row | undefined));
+          continue;
+        }
         const related = table(rel.model).find((r) => r["id"] === row[rel.fk]);
         out[field] = related ? project(rel.model, related, sel["select"] as Row | undefined) : null;
       }
@@ -207,6 +229,12 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
         const row = sorted(model, find(args), args?.orderBy)[0];
         return row ? project(model, row, args?.select) : null;
       },
+      async findFirstOrThrow(args?: { where?: Where; select?: Row; orderBy?: unknown }) {
+        rec("findFirstOrThrow", args);
+        const row = sorted(model, find(args), args?.orderBy)[0];
+        if (!row) throw new Error(`No ${model} found`);
+        return project(model, row, args?.select);
+      },
       async findUnique(args: { where: Where; select?: Row }) {
         rec("findUnique", args);
         const row = find(args)[0];
@@ -245,10 +273,12 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
         rec("aggregate", args);
         return {};
       },
-      async create(args: { data: Row; select?: Row }) {
+      async create(args: { data: Row; select?: Row; include?: Row }) {
         rec("create", args);
         const row: Row = { id: `${model}_${++seq}`, createdAt: new Date(), ...args.data };
         table(model).push(row);
+        // `include` returns every column plus the named relations.
+        if (args.include && !args.select) return { ...row, ...project(model, row, args.include) };
         return project(model, row, args.select);
       },
       async createManyAndReturn(args: { data: Row[]; select?: Row }) {
@@ -274,13 +304,13 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
         rec("update", args);
         const row = find(args)[0];
         if (!row) throw new Error(`Record to update not found (${model}).`);
-        Object.assign(row, args.data);
+        applyData(row, args.data);
         return project(model, row, args.select);
       },
       async updateMany(args: { where?: Where; data: Row }) {
         rec("updateMany", args);
         const rows = find(args);
-        for (const r of rows) Object.assign(r, args.data);
+        for (const r of rows) applyData(r, args.data);
         return { count: rows.length };
       },
       async delete(args: { where: Where }) {

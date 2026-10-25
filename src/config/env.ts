@@ -24,6 +24,11 @@ const envSchema = z.object({
     .enum(["true", "false"], { error: "SCHEDULER_ENABLED must be true or false" })
     .default("true")
     .transform((value) => value === "true"),
+  // Public base URL that uploaded files are served from (for example https://files.example.test).
+  // Every file URL a client sends is checked against it AND against the caller's own org folder, so
+  // it must be set before files can be attached. Unset means "storage not configured": file URLs are
+  // refused (fail closed) rather than accepted unchecked.
+  R2_PUBLIC_URL: z.string().url().optional(),
   // Optional. Only raises Expo push rate limits; push works without it.
   EXPO_ACCESS_TOKEN: z.string().min(1).optional(),
   // Signs access tokens. Long and random, unique per environment.
@@ -39,7 +44,11 @@ let cached: Env | undefined;
 /** Parses process.env once. Throws listing the invalid variable names (never values). */
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   if (cached) return cached;
-  const parsed = envSchema.safeParse(source);
+  // A variable that is present but EMPTY (for example `EXPO_ACCESS_TOKEN=` copied from
+  // .env.example) means "not set". Without this an empty optional value fails validation, and an
+  // empty required one would be accepted by a bare z.string(). Names only, never values, are reported.
+  const present = Object.fromEntries(Object.entries(source).filter(([, value]) => value !== undefined && value.trim() !== ""));
+  const parsed = envSchema.safeParse(present);
   if (!parsed.success) {
     const names = [...new Set(parsed.error.issues.map((issue) => issue.path.join(".")))];
     throw new Error(`Invalid environment variables: ${names.join(", ")}. See docs/env.md.`);

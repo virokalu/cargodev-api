@@ -184,10 +184,9 @@ describe("POST /admin/jobs/daily-checks: behaviour", () => {
     expect(fake.rows("activityLog")).toHaveLength(0);
   });
 
-  it("the production build registers no job yet (the daily checks body is not ported)", async () => {
+  it("the production build registers the daily checks job", async () => {
     app = await buildApp({ rateLimit: false });
-    expect(app.scheduler.has("daily-checks")).toBe(false);
-    expect((await post("ADMINISTRATOR")).statusCode).toBe(404);
+    expect(app.scheduler.has("daily-checks")).toBe(true);
   });
 });
 

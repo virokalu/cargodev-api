@@ -100,6 +100,8 @@ export interface ObjectStore {
   presignPut(args: { key: string; contentType: string; contentLength: number; expiresInSeconds: number }): Promise<string>;
   /** Reads one object. With `ifNoneMatch`, answers notModified when the ETag still matches (no body is read). */
   getObject(args: { key: string; ifNoneMatch?: string }): Promise<StoredObject>;
+  /** Writes one object (server side: thumbnails). */
+  putObject(args: { key: string; body: Buffer; contentType: string }): Promise<void>;
   deleteKey(key: string): Promise<void>;
 }
 
@@ -177,9 +179,14 @@ export function buildObjectKey(
   return `${folder}/${uniqueId}-${baseName(fileName)}.${EXTENSION_FOR_TYPE[contentType]}`;
 }
 
-/** Where the small version of a photo lives: next to the folder, never inside the one the client uploads to. */
+/**
+ * Where the small version of a photo lives: next to the folder, never inside the one the client uploads to. Photos of a
+ * vehicle (`.../photos/x`) and photos staged before the vehicle existed (`.../uploads/staging/x`) both have one.
+ */
 export function thumbKeyFor(key: string): string | null {
-  return key.includes("/photos/") ? key.replace("/photos/", "/photos-thumb/") : null;
+  if (key.includes("/photos/")) return key.replace("/photos/", "/photos-thumb/");
+  if (key.includes("/uploads/staging/")) return key.replace("/uploads/staging/", "/uploads/staging-thumb/");
+  return null;
 }
 
 export interface PresignedUpload {

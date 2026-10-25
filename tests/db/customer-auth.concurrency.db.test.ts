@@ -21,6 +21,7 @@ vi.mock("../../src/lib/email-queue.js", () => ({
 import { buildApp } from "../../src/app.js";
 import { identifierLimiter } from "../../src/lib/identifier-limiter.js";
 import { resetShadowLockouts } from "../../src/lib/shadow-lockout.js";
+import { registerCustomer, verifyEmail } from "../../src/services/customer-auth.service.js";
 
 const prisma = getTestPrisma();
 const ORG = "org_test_a";
@@ -50,10 +51,12 @@ describe("parallel one-time code checks", () => {
     await call("/auth/register", { name: "N", email: "burst@example.test" });
     const code = lastCode();
     const wrong = code === "000000" ? "111111" : "000000";
-    await Promise.all(Array.from({ length: 30 }, () => call("/auth/verify-email", { email: "burst@example.test", code: wrong, password: PASSWORD })));
+    // Straight to the service: the per-email rate limit (tested elsewhere) would otherwise answer most of these first,
+    // and this test is about the attempt counter in the database.
+    await Promise.allSettled(Array.from({ length: 30 }, () => verifyEmail({ email: "burst@example.test", code: wrong, password: PASSWORD })));
     const otp = await prisma.otpCode.findFirstOrThrow({ where: { org_id: ORG, usedAt: null } });
     expect(otp.attempts).toBe(5);
-    expect((await call("/auth/verify-email", { email: "burst@example.test", code, password: PASSWORD })).statusCode).toBe(400);
+    await expect(verifyEmail({ email: "burst@example.test", code, password: PASSWORD })).rejects.toMatchObject({ code: "VALIDATION" });
   });
 
   it("10 parallel submissions of the RIGHT code: exactly one succeeds", async () => {
@@ -83,8 +86,9 @@ describe("parallel session rotation", () => {
 
 describe("parallel registration", () => {
   it("10 parallel registrations of one new address: all answer 202, one row, one pending code", async () => {
-    const results = await Promise.all(Array.from({ length: 10 }, () => call("/auth/register", { name: "N", email: "race@example.test" })));
-    expect(results.every((r) => r.statusCode === 202)).toBe(true);
+    // Straight to the service, past the per-email rate limit: this is about the unique index.
+    const results = await Promise.allSettled(Array.from({ length: 10 }, () => registerCustomer({ name: "N", email: "race@example.test" })));
+    expect(results.every((r) => r.status === "fulfilled")).toBe(true);
     expect(await prisma.user.count({ where: { org_id: ORG, email: "race@example.test" } })).toBe(1);
     expect(await prisma.otpCode.count({ where: { org_id: ORG, usedAt: null } })).toBeGreaterThanOrEqual(1);
   });

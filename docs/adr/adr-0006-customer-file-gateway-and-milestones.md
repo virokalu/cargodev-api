@@ -28,8 +28,12 @@ can overlap. Existing files are stored as full public URLs (see Consequences).
    (`r2-object-store.ts`), so tests use a recorder and a later Cloudflare Worker gateway can replace the API proxy.
 6. **Options.** API proxy now. A Cloudflare Worker gateway later (same checks at the edge in front of a private bucket,
    bytes off the API) once traffic justifies it. Presigned GETs for customers were rejected: a link is a bearer secret.
-7. **Thumbnails.** `size=thumb` serves `photos-thumb/<same name>` when it exists and the full image otherwise. Generating the
-   small version at upload time needs an image library, which is not added until the maintainer approves one.
+7. **Thumbnails.** After a photo is added (or staged during vehicle creation) the API reads the original from R2, makes a small
+   version with `sharp` (approved, 0.35.5, Apache-2.0; its libvips binaries are LGPL-3.0 optional platform packages) and writes
+   it next to the photos folder (`photos-thumb/<same name>`, or `uploads/staging-thumb/` for staged photos). Uploaded bytes are
+   never trusted: the real format is read from the bytes and must be jpeg, png or webp (an SVG, GIF or anything else renamed to
+   .jpg is refused), the pixel count is capped before decoding (50 million), EXIF orientation is applied and then all metadata
+   (GPS, camera) is dropped. It is best effort: a photo without a thumbnail is served in full. The original is the "full" version.
 8. **Public stock images (slice 7)** go in a separate public bucket on a custom domain with long-cache headers and random ids;
    nothing private is ever put there. Behind `PUBLIC_STOCK_ENABLED`.
 9. **Milestones are add-only for automation, with one narrow removal rule.** One row per (vehicle, type), inserted with

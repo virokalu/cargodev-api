@@ -40,6 +40,7 @@ const recorder: ObjectStore = {
     if (args.ifNoneMatch && args.ifNoneMatch === etagOf(args.key)) return { kind: "notModified", etag: etagOf(args.key) };
     return { kind: "found", body: Readable.from([body]), contentLength: body.length, etag: etagOf(args.key) };
   },
+  putObject: async (args) => void objects.set(args.key, args.body),
   deleteKey: async (key) => void calls.del.push(key),
 };
 

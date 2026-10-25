@@ -23,6 +23,7 @@ import { parseInput } from "../lib/parse.js";
 import { documentBodySchema, fileUrlBodySchema, photosAddedBodySchema } from "../validation/file.schema.js";
 import * as activityLog from "./activity-log.service.js";
 import * as notificationService from "./notification.service.js";
+import { createPhotoThumbnail, deletePhotoThumbnail } from "./photo-thumbnail.service.js";
 
 /** The vehicle if it is in this org and not soft-deleted; otherwise the standard 404. */
 export async function getOwnedVehicle(orgId: string, vehicleId: string) {
@@ -242,6 +243,9 @@ export async function addVehiclePhoto(
     return created;
   });
 
+  // Best effort, after the commit: a missing thumbnail only means the photo is served in full.
+  await createPhotoThumbnail(actor.orgId, photo.url);
+
   return { id: photo.id, url: photo.url, uploaderName: photo.uploadedBy.name, createdAt: photo.createdAt };
 }
 
@@ -289,6 +293,7 @@ export async function deleteVehiclePhoto(actor: SessionUser, vehicleId: string, 
   });
 
   deleteStoredFile(actor.orgId, photo.url);
+  void deletePhotoThumbnail(actor.orgId, photo.url);
 }
 
 export async function addVehicleDocument(

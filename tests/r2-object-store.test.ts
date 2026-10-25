@@ -129,6 +129,13 @@ describe("reading and deleting (stubbed client)", () => {
     expect(await store.getObject({ key: KEY })).toEqual({ kind: "missing" });
   });
 
+  it("putObject writes exactly one key with its content type", async () => {
+    const send = vi.fn(async () => ({}));
+    await new R2ObjectStore(fakeClient(send as never), "example-bucket").putObject({ key: KEY, body: Buffer.from("x"), contentType: "image/jpeg" });
+    const command = (send.mock.calls[0] as unknown as [{ input: Record<string, unknown> }])[0];
+    expect(command.input).toMatchObject({ Bucket: "example-bucket", Key: KEY, ContentType: "image/jpeg" });
+  });
+
   it("deleteKey deletes exactly one key in the configured bucket", async () => {
     const send = vi.fn(async () => ({}));
     await new R2ObjectStore(fakeClient(send as never), "example-bucket").deleteKey(KEY);

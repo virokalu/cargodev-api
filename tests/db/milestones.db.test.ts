@@ -30,6 +30,7 @@ const gets: string[] = [];
 const store: ObjectStore = {
   presignPut: async () => "https://upload.example.test/x",
   getObject: async ({ key }) => (gets.push(key), { kind: "found", body: Readable.from([Buffer.from("bytes")]), contentLength: 5, etag: '"e"' }),
+  putObject: async () => undefined,
   deleteKey: async () => undefined,
 };
 

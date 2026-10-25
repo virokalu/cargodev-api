@@ -77,6 +77,10 @@ export class R2ObjectStore implements ObjectStore {
     }
   }
 
+  async putObject(args: { key: string; body: Buffer; contentType: string }): Promise<void> {
+    await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: args.key, Body: args.body, ContentType: args.contentType }));
+  }
+
   async deleteKey(key: string): Promise<void> {
     await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
   }

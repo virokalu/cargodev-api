@@ -88,7 +88,7 @@ If you see "The database test harness refused to run", read the message: it says
 
 ## Slice 2 tests
 
-- `tests/milestones.test.ts` (routes, automation, the removal rule branch by branch), `tests/storage-signing.test.ts` (presign, content types, and the customer file gateway against a recording store, including a scan of every customer response and log for storage details), `tests/r2-object-store.test.ts` (endpoint, checksum settings, signed headers; offline), `tests/milestone-backfill.test.ts`, `tests/photo-release-report.test.ts`, `tests/env-storage.test.ts`.
+- `tests/milestones.test.ts` (routes, automation, the removal rule branch by branch), `tests/storage-signing.test.ts` (presign, content types, and the customer file gateway against a recording store, including a scan of every customer response and log for storage details), `tests/r2-object-store.test.ts` (endpoint, checksum settings, signed headers; offline), `tests/milestone-backfill.test.ts`, `tests/photo-release-report.test.ts`, `tests/env-storage.test.ts`, `tests/thumbnail.test.ts` (sharp on hostile bytes, and the service).
 - `tests/db/milestones.db.test.ts` and `milestones.concurrency.db.test.ts`: unique index, rollback, defaults, visibility filters, and parallel writers (the concurrency file needs a real Postgres).
 - No test contacts a bucket: the store is a recorder.
 

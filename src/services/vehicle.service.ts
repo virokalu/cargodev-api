@@ -31,6 +31,7 @@ import { vehicleCreateSchema, vehicleUpdateSchema, flattenFieldErrors } from "..
 import { assignNextSerial, assignLegacySerial, correctSerialNumber } from "./serial.service.js";
 import * as activityLog from "./activity-log.service.js";
 import { recordStatusMilestone, syncMilestonesForStatusChange } from "./milestone.service.js";
+import { createPhotoThumbnail } from "./photo-thumbnail.service.js";
 import * as notificationService from "./notification.service.js";
 import { buildTrackWhere, computeEffectiveTrack, type TrackFilter } from "../lib/vehicle-track.js";
 import {
@@ -834,6 +835,9 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
   if (vehicle.documentUploadedNotification) notificationService.notifyRealtime(vehicle.documentUploadedNotification);
   if (vehicle.vehiclePurchasedNotification) notificationService.notifyRealtime(vehicle.vehiclePurchasedNotification);
   if (vehicle.auctionBillPaidNotification) notificationService.notifyRealtime(vehicle.auctionBillPaidNotification);
+
+  // Photos staged before the vehicle existed get their small version too (best effort, never fatal).
+  for (const url of input.photoUrls) await createPhotoThumbnail(user.orgId, url);
 
   return vehicle.created;
 }

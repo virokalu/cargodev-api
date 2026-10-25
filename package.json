@@ -10,6 +10,7 @@
     "test:db": "vitest run --config vitest.db.config.ts",
     "migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
     "backfill:milestones": "tsx --env-file-if-exists=.env scripts/backfill-milestones.ts",
+    "photos:release-report": "tsx --env-file-if-exists=.env scripts/photo-release-report.ts",
     "test:all": "npm test && npm run test:db",
     "db:test:up": "sh scripts/test-db.sh up",
     "db:test:down": "sh scripts/test-db.sh down",
@@ -19,6 +20,8 @@
   "keywords": [],
   "type": "module",
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1149.0",
+    "@aws-sdk/s3-request-presigner": "3.1149.0",
     "@fastify/cors": "^11.3.1",
     "@fastify/helmet": "^13.2.0",
     "@fastify/rate-limit": "^11.2.1",

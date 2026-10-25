@@ -30,7 +30,7 @@ import { checkNewFileUrl, type FileKind } from "../lib/object-storage.js";
 import { vehicleCreateSchema, vehicleUpdateSchema, flattenFieldErrors } from "../validation/vehicle.schema.js";
 import { assignNextSerial, assignLegacySerial, correctSerialNumber } from "./serial.service.js";
 import * as activityLog from "./activity-log.service.js";
-import { recordStatusMilestone } from "./milestone.service.js";
+import { recordStatusMilestone, syncMilestonesForStatusChange } from "./milestone.service.js";
 import * as notificationService from "./notification.service.js";
 import { buildTrackWhere, computeEffectiveTrack, type TrackFilter } from "../lib/vehicle-track.js";
 import {
@@ -698,7 +698,7 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
           triggeredBy: user.id,
         },
       });
-      await recordStatusMilestone(tx, { orgId: user.orgId, vehicleId: created.id, status: legacyStatus, occurredAt: legacyStatus === "SHIPPED" ? (etd ?? new Date()) : new Date(), recordedById: user.id });
+      await recordStatusMilestone(tx, { orgId: user.orgId, vehicleId: created.id, status: legacyStatus, occurredAt: legacyStatus === "SHIPPED" ? (etd ?? new Date()) : new Date(), recordedById: null });
     } else if (!legacyStatus && startsBookingReceived) {
       await tx.statusHistory.create({
         data: {
@@ -709,7 +709,7 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
           triggeredBy: user.id,
         },
       });
-      await recordStatusMilestone(tx, { orgId: user.orgId, vehicleId: created.id, status: "BOOKING_RECEIVED", occurredAt: new Date(), recordedById: user.id });
+      await recordStatusMilestone(tx, { orgId: user.orgId, vehicleId: created.id, status: "BOOKING_RECEIVED", occurredAt: new Date(), recordedById: null });
       if (!cancelled) {
         bookingReceivedNotification = {
           orgId: user.orgId,
@@ -950,31 +950,40 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
   // ETD-driven status transition (Tech Doc §1) lives here by design — the
   // manual legacy-entry override only ever applies at creation time
   // (createVehicle above), never on a later edit.
-  let nextStatus = existing.shipmentStatus;
-  let statusTransition: { from: ShipmentStatus; to: ShipmentStatus; trigger: string } | null = null;
-
-  if (isFC) {
-    const hadEtd = existing.etd !== null;
-    const hasEtd = etd !== null;
-    nextStatus = computeShipmentStatusAfterEtdChange(existing.shipmentStatus, hadEtd, hasEtd);
-    if (nextStatus !== existing.shipmentStatus) {
-      statusTransition = {
-        from: existing.shipmentStatus,
-        to: nextStatus,
-        trigger: nextStatus === "PENDING" ? "ETD_CLEARED" : "ETD_SAVED",
-      };
+  // What an edit does to the status and which notifications it earns depends on the row AS IT IS when the edit runs,
+  // so it is decided from a locked, fresh read inside the transaction (decide() below), not from the read above.
+  const decide = (current: typeof existing) => {
+    let nextStatus = current.shipmentStatus;
+    let statusTransition: { from: ShipmentStatus; to: ShipmentStatus; trigger: string } | null = null;
+    if (isFC) {
+      const hadEtd = current.etd !== null;
+      const hasEtd = etd !== null;
+      nextStatus = computeShipmentStatusAfterEtdChange(current.shipmentStatus, hadEtd, hasEtd);
+      if (nextStatus !== current.shipmentStatus) {
+        statusTransition = {
+          from: current.shipmentStatus,
+          to: nextStatus,
+          trigger: nextStatus === "PENDING" ? "ETD_CLEARED" : "ETD_SAVED",
+        };
+      }
     }
-  }
-
-  // Most fields below are written unconditionally regardless of whether they
-  // actually changed (same as always) — these two are the exceptions that
-  // need an explicit before/after diff purely to decide whether to notify.
-  const purchaseDateChanged =
-    input.purchaseDate !== null &&
-    (existing.purchaseDate === null || existing.purchaseDate.getTime() !== input.purchaseDate.getTime());
-  const auctionBillNewlyPaid = input.auctionBillPaid === true && existing.auctionBillPaid !== true;
+    // Most fields below are written unconditionally regardless of whether they actually changed (same as always) —
+    // these two are the exceptions that need an explicit before/after diff purely to decide whether to notify.
+    const purchaseDateChanged =
+      input.purchaseDate !== null &&
+      (current.purchaseDate === null || current.purchaseDate.getTime() !== input.purchaseDate.getTime());
+    const auctionBillNewlyPaid = input.auctionBillPaid === true && current.auctionBillPaid !== true;
+    return { nextStatus, statusTransition, purchaseDateChanged, auctionBillNewlyPaid };
+  };
 
   const updated = await getPrisma().$transaction(async (tx) => {
+    // One edit of a vehicle at a time. Without this lock, two edits that set and clear the ETD at the same moment
+    // both read the same old row and can leave the status and its milestones disagreeing.
+    await tx.$queryRaw`SELECT id FROM "Vehicle" WHERE id = ${id} AND org_id = ${user.orgId} FOR UPDATE`;
+    const existing = await tx.vehicle.findFirst({ where: { id, org_id: user.orgId, deletedAt: null } });
+    if (!existing) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
+    const { nextStatus, statusTransition, purchaseDateChanged, auctionBillNewlyPaid } = decide(existing);
+
     const result = await tx.vehicle.update({
       where: { id },
       data: {
@@ -1048,9 +1057,16 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
           triggeredBy: user.id,
         },
       });
-      // Add-only: entering BOOKING_RECEIVED or SHIPPED records its milestone once. Going back to PENDING (ETD cleared)
-      // deliberately removes nothing (the rule for that is waiting for the maintainer's decision).
-      await recordStatusMilestone(tx, { orgId: user.orgId, vehicleId: id, status: statusTransition.to, occurredAt: statusTransition.to === "SHIPPED" ? (etd ?? new Date()) : new Date(), recordedById: user.id });
+      // Keeps the automatic milestones in step, in this same transaction: up records, down removes only what the system
+      // recorded and nobody touched (see milestone.service).
+      await syncMilestonesForStatusChange(tx, {
+        orgId: user.orgId,
+        vehicleId: id,
+        from: statusTransition.from,
+        to: statusTransition.to,
+        occurredAt: statusTransition.to === "SHIPPED" ? (etd ?? new Date()) : new Date(),
+        actorId: user.id,
+      });
     }
 
     // Resolved once and reused below — every notification this update might

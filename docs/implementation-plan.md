@@ -22,7 +22,7 @@ existing system is a Next.js app whose business logic already lives in framework
 ## 2. Stack
 
 Node 20+ / TypeScript strict (no `any`), Fastify, Prisma 7 with `@prisma/adapter-pg`, zod 4,
-`jose` (JWT), `bcryptjs`, `expo-server-sdk` (mobile push), an S3-compatible object storage SDK (later), an in-process scheduler (no external cron). Vitest and supertest / `app.inject()` for
+`jose` (JWT), `bcryptjs`, `expo-server-sdk` (mobile push), the AWS SDK v3 client for Cloudflare R2 (`src/lib/r2-object-store.ts`), an in-process scheduler (no external cron). Vitest and supertest / `app.inject()` for
 tests. Layering: `routes/` (thin) -> `services/` (all logic) -> Prisma.
 
 ## 3. What to port vs. what to build new

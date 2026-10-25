@@ -30,6 +30,21 @@ Migrations are additive-first (ADR 0004) and run only through `npm run migrate -
 - Email is sent only if both `RESEND_API_KEY` and `EMAIL_FROM` are set. Keep them unset in development.
 - A customer locked out after 5 failed sign-ins waits 15 minutes; staff can clear it by resetting the customer's password through "forgot password".
 
+## Review photos before releasing a vehicle to its customer
+
+New photos are private. `npm run photos:release-report` is read only: it lists each vehicle that has photos with how many exist, how many are released and how many are hidden (serials and counts, never a URL). Staff review the photos in the app and release the reviewed ones with the staff endpoint (slice 4). It targets `MIGRATION_DATABASE_URL` only; compare the printed project ref with your private notes.
+
+## Object storage (Cloudflare R2)
+
+- The API reaches R2 at `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com` with the four `R2_*` credentials. Use an API token limited to the one bucket (object read, write, delete), not an account-wide key.
+- Staff uploads work by a presigned link, so the bucket needs a CORS rule allowing PUT with the `Content-Type` header from the app's origin.
+- Customer photos and documents are streamed by the API, so the API needs outbound access to R2 and the customer app never talks to R2.
+- Public stock images (slice 7) will use a separate public bucket and domain. Do not put private files there.
+
+## Personal data kept in the database: retention
+
+`Enquiry` (name, email, phone, message from the public website) and `Message` (customer chat) hold personal data. **There is no automatic deletion yet** (planned, after the retention periods are decided). Until then: decide the periods with the business (a common starting point is to delete handled enquiries after 12 months and chat after 24 months, or on a customer's account deletion request), record them in the privacy policy, and delete by hand when a person asks. Deleting a customer account already removes their personal data from `User` but leaves their `Message` rows; delete those too on request. Never copy these tables into logs, tickets or screenshots.
+
 ## Backfill milestones (once, after the slice 2 migration is applied)
 
 `npm run backfill:milestones` is a **dry run**: it prints the target, the project ref and counts, and writes nothing. It targets `MIGRATION_DATABASE_URL` only. Run it, compare the ref with your private notes, read the counts. `npm run backfill:milestones -- --apply` writes; run it only with the maintainer's approval for that run, after a snapshot. It is idempotent (existing milestones are skipped). It plans only milestones with a known date: BOUGHT from the purchase date, BOOKING_RECEIVED and SHIPPED from the first time the status was entered.

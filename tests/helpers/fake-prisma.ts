@@ -359,6 +359,10 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
       async $transaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T> {
         return fn(client);
       },
+      // Row locks (SELECT ... FOR UPDATE) have nothing to do in a single-threaded fake.
+      async $queryRaw() {
+        return [];
+      },
     } as Record<string | symbol, unknown>,
     {
       get(target, prop) {

@@ -26,7 +26,7 @@ This file is the contract. If a change breaks a rule here, change the rule in a 
 ## Response contract
 
 - Success: `{ "data": ... }`. Error: `{ "error": { "code", "message", "fieldErrors?" } }`.
-- Every response sends `Cache-Control: no-store`.
+- Every response sends `Cache-Control: no-store`, with two deliberate exceptions: the customer file endpoints (`private, max-age=<CUSTOMER_FILE_CACHE_SECONDS>`) and, in slice 7, the read endpoints under `/api/public`.
 - Never leak internal error messages. Unexpected errors log server side and return `INTERNAL`.
 
 ## Security rules
@@ -57,6 +57,8 @@ Customer accounts are a separate zone from staff, under `/api/customer/v1`.
 - Responses for register, login, verify, forgot and reset never reveal whether an email has an account (same shape, same timing).
 - Logs never contain passwords, one-time codes, tokens, message bodies or full email addresses.
 - Email goes only through `src/lib/email.ts` and is a no-op without `RESEND_API_KEY`.
+- Customers get photos and documents only through the API (`/photos/:id/image`, `/documents/:id/file`, by database id): the API checks, then reads from R2 and streams. A customer response, DTO, error or log never contains an R2 address, an object key or the account id. Presigned URLs exist only for staff uploads.
+- Only jpeg, png, webp and pdf are accepted, stored or served. Never svg, html or anything a browser could run.
 
 ## Out of scope for now
 

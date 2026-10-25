@@ -549,8 +549,9 @@ model VehiclePhoto {
   url               String // Cloudflare R2 URL (presigned for uploads, standard for reads)
   uploadedById      String
   createdAt         DateTime @default(now())
-  // Customer app: may the vehicle's customer see this photo? A column with a default is invisible to the old app.
-  visibleToCustomer Boolean  @default(true)
+  // Customer app: may the vehicle's customer see this photo? Off by default: staff release reviewed photos.
+  // A column with a default is invisible to the old app.
+  visibleToCustomer Boolean  @default(false)
 
   vehicle    Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
   uploadedBy User    @relation(fields: [uploadedById], references: [id])

@@ -243,7 +243,8 @@ describe("rate limits", () => {
     expect(CUSTOMER_RATE_LIMITS.verifyEmail.identifier).toEqual({ max: 10, windowMs: 600_000 });
     for (const [name, limit] of Object.entries(CUSTOMER_RATE_LIMITS)) {
       expect(limit.ip.max, name).toBeGreaterThan(0);
-      expect(limit.ip.max, name).toBeLessThanOrEqual(60);
+      // Sign-in style routes stay small; only the file gateway (many thumbnails per screen) is allowed more.
+      expect(limit.ip.max, name).toBeLessThanOrEqual(name === "fileDownload" ? 300 : 60);
     }
   });
 

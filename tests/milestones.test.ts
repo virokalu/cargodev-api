@@ -141,9 +141,9 @@ describe("automation records milestones, add-only, in the same transaction", () 
     fake.seed("user", { id: "user_a_manager", org_id: ORG_A, userType: "STAFF", role: "MANAGER", loginEnabled: false, name: "Test Manager A" });
   });
 
-  it("creating an FC vehicle with an ETD records BOOKING_RECEIVED once, by the creator", async () => {
+  it("creating an FC vehicle with an ETD records BOOKING_RECEIVED once, as a system milestone (no person attached)", async () => {
     const created = await createVehicle(actor(), { ...base, etd: "2031-01-01" });
-    expect(milestones(created.id)).toMatchObject([{ type: "BOOKING_RECEIVED", recordedById: "user_a_manager", org_id: ORG_A }]);
+    expect(milestones(created.id)).toMatchObject([{ type: "BOOKING_RECEIVED", recordedById: null, org_id: ORG_A }]);
   });
 
   it("creating a vehicle without an ETD records nothing", async () => {
@@ -159,15 +159,17 @@ describe("automation records milestones, add-only, in the same transaction", () 
     expect(milestones("v_fc_pending")).toHaveLength(1);
   });
 
-  it("CLEARING the ETD (back to pending) deletes NO milestone: nothing is removed automatically", async () => {
+  it("clearing the ETD (back to pending) removes the automatic BOOKING_RECEIVED nobody touched, and logs it; setting it again records it again", async () => {
     const edit = { chassisNo: "CHASSIS-AAA-1", brandId: "brand_a1", modelId: "model_a1" };
     await updateVehicle(actor(), "v_fc_pending", { ...edit, etd: "2031-01-01" });
     await updateVehicle(actor(), "v_fc_pending", edit);
     expect(fake.rows("vehicle").find((v) => v["id"] === "v_fc_pending")!["shipmentStatus"]).toBe("PENDING");
-    expect(milestones("v_fc_pending").map((m) => m["type"])).toEqual(["BOOKING_RECEIVED"]);
-    // ...and setting the ETD again does not duplicate it.
+    expect(milestones("v_fc_pending")).toHaveLength(0);
+    expect(fake.rows("activityLog").filter((l) => l["action"] === "AUTO_REMOVE_MILESTONE")).toMatchObject([
+      { entityId: "v_fc_pending", actorId: "user_a_manager", org_id: ORG_A, before: { type: "BOOKING_RECEIVED" } },
+    ]);
     await updateVehicle(actor(), "v_fc_pending", { ...edit, etd: "2031-03-01" });
-    expect(milestones("v_fc_pending")).toHaveLength(1);
+    expect(milestones("v_fc_pending").map((m) => m["type"])).toEqual(["BOOKING_RECEIVED"]);
   });
 
   it("the daily shipped transition records SHIPPED, dated by the ETD, with no person; running again adds nothing", async () => {
@@ -206,5 +208,91 @@ describe("recordMilestoneOnce", () => {
 
   it("undoMilestone on a missing milestone is NOT_FOUND", async () => {
     await expect(undoMilestone(actor(), "v_fc_pending", "ARRIVED")).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("the removal rule, branch by branch", () => {
+  const edit = { chassisNo: "CHASSIS-AAA-1", brandId: "brand_a1", modelId: "model_a1" };
+  const removalLogs = () => fake.rows("activityLog").filter((l) => l["action"] === "AUTO_REMOVE_MILESTONE");
+  const seedMilestone = (vehicleId: string, type: string, recordedById: string | null) =>
+    fake.seed("vehicleMilestone", { id: `m_${vehicleId}_${type}`, org_id: ORG_A, vehicleId, type, occurredAt: new Date("2026-05-01"), recordedById });
+  const types = (vehicleId: string) => milestones(vehicleId).map((m) => m["type"]).sort();
+
+  beforeEach(() => {
+    fake.seed("user", { id: "user_a_manager", org_id: ORG_A, userType: "STAFF", role: "MANAGER", loginEnabled: false, name: "Test Manager A" });
+  });
+
+  it("a milestone a staff member recorded is NEVER removed", async () => {
+    await updateVehicle(actor(), "v_fc_pending", { ...edit, etd: "2031-01-01" }); // system BOOKING_RECEIVED
+    await setMilestone(actor(), "v_fc_pending", "BOOKING_RECEIVED", { occurredAt: "2026-06-01" }); // a person takes it over
+    await updateVehicle(actor(), "v_fc_pending", edit); // ETD cleared
+    expect(types("v_fc_pending")).toEqual(["BOOKING_RECEIVED"]);
+    expect(milestones("v_fc_pending")[0]!["recordedById"]).toBe("user_a_manager");
+    expect(removalLogs()).toHaveLength(0);
+  });
+
+  it("a milestone recorded by staff before automation ran stays and automation does not overwrite it", async () => {
+    await setMilestone(actor(), "v_fc_pending", "BOOKING_RECEIVED", { occurredAt: "2026-06-01" });
+    await updateVehicle(actor(), "v_fc_pending", { ...edit, etd: "2031-01-01" });
+    await updateVehicle(actor(), "v_fc_pending", edit);
+    expect(milestones("v_fc_pending")).toHaveLength(1);
+    expect((milestones("v_fc_pending")[0]!["occurredAt"] as Date).toISOString()).toBe("2026-06-01T00:00:00.000Z");
+  });
+
+  it("reverting SHIPPED (ETD cleared) removes the untouched system SHIPPED and BOOKING_RECEIVED but LEAVES later milestones", async () => {
+    // FC104 is SHIPPED with an ETD.
+    seedMilestone("v_fc_shipped", "BOOKING_RECEIVED", null);
+    seedMilestone("v_fc_shipped", "SHIPPED", null);
+    seedMilestone("v_fc_shipped", "BL_ISSUED", "user_a_manager");
+    seedMilestone("v_fc_shipped", "ARRIVED", null);
+    seedMilestone("v_fc_shipped", "DELIVERED", "user_a_manager");
+    await updateVehicle(actor(), "v_fc_shipped", { ...edit, chassisNo: "CHASSIS-AAA-4" });
+    expect(fake.rows("vehicle").find((v) => v["id"] === "v_fc_shipped")!["shipmentStatus"]).toBe("PENDING");
+    expect(types("v_fc_shipped")).toEqual(["ARRIVED", "BL_ISSUED", "DELIVERED"]);
+    expect(removalLogs().map((l) => (l["before"] as { type: string }).type).sort()).toEqual(["BOOKING_RECEIVED", "SHIPPED"]);
+  });
+
+  it("reverting SHIPPED keeps a SHIPPED milestone a person recorded, and still removes the untouched BOOKING_RECEIVED", async () => {
+    seedMilestone("v_fc_shipped", "BOOKING_RECEIVED", null);
+    seedMilestone("v_fc_shipped", "SHIPPED", "user_a_manager");
+    await updateVehicle(actor(), "v_fc_shipped", { ...edit, chassisNo: "CHASSIS-AAA-4" });
+    expect(types("v_fc_shipped")).toEqual(["SHIPPED"]);
+    expect(removalLogs()).toHaveLength(1);
+  });
+
+  it("only the statuses actually LEFT are touched: leaving BOOKING_RECEIVED does not remove a SHIPPED milestone", async () => {
+    // FC102: BOOKING_RECEIVED with a future ETD. A stray automatic SHIPPED milestone (above the status being left) stays.
+    seedMilestone("v_fc_booked_future", "BOOKING_RECEIVED", null);
+    seedMilestone("v_fc_booked_future", "SHIPPED", null);
+    await updateVehicle(actor(), "v_fc_booked_future", { chassisNo: "CHASSIS-AAA-2", brandId: "brand_a1", modelId: "model_a2" });
+    expect(fake.rows("vehicle").find((v) => v["id"] === "v_fc_booked_future")!["shipmentStatus"]).toBe("PENDING");
+    expect(types("v_fc_booked_future")).toEqual(["SHIPPED"]);
+  });
+
+  it("an edit that does not change the status removes nothing, whatever the milestones are", async () => {
+    seedMilestone("v_fc_booked_future", "BOOKING_RECEIVED", null);
+    await updateVehicle(actor(), "v_fc_booked_future", { ...edit, chassisNo: "CHASSIS-AAA-2", etd: "2031-05-05" });
+    expect(types("v_fc_booked_future")).toEqual(["BOOKING_RECEIVED"]);
+    expect(removalLogs()).toHaveLength(0);
+  });
+
+  it("nothing is removed from another vehicle or another org", async () => {
+    await updateVehicle(actor(), "v_fc_pending", { ...edit, etd: "2031-01-01" });
+    seedMilestone("v_fc_booked_future", "BOOKING_RECEIVED", null);
+    fake.seed("vehicleMilestone", { id: "m_b", org_id: ORG_B, vehicleId: "v_b_fc", type: "BOOKING_RECEIVED", occurredAt: new Date(), recordedById: null });
+    await updateVehicle(actor(), "v_fc_pending", edit);
+    expect(milestones().map((m) => `${m["vehicleId"]}:${m["type"]}`).sort()).toEqual(["v_b_fc:BOOKING_RECEIVED", "v_fc_booked_future:BOOKING_RECEIVED"]);
+  });
+
+  it("an FL vehicle never goes through the ETD rule: its milestones are untouched by an edit", async () => {
+    seedMilestone("v_fl_native", "BOUGHT", null);
+    await updateVehicle(actor(), "v_fl_native", { chassisNo: "CHASSIS-LLL-1", brandId: "brand_a1", modelId: "model_a2" });
+    expect(types("v_fl_native")).toEqual(["BOUGHT"]);
+  });
+
+  it("the edit itself fails (and so removes nothing) for a vehicle of another org", async () => {
+    seedMilestone("v_fc_booked_future", "BOOKING_RECEIVED", null);
+    await expect(updateVehicle(actor({ orgId: ORG_B }), "v_fc_booked_future", edit)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(types("v_fc_booked_future")).toEqual(["BOOKING_RECEIVED"]);
   });
 });

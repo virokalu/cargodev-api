@@ -5,16 +5,16 @@ const base = {
   MOBILE_JWT_SECRET: "test-only-dummy-value-0123456789abcdef",
   ORG_ID: "org_test_a",
 };
-const r2 = { R2_ACCOUNT_ID: "acct-example", R2_ACCESS_KEY_ID: "key-example", R2_SECRET_ACCESS_KEY: "secret-example", R2_BUCKET_NAME: "bucket-example" };
+const r2 = { R2_ACCOUNT_ID: "0123456789abcdef0123456789abcdef", R2_ACCESS_KEY_ID: "key-example", R2_SECRET_ACCESS_KEY: "secret-example", R2_BUCKET_NAME: "bucket-example" };
 
 beforeEach(() => vi.resetModules());
 const load = async () => (await vi.importActual<typeof import("../src/config/env.js")>("../src/config/env.js")).loadEnv;
 
 describe("object storage environment", () => {
-  it("none of the R2 credentials is fine (storage simply off), and the signed-link lifetime defaults to 10 minutes", async () => {
+  it("none of the R2 credentials is fine (storage simply off), and customer files are cached privately for 5 minutes by default", async () => {
     const env = (await load())({ ...base });
     expect(env.R2_BUCKET_NAME).toBeUndefined();
-    expect(env.SIGNED_URL_TTL_SECONDS).toBe(600);
+    expect(env.CUSTOMER_FILE_CACHE_SECONDS).toBe(300);
   });
 
   it("all four is fine", async () => {
@@ -43,16 +43,36 @@ describe("object storage environment", () => {
   });
 
   it.each([
-    ["299", false],
+    ["-1", false],
+    ["0", true],
     ["300", true],
-    ["600", true],
-    ["900", true],
-    ["901", false],
+    ["86400", true],
+    ["86401", false],
     ["abc", false],
     ["1.5", false],
-  ])("SIGNED_URL_TTL_SECONDS=%s is accepted: %s", async (value, ok) => {
+  ])("CUSTOMER_FILE_CACHE_SECONDS=%s is accepted: %s", async (value, ok) => {
     const loadEnv = await load();
-    if (ok) expect(loadEnv({ ...base, SIGNED_URL_TTL_SECONDS: value }).SIGNED_URL_TTL_SECONDS).toBe(Number(value));
-    else expect(() => loadEnv({ ...base, SIGNED_URL_TTL_SECONDS: value })).toThrow(/SIGNED_URL_TTL_SECONDS/);
+    if (ok) expect(loadEnv({ ...base, CUSTOMER_FILE_CACHE_SECONDS: value }).CUSTOMER_FILE_CACHE_SECONDS).toBe(Number(value));
+    else expect(() => loadEnv({ ...base, CUSTOMER_FILE_CACHE_SECONDS: value })).toThrow(/CUSTOMER_FILE_CACHE_SECONDS/);
+  });
+
+  it.each(["acct-example", "0123456789abcdef0123456789abcde", "0123456789abcdef0123456789abcdef0", "0123456789abcdef0123456789abcdeg", "0123456789abcdef0123456789abcdef.evil.example"])(
+    "R2_ACCOUNT_ID must be the 32-character account id (rejects %j)",
+    async (id) => {
+      const loadEnv = await load();
+      expect(() => loadEnv({ ...base, ...r2, R2_ACCOUNT_ID: id })).toThrow(/R2_ACCOUNT_ID/);
+    }
+  );
+
+  it("the error names the variable and never prints its value", async () => {
+    const loadEnv = await load();
+    let message = "";
+    try {
+      loadEnv({ ...base, ...r2, R2_ACCOUNT_ID: "not-an-account-id" });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain("R2_ACCOUNT_ID");
+    expect(message).not.toContain("not-an-account-id");
   });
 });

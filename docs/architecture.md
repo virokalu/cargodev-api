@@ -79,12 +79,14 @@ mutation (service)
 | Scheduled job | Runs in-process | The advisory lock already stops two instances running it at once. Sequential reruns (a deploy overlap) are safe only because the job is idempotent. Set `SCHEDULER_ENABLED=false` on instances that should not try. |
 | Stream caps | Per instance | Per instance, so the effective cap multiplies by the instance count. |
 
-## Files, signed links and milestones (Phase 2, slice 2)
+## Files, the customer file gateway and milestones (Phase 2, slice 2)
 
-- **Store seam** (`src/lib/object-storage.ts`): one `ObjectStore` interface (`presignPut`, `presignGet`, `deleteKey`) installed at startup. Everything that signs goes through `presignUpload` and `signedDownloadUrl`, the only places that choose lifetimes (300 s for uploads, `SIGNED_URL_TTL_SECONDS` for downloads). The S3 implementation lives behind the interface; tests install a recorder.
-- **Authorise, then sign** (`customer-file-access.service.ts`): the customer must own an export-track vehicle that staff released, and the file itself must be released, before a link exists. Failure is a uniform 404.
-- **Milestones** (`milestone.service.ts`): `VehicleMilestone` has a unique key on (vehicle, type). Automation inserts with ON CONFLICT DO NOTHING inside the status-change transaction and never deletes.
-- **Public stock images** will live under a separate key prefix from private files (slice 7).
+- **Store seam** (`src/lib/object-storage.ts`): one `ObjectStore` interface (`presignPut`, `getObject`, `deleteKey`). The implementation is `src/lib/r2-object-store.ts`, installed at startup when the four R2 credentials are set; tests install a recorder. Cloudflare R2 is reached through its S3-compatible API, so it uses the AWS SDK for JavaScript v3 with the endpoint `https://<account id>.r2.cloudflarestorage.com`, region `auto` and both checksum settings `WHEN_REQUIRED`.
+- **Staff uploads** use a presigned PUT (300 s, exact size and content type, no checksum headers). The key is built by the server with the extension of the signed type. Staff downloads are unchanged: the stored public URL.
+- **Customer downloads go through the API (the gateway).** The customer app asks for `/photos/:id/image` or `/documents/:id/file`; the API authorises (own vehicle, same org, export track, released; file released), reads the object with its own R2 credentials and streams it with safe headers (`nosniff`, private caching, ETag/304, inline for images and attachment for documents). The client never sees an R2 address, a key or a link.
+- **Options considered.** (1) **API proxy, now:** simplest, one place for authorisation and logging, nothing private is exposed; costs API bandwidth and a connection per download. (2) **Cloudflare Worker gateway, later:** the same checks in front of a private bucket at the edge, with caching, offloading bytes from the API; it needs a signed token or a call back to the API for the decision and a separate deployment. (3) Presigned GET links for customers: rejected, because a link is a bearer secret that can be forwarded and cached. The API proxy is kept behind `openCustomerFile`, so a Worker can replace it without changing the authorisation rules.
+- **Public stock images (slice 7)** will live in a SEPARATE public bucket served on a custom domain with long-cache headers and random ids, with nothing private in it, behind `PUBLIC_STOCK_ENABLED`. They are never mixed with the private bucket.
+- **Milestones** (`milestone.service.ts`): a unique key on (vehicle, type); automation inserts with ON CONFLICT DO NOTHING inside the status-change transaction and, going down, removes only automatic milestones nobody touched (rule in ADR 0006).
 
 ## Planned: clean-up of expired rows (Phase 2, slice 5)
 
@@ -110,4 +112,4 @@ time whether or not mail is sent.
 - Services are framework-free so they can be shared/ported and tested without HTTP.
 - `orgId` always comes from the token, so a client cannot choose another tenant.
 - This repo owns the schema and `prisma/migrations/` (ADR 0004). Migrations are additive-first because the old Next.js app may still be using the same database. They run through `npm run migrate`, which prints and scans the SQL before applying.
-- File URL generation is isolated behind one function so signed URLs can replace public ones later.
+- Staff still read files through the stored public URLs. Customers never do: they go through the file gateway.

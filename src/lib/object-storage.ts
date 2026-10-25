@@ -82,15 +82,24 @@ export function checkNewFileUrl(orgId: string, url: string, kind: FileKind, vehi
 }
 
 // ---------------------------------------------------------------------------------------------
-// The store: signing and deleting. ONE interface; the S3 implementation (src/lib/s3-store.ts) is installed at
-// startup when the R2 credentials are set, and tests install a fake. Everything that signs a URL goes through
-// presignUpload / signedDownloadUrl below, so there is exactly one place that decides lifetimes.
+// The store (Cloudflare R2). ONE interface; src/lib/r2-object-store.ts is installed at startup when the R2 credentials
+// are set, and tests install a recorder. Two jobs only:
+//   - STAFF UPLOADS: a short-lived signed PUT link, built by presignUpload below.
+//   - CUSTOMER DOWNLOADS: the API reads the object itself (getObject) and streams it. Customers never receive an R2
+//     address, a key or a signed link (see customer-file-access.service.ts).
+
+import type { Readable } from "node:stream";
+
+export type StoredObject =
+  | { kind: "found"; body: Readable; contentLength: number | null; etag: string | null }
+  | { kind: "notModified"; etag: string | null }
+  | { kind: "missing" };
 
 export interface ObjectStore {
-  /** A URL a client can PUT one object to. Must sign the exact content length and type. */
+  /** A URL a staff client can PUT one object to. Signs the exact content length and type, nothing more. */
   presignPut(args: { key: string; contentType: string; contentLength: number; expiresInSeconds: number }): Promise<string>;
-  /** A URL a client can GET one object from. */
-  presignGet(args: { key: string; expiresInSeconds: number; downloadName?: string }): Promise<string>;
+  /** Reads one object. With `ifNoneMatch`, answers notModified when the ETag still matches (no body is read). */
+  getObject(args: { key: string; ifNoneMatch?: string }): Promise<StoredObject>;
   deleteKey(key: string): Promise<void>;
 }
 
@@ -104,7 +113,7 @@ export function objectStoreConfigured(): boolean {
   return store !== null;
 }
 
-function requireStore(): ObjectStore {
+export function requireStore(): ObjectStore {
   if (!store) throw new ServiceError("VALIDATION", "File storage is not configured.");
   return store;
 }
@@ -112,21 +121,65 @@ function requireStore(): ObjectStore {
 /** Uploads are signed for exactly 5 minutes. */
 export const UPLOAD_URL_TTL_SECONDS = 300;
 
-export function downloadUrlTtlSeconds(): number {
-  return loadEnv().SIGNED_URL_TTL_SECONDS;
+// The ONLY content types this API accepts, stores or serves. No SVG, no HTML, nothing a browser could run.
+export const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
+export const ALLOWED_DOCUMENT_TYPES = ["application/pdf"] as const;
+export type AllowedContentType = (typeof ALLOWED_IMAGE_TYPES)[number] | (typeof ALLOWED_DOCUMENT_TYPES)[number];
+
+const EXTENSION_FOR_TYPE: Record<AllowedContentType, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "application/pdf": "pdf",
+};
+const TYPE_FOR_EXTENSION: Record<string, AllowedContentType> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  pdf: "application/pdf",
+};
+
+/** The type a stored key is served as, decided by its extension (uploads force the extension from the signed type). */
+export function contentTypeForKey(key: string): AllowedContentType | null {
+  const extension = key.split(".").at(-1)?.toLowerCase() ?? "";
+  return key.includes(".") ? (TYPE_FOR_EXTENSION[extension] ?? null) : null;
+}
+
+export function isImageType(type: string): boolean {
+  return (ALLOWED_IMAGE_TYPES as readonly string[]).includes(type);
 }
 
 /** Characters safe in a key: letters, digits, dot, dash, underscore. Everything else becomes a dash. */
 export function safeFileName(name: string): string {
   const cleaned = name.normalize("NFKD").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+/, "").replace(/-{2,}/g, "-");
-  const trimmed = cleaned.slice(-80) || "file";
-  return trimmed;
+  return cleaned.slice(-80) || "file";
 }
 
-/** The key a NEW upload gets. Always inside the org's folder (staging while no vehicle exists yet). */
-export function buildObjectKey(orgId: string, kind: FileKind, vehicleId: string | undefined, fileName: string, uniqueId: string): string {
+/** A name with its extension removed (the extension of a key always comes from the signed content type). */
+function baseName(name: string): string {
+  return safeFileName(name).replace(/\.[A-Za-z0-9]{1,8}$/, "") || "file";
+}
+
+/**
+ * The key a NEW upload gets. Always inside the org's folder (staging while no vehicle exists yet). The extension is
+ * forced from the signed content type, whatever the client's file name says, so a key's extension is trustworthy.
+ */
+export function buildObjectKey(
+  orgId: string,
+  kind: FileKind,
+  vehicleId: string | undefined,
+  fileName: string,
+  uniqueId: string,
+  contentType: AllowedContentType
+): string {
   const folder = vehicleId ? `org/${orgId}/vehicles/${vehicleId}/${KIND_FOLDER[kind]}` : `org/${orgId}/uploads/staging`;
-  return `${folder}/${uniqueId}-${safeFileName(fileName)}`;
+  return `${folder}/${uniqueId}-${baseName(fileName)}.${EXTENSION_FOR_TYPE[contentType]}`;
+}
+
+/** Where the small version of a photo lives: next to the folder, never inside the one the client uploads to. */
+export function thumbKeyFor(key: string): string | null {
+  return key.includes("/photos/") ? key.replace("/photos/", "/photos-thumb/") : null;
 }
 
 export interface PresignedUpload {
@@ -137,40 +190,28 @@ export interface PresignedUpload {
 }
 
 /** Signs one upload. The key must already be inside an allowed prefix (the caller builds it with buildObjectKey). */
-export async function presignUpload(args: { key: string; contentType: string; contentLength: number }): Promise<PresignedUpload> {
+export async function presignUpload(args: { key: string; contentType: AllowedContentType; contentLength: number }): Promise<PresignedUpload> {
   const base = publicBaseUrl();
   if (!base) throw new ServiceError("VALIDATION", "File storage is not configured.");
   const uploadUrl = await requireStore().presignPut({ ...args, expiresInSeconds: UPLOAD_URL_TTL_SECONDS });
   return { uploadUrl, key: args.key, publicUrl: `${base}/${args.key}`, expiresInSeconds: UPLOAD_URL_TTL_SECONDS };
 }
 
-/**
- * THE one function that turns a stored key into a time-limited download link. It trusts nothing: callers must
- * have authorised the file first. A key outside the org's folder is refused here too, as a last line of defence.
- */
-export async function signedDownloadUrl(orgId: string, key: string, downloadName?: string): Promise<{ url: string; expiresInSeconds: number }> {
-  if (!keyFromOwnedUrl(`https://key.invalid`, `https://key.invalid/${key}`, orgPrefix(orgId))) {
-    throw new ServiceError("NOT_FOUND", "File not found.");
-  }
-  const expiresInSeconds = downloadUrlTtlSeconds();
-  const url = await requireStore().presignGet({ key, expiresInSeconds, ...(downloadName ? { downloadName } : {}) });
-  return { url, expiresInSeconds };
-}
-
-/** Best effort. Today only records the orphan: deleting needs the object-storage SDK. */
+/** Best effort. Used only while no store is installed: it records that an object was left behind. */
 export interface ObjectDeleter {
   (key: string): Promise<void>;
 }
 
 let deleter: ObjectDeleter = async (key) => {
-  console.warn(`object storage delete is not configured; left object in place: ${key}`);
+  void key;
+  console.warn("object storage delete is not configured; an object was left in place");
 };
 
 export function deleteObject(key: string): Promise<void> {
   return store ? store.deleteKey(key) : deleter(key);
 }
 
-/** Install the real implementation once the SDK is added (and in tests). */
+/** Replaces the no-store fallback (tests). */
 export function setObjectDeleter(next: ObjectDeleter): void {
   deleter = next;
 }

@@ -43,3 +43,36 @@ describe("exactly-once under parallel writers", () => {
     expect(await prisma.statusHistory.count({ where: { vehicleId: v.id, toStatus: "SHIPPED" } })).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// A concurrent set and clear of the ETD. updateVehicle takes a row lock and decides from a fresh read, so however the
+// two edits interleave, the status, the ETD and the automatic milestone always agree afterwards.
+
+import { updateVehicle } from "../../src/services/vehicle.service.js";
+
+describe("concurrent set/clear of the ETD", () => {
+  const actor = { id: "staff", orgId: ORG, role: "MANAGER" as const, name: "Staff", email: null };
+  const base = { chassisNo: "CHASSIS-RACE", brandId: "brand_race", modelId: "model_race" };
+
+  it("20 rounds of parallel set and clear never leave the status and the milestone disagreeing", async () => {
+    await prisma.user.create({ data: { id: "staff", org_id: ORG, userType: "STAFF", name: "Staff", role: "MANAGER", loginEnabled: true } });
+    await prisma.brand.create({ data: { id: "brand_race", org_id: ORG, name: "Brand" } });
+    await prisma.vehicleModelRef.create({ data: { id: "model_race", org_id: ORG, brand_id: "brand_race", name: "Model" } });
+    const v = await prisma.vehicle.create({ data: minimalVehicle(ORG, 1) });
+
+    for (let round = 0; round < 20; round++) {
+      const writes = [
+        ...Array.from({ length: 3 }, () => updateVehicle(actor, v.id, { ...base, etd: "2031-01-01" })),
+        ...Array.from({ length: 3 }, () => updateVehicle(actor, v.id, base)),
+      ];
+      const results = await Promise.allSettled(writes);
+      expect(results.filter((r) => r.status === "rejected"), `round ${round}`).toHaveLength(0);
+
+      const row = await prisma.vehicle.findUniqueOrThrow({ where: { id: v.id } });
+      const milestones = await prisma.vehicleMilestone.findMany({ where: { vehicleId: v.id } });
+      // status <-> etd <-> milestone: all three say the same thing
+      expect(row.shipmentStatus === "BOOKING_RECEIVED", `round ${round}: status vs etd`).toBe(row.etd !== null);
+      expect(milestones.map((m) => m.type), `round ${round}: milestone`).toEqual(row.shipmentStatus === "BOOKING_RECEIVED" ? ["BOOKING_RECEIVED"] : []);
+    }
+  });
+});

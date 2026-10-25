@@ -28,7 +28,8 @@ export const presignRequestSchema = z
   })
   .superRefine((data, ctx) => {
     const rule = UPLOAD_LIMITS[data.kind];
-    if (!rule.mimeTypes.includes(data.contentType as never)) {
+    // Exact match only: "IMAGE/JPEG", "image/jpeg; charset=x", "image/svg+xml", "text/html" are all refused.
+    if (!(rule.mimeTypes as readonly string[]).includes(data.contentType)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["contentType"],

@@ -22,7 +22,7 @@ ADD COLUMN     "voyageNo" TEXT;
 ALTER TABLE "VehicleDocument" ADD COLUMN     "visibleToCustomer" BOOLEAN NOT NULL DEFAULT false;
 
 -- AlterTable
-ALTER TABLE "VehiclePhoto" ADD COLUMN     "visibleToCustomer" BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE "VehiclePhoto" ADD COLUMN     "visibleToCustomer" BOOLEAN NOT NULL DEFAULT false;
 
 -- CreateTable
 CREATE TABLE "VehicleMilestone" (

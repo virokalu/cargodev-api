@@ -45,6 +45,46 @@ export async function recordStatusMilestone(
   await recordMilestoneOnce(tx, { orgId: args.orgId, vehicleId: args.vehicleId, type: args.status, occurredAt: args.occurredAt, recordedById: args.recordedById ?? null });
 }
 
+const RANK = { PENDING: 0, BOOKING_RECEIVED: 1, SHIPPED: 2 } as const;
+type StorableStatus = keyof typeof RANK;
+
+/**
+ * Keeps the automatic milestones in step with a status change, inside the SAME transaction as the change:
+ *  - going UP (to BOOKING_RECEIVED or SHIPPED): records that milestone once;
+ *  - going DOWN (the ETD was cleared, or shipped was reverted): removes the automatic milestones for the statuses left,
+ *    but ONLY those the system recorded and no person touched (recordedById is empty). A milestone a staff member
+ *    recorded, or whose date a staff member moved, is never removed, and later milestones (B/L, arrived, delivered) are
+ *    never touched. Every removal writes an ActivityLog row.
+ */
+export async function syncMilestonesForStatusChange(
+  tx: TxClient,
+  args: { orgId: string; vehicleId: string; from: StorableStatus; to: StorableStatus; occurredAt: Date; actorId: string }
+): Promise<void> {
+  if (RANK[args.to] > RANK[args.from]) {
+    await recordStatusMilestone(tx, { orgId: args.orgId, vehicleId: args.vehicleId, status: args.to, occurredAt: args.occurredAt, recordedById: null });
+    return;
+  }
+  if (RANK[args.to] === RANK[args.from]) return;
+
+  for (const type of ["BOOKING_RECEIVED", "SHIPPED"] as const) {
+    if (RANK[type] <= RANK[args.to] || RANK[type] > RANK[args.from]) continue;
+    const removed = await tx.vehicleMilestone.deleteMany({
+      where: { org_id: args.orgId, vehicleId: args.vehicleId, type, recordedById: null },
+    });
+    if (removed.count > 0) {
+      await activityLog.record(tx, {
+        orgId: args.orgId,
+        actorId: args.actorId,
+        action: "AUTO_REMOVE_MILESTONE",
+        entity: "Vehicle",
+        entityId: args.vehicleId,
+        before: { type },
+        after: { removed: true, because: `status went from ${args.from} to ${args.to}` },
+      });
+    }
+  }
+}
+
 const select = { type: true, occurredAt: true, recordedBy: { select: { id: true, name: true } } } as const;
 
 function toDto(row: { type: MilestoneType; occurredAt: Date; recordedBy: { id: string; name: string } | null }): MilestoneDto {

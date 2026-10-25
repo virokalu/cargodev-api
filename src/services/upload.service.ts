@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import type { SessionUser } from "../lib/session-user.js";
 import { parseInput } from "../lib/parse.js";
-import { buildObjectKey, presignUpload, type PresignedUpload } from "../lib/object-storage.js";
+import { buildObjectKey, presignUpload, type AllowedContentType, type PresignedUpload } from "../lib/object-storage.js";
 import { presignRequestSchema } from "../validation/upload.schema.js";
 import { getOwnedVehicle } from "./file.service.js";
 
@@ -15,8 +15,10 @@ export async function createPresignedUpload(actor: SessionUser, rawBody: unknown
   // Authorization before anything is signed. Another org's, a deleted or an unknown vehicle is the standard 404.
   if (input.vehicleId) await getOwnedVehicle(actor.orgId, input.vehicleId);
 
-  const key = buildObjectKey(actor.orgId, input.kind, input.vehicleId, input.fileName, randomUUID());
-  const signed = await presignUpload({ key, contentType: input.contentType, contentLength: input.fileSize });
+  // presignRequestSchema has already limited contentType to the allowlist for this kind.
+  const contentType = input.contentType as AllowedContentType;
+  const key = buildObjectKey(actor.orgId, input.kind, input.vehicleId, input.fileName, randomUUID(), contentType);
+  const signed = await presignUpload({ key, contentType, contentLength: input.fileSize });
   // The client must send exactly these headers or storage refuses the upload.
   return { ...signed, headers: { "Content-Type": input.contentType } };
 }

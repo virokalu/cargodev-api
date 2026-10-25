@@ -10,6 +10,7 @@ import { success } from "./lib/response.js";
 import { registerActivityLogRoutes } from "./routes/activity-log.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCustomerAuthRoutes } from "./routes/customer-auth.js";
+import { registerCustomerFileRoutes } from "./routes/customer-files.js";
 import { registerCustomerRoutes } from "./routes/customers.js";
 import { registerDashboardRoutes } from "./routes/dashboard.js";
 import { registerLookupRoutes } from "./routes/lookups.js";
@@ -17,6 +18,8 @@ import { registerMilestoneRoutes } from "./routes/milestones.js";
 import { registerUploadRoutes } from "./routes/uploads.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
 import { SseHub } from "./lib/sse-hub.js";
+import { objectStoreConfigured, setObjectStore } from "./lib/object-storage.js";
+import { createR2ObjectStore } from "./lib/r2-object-store.js";
 import { registerAdminJobRoutes } from "./routes/admin-jobs.js";
 import { Scheduler, defaultJobs, type ScheduledJob } from "./scheduler/index.js";
 import { registerOrganizationRoutes } from "./routes/organization.js";
@@ -63,6 +66,19 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const env = loadEnv();
 
   const trustProxyHops = options.trustProxyHops ?? env.TRUST_PROXY_HOPS;
+
+  // Object storage (R2): installed when all four credentials are set (env validation guarantees all or none).
+  // Tests install their own recorder first, which is left alone.
+  if (!objectStoreConfigured() && env.R2_ACCOUNT_ID && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_BUCKET_NAME) {
+    setObjectStore(
+      createR2ObjectStore({
+        accountId: env.R2_ACCOUNT_ID,
+        accessKeyId: env.R2_ACCESS_KEY_ID,
+        secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+        bucket: env.R2_BUCKET_NAME,
+      })
+    );
+  }
 
   const app = Fastify({
     trustProxy: trustProxyHops > 0 ? trustHops(trustProxyHops) : false,
@@ -153,7 +169,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   // The customer zone: its own prefix, guard, secret and session table. Not mounted unless it is configured.
   if (env.CUSTOMER_JWT_SECRET) {
-    await app.register(async (customerApi) => registerCustomerAuthRoutes(customerApi), { prefix: "/api/customer/v1" });
+    await app.register(
+      async (customerApi) => {
+        registerCustomerAuthRoutes(customerApi);
+        registerCustomerFileRoutes(customerApi);
+      },
+      { prefix: "/api/customer/v1" }
+    );
   }
 
   return app;

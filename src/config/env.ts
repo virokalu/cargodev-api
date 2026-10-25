@@ -29,14 +29,15 @@ const baseSchema = z.object({
   // it must be set before files can be attached. Unset means "storage not configured": file URLs are
   // refused (fail closed) rather than accepted unchecked.
   R2_PUBLIC_URL: z.string().url().optional(),
-  // Object storage (Cloudflare R2, S3 compatible). All four or none: a half-configured store is refused at startup.
+  // Object storage (Cloudflare R2). All four or none: a half-configured store is refused at startup.
   // Used to sign uploads and downloads and to delete files. R2_PUBLIC_URL above is separate (the public base).
-  R2_ACCOUNT_ID: z.string().min(1).optional(),
+  // The Cloudflare account id: 32 hex characters. It becomes part of the R2 hostname, so anything else is refused.
+  R2_ACCOUNT_ID: z.string().regex(/^[a-f0-9]{32}$/i, "R2_ACCOUNT_ID must be the 32-character Cloudflare account id").optional(),
   R2_ACCESS_KEY_ID: z.string().min(1).optional(),
   R2_SECRET_ACCESS_KEY: z.string().min(1).optional(),
   R2_BUCKET_NAME: z.string().min(1).optional(),
-  // How long a signed DOWNLOAD link works, in seconds: 5 to 15 minutes. Uploads are fixed at 300 s.
-  SIGNED_URL_TTL_SECONDS: z.coerce.number().int().min(300).max(900).default(600),
+  // How long a customer's browser or app may cache a file served by the API, in seconds (Cache-Control: private).
+  CUSTOMER_FILE_CACHE_SECONDS: z.coerce.number().int().min(0).max(86400).default(300),
   // Optional. Only raises Expo push rate limits; push works without it.
   EXPO_ACCESS_TOKEN: z.string().min(1).optional(),
   // Transactional email through the Resend HTTP API (src/lib/email.ts). Both optional: with no

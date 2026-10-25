@@ -23,7 +23,7 @@ Error: `{ "error": { "code": "...", "message": "...", "fieldErrors": { "field": 
 
 ## Conventions
 
-- Every response has `Cache-Control: no-store`.
+- Every response has `Cache-Control: no-store`, except the customer file endpoints (`private, max-age=300` by default) and, later, the public stock reads.
 - Dates are ISO 8601 strings. Decimals are plain numbers.
 - A resource in another org returns 404, never 403.
 - `orgId` always comes from the verified token. Any `orgId` in a request is ignored.
@@ -170,7 +170,7 @@ Automation records BOOKING_RECEIVED (when a vehicle enters that status) and SHIP
 |---|---|---|---|---|
 | POST | /api/v1/uploads/presign | ADMINISTRATOR, MANAGER, OPERATOR | `{ vehicleId?, kind: AUCTION_SHEET \| VEHICLE_PHOTO \| VEHICLE_DOCUMENT, fileName, contentType, fileSize }` | 200 `{ uploadUrl, key, publicUrl, expiresInSeconds: 300, headers: { "Content-Type" } }` |
 
-The vehicle must be the caller's org's (otherwise 404, and nothing is signed). The server builds the key (the client never chooses it): `org/<orgId>/vehicles/<vehicleId>/{photos|documents|auction-sheet}/<uuid>-<safe name>`, or `org/<orgId>/uploads/staging/...` when there is no vehicle yet. The link is signed for the exact size and type, valid 5 minutes. Images: JPEG, PNG or WebP up to 10 MB; documents: PDF up to 20 MB. Send the file with a PUT to `uploadUrl` using exactly the returned headers, then pass `publicUrl` to the add-photo / add-document / auction-sheet endpoints. 400 `File storage is not configured.` when storage is off.
+The vehicle must be the caller's org's (otherwise 404, and nothing is signed). The server builds the key (the client never chooses it): `org/<orgId>/vehicles/<vehicleId>/{photos|documents|auction-sheet}/<uuid>-<safe name>.<ext>`, or `org/<orgId>/uploads/staging/...` when there is no vehicle yet. The extension always comes from the signed content type, never from the file name. The link is signed for the exact size and type, valid 5 minutes. **Only these content types, matched exactly:** photos and auction sheets `image/jpeg`, `image/png`, `image/webp` (up to 10 MB); documents `application/pdf` (up to 20 MB). Anything else (svg, html, gif, "image/jpeg; charset=...", other casing) is a 400. Send the file with a PUT to `uploadUrl` using exactly the returned headers, then pass `publicUrl` to the add-photo / add-document / auction-sheet endpoints. 400 `File storage is not configured.` when storage is off.
 
 ### Vehicle files
 
@@ -228,23 +228,27 @@ Request bodies are strict: an unknown field is a 400.
 | POST | /auth/reset-password | none | `{ email, code, newPassword }` | 200 `{ reset: true }`; ends every session |
 | POST | /auth/delete-account | customer | `{ password }` | 200 `{ deleted: true }`; anonymises the account, ends every session |
 | GET | /me | customer | | 200 profile (below) |
+| GET | /photos/:photoId/image?size=thumb\|full | customer | | 200 the image bytes (below) |
+| GET | /documents/:documentId/file | customer | | 200 the document bytes (below) |
 | PATCH | /me | customer | any of `{ name, phone, companyName, country, destinationPort, language, theme }` (at least one) | 200 profile |
 
 **Session** (login and refresh): `{ accessToken, accessTokenExpiresIn (seconds, 900), refreshToken, refreshTokenExpiresAt (ISO), user: { id, name, email } }`.
 
 **Profile** (exactly these keys): `id, name, email, phone, companyName, country, destinationPort, language ("en" when unset), theme ("light" | "dark" | "system" | null), memberSince (ISO)`.
 
+**Photos and documents** are addressed by database id only. The API checks, in order: your account (from the token), the vehicle (yours, same org, not deleted, export track, released by staff), then the file (released by staff; photos and documents are private by default). Only then does it read the object and stream it to you; it never redirects and never reveals where the file is stored. Any failure is the same `404 { error: { code: "NOT_FOUND", message: "File not found." } }`, including a file that exists but is not released. Response headers: `Content-Type` (jpeg, png, webp or pdf only), `X-Content-Type-Options: nosniff`, `Cache-Control: private, max-age=<CUSTOMER_FILE_CACHE_SECONDS>`, `ETag` (send it back as `If-None-Match` to get a body-less `304`), `Content-Disposition: inline` for images and `attachment; filename=...` for documents. `size=thumb` returns the small version of a photo when one exists and the full image otherwise (default `full`). Limits: 300 requests/min per IP and 120/min per customer; then `429` with `Retry-After`.
+
 How it signs up: `register` creates an unverified account with no password and emails a 6-digit code (valid 10 minutes, 5 attempts). `verify-email` takes that code **and** the password the customer chooses. A customer staff created (login enabled, no password yet) gets in through `forgot-password` then `reset-password`. `CUSTOMER_SELF_SIGNUP=false` turns register off.
 
 Errors: 400 `VALIDATION` for bad input and for any wrong or expired code or credentials (one message each, whatever the cause); 403 `FORBIDDEN` for a locked account or a dead refresh token; 401 `UNAUTHENTICATED` for a bad or expired access token or an account that can no longer sign in; 429 `RATE_LIMITED` (with `Retry-After`).
 
-Rate limits (per IP / per email, from `src/config/customer-rate-limits.ts`): register 5/min, 3/hour; verify-email 10/min, 10/10 min; resend-verification 5/min, 3/10 min; login 10/min, 20/15 min; refresh 30/min; logout 30/min; forgot-password 5/min, 3/hour; reset-password 10/min, 10/10 min; delete-account 5/min, 5/hour; me 60/min. Per-email limits count unknown addresses too.
+Rate limits (per IP / per email or customer, from `src/config/customer-rate-limits.ts`; file gateway: 300/min per IP, 120/min per customer): register 5/min, 3/hour; verify-email 10/min, 10/10 min; resend-verification 5/min, 3/10 min; login 10/min, 20/15 min; refresh 30/min; logout 30/min; forgot-password 5/min, 3/hour; reset-password 10/min, 10/10 min; delete-account 5/min, 5/hour; me 60/min. Per-email limits count unknown addresses too.
 
 ### Not built yet
 
 | Area | Why |
 |---|---|
-| The S3 client behind presign / signed downloads / object delete | The routes, rules and tests are built against a store interface; the S3 implementation waits for approval of `@aws-sdk/client-s3` and `@aws-sdk/s3-request-presigner`. Until then storage answers "not configured". |
+| Live check of the R2 store | The R2 client is built and tested offline (endpoint, checksum settings, signed headers). It has not talked to a real bucket yet; the maintainer runs the first upload and read against staging. |
 | Customer app data (vehicles, documents, alerts, chat, stock) | Phase 2 slices 2 to 7. Only auth and the profile exist so far. |
 
 ## Known doc drift

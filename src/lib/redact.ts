@@ -13,8 +13,21 @@ const PATTERNS: RegExp[] = [
   /Bearer\s+[A-Za-z0-9._~+/=-]{8,}/gi,
 ];
 
+// Object storage details a customer must never see, even inside an error message from the storage library.
+const STORAGE_PATTERNS: RegExp[] = [
+  // R2 hostnames (the account id is the first label)
+  /[A-Za-z0-9.-]*\.r2\.cloudflarestorage\.com/gi,
+  // our object keys: org/<id>/vehicles/... and org/<id>/uploads/...
+  /org\/[A-Za-z0-9_-]+\/(?:vehicles|uploads)\/[A-Za-z0-9._\-/]*/g,
+];
+
 export function redactSecrets(text: string): string {
-  return PATTERNS.reduce((out, pattern) => out.replace(pattern, "[redacted]"), text);
+  let out = PATTERNS.reduce((acc, pattern) => acc.replace(pattern, "[redacted]"), text);
+  out = STORAGE_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, "[redacted]"), out);
+  // The configured account id, wherever it appears (it can also show up on its own).
+  const accountId = process.env["R2_ACCOUNT_ID"];
+  if (accountId && accountId.length >= 8) out = out.split(accountId).join("[redacted]");
+  return out;
 }
 
 /** A log-safe view of an unknown thrown value: name, redacted message, redacted stack. */

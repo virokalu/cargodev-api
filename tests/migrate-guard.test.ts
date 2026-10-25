@@ -1,14 +1,18 @@
 // The guard every migration command goes through. Runs in the normal `npm test` (no database needed).
 
-import { describe, expect, it } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import {
   UnsafeMigrationTargetError,
   assertSafeMigrationTarget,
+  buildPrismaEnv,
   parseApprovals,
   parseMigrateCommand,
   scanMigrationSql,
 } from "../scripts/migrate-guard.js";
 
+const root = path.resolve(import.meta.dirname, "..");
 const HOST = "db.test.example";
 const DB = "cargodev_migration_test";
 const url = (host = HOST, db = DB, extra = "", port = "5432") => `postgresql://tester:example-throwaway@${host}:${port}/${db}${extra}`;
@@ -54,7 +58,7 @@ describe("assertSafeMigrationTarget: refused", () => {
 
   it("a host that merely contains the allowed host", () => {
     refuses(env({ MIGRATION_DATABASE_URL: url(`${HOST}.evil.example`) }));
-    refuses(env({ MIGRATION_DATABASE_URL: `postgresql://${HOST}:pw@evil.example:5432/${DB}` }));
+    refuses(env({ MIGRATION_DATABASE_URL: `postgresql://${HOST}:example-pw@evil.example:5432/${DB}` }));
   });
 
   it("a wrong database", () => {
@@ -219,5 +223,91 @@ describe("scanMigrationSql", () => {
 describe("parseApprovals", () => {
   it("reads names, ignoring blanks and comments", () => {
     expect([...parseApprovals("# header\n20260101000000_a  # reviewed\n\n20260102000000_b\r\n")]).toEqual(["20260101000000_a", "20260102000000_b"]);
+  });
+});
+
+describe("MIGRATION_REQUIRE_DB_SUFFIX", () => {
+  const staging = { MIGRATION_DATABASE_URL: url(HOST, "cargodev_staging"), MIGRATION_ALLOWED_DB: "cargodev_staging" };
+
+  it("defaults to _test: a database that does not end with it is refused", () => {
+    refuses(env(staging), /must end with "_test"/);
+  });
+
+  it("a custom suffix is enforced", () => {
+    refuses(env({ MIGRATION_REQUIRE_DB_SUFFIX: "_sandbox" }), /must end with "_sandbox"/);
+    expect(() => assertSafeMigrationTarget(env({ MIGRATION_REQUIRE_DB_SUFFIX: "_test" }))).not.toThrow();
+  });
+
+  it("only an explicitly EMPTY value turns it off", () => {
+    expect(() => assertSafeMigrationTarget(env({ ...staging, MIGRATION_REQUIRE_DB_SUFFIX: "" }))).not.toThrow();
+    expect(() => assertSafeMigrationTarget(env({ ...staging, MIGRATION_REQUIRE_DB_SUFFIX: "  " }))).not.toThrow();
+    refuses(env({ ...staging, MIGRATION_REQUIRE_DB_SUFFIX: undefined }));
+  });
+
+  it("turning it off does not turn off any other check", () => {
+    refuses(env({ ...staging, MIGRATION_REQUIRE_DB_SUFFIX: "", DATABASE_URL: staging.MIGRATION_DATABASE_URL }), /same database as DATABASE_URL/);
+    refuses(env({ ...staging, MIGRATION_REQUIRE_DB_SUFFIX: "", MIGRATION_DATABASE_URL: url("other.example", "cargodev_staging") }));
+  });
+
+  it("a malformed suffix is refused", () => {
+    refuses(env({ MIGRATION_REQUIRE_DB_SUFFIX: "_te st" }));
+    refuses(env({ MIGRATION_REQUIRE_DB_SUFFIX: ".*" }));
+  });
+});
+
+describe("the migrate process can never fall back to the runtime database", () => {
+  const target = assertSafeMigrationTarget(env());
+
+  it("buildPrismaEnv gives Prisma MIGRATION_DATABASE_URL and removes every other connection setting", () => {
+    const child = buildPrismaEnv(
+      {
+        DATABASE_URL: url("runtime.example", "app"),
+        DIRECT_URL: url("runtime.example", "app"),
+        TEST_DATABASE_URL: url("127.0.0.1", "cargodev_test"),
+        SHADOW_DATABASE_URL: url("shadow.example", "s"),
+        POSTGRES_URL: url("runtime.example", "app"),
+        PGHOST: "runtime.example",
+        PGDATABASE: "app",
+        PATH: "/usr/bin",
+      },
+      target
+    );
+    expect(child["MIGRATION_DATABASE_URL"]).toBe(target.url);
+    for (const name of ["DATABASE_URL", "DIRECT_URL", "TEST_DATABASE_URL", "SHADOW_DATABASE_URL", "POSTGRES_URL", "PGHOST", "PGDATABASE"]) {
+      expect(child[name]).toBeUndefined();
+    }
+    expect(child["PATH"]).toBe("/usr/bin");
+  });
+
+  it("there is no root prisma.config.ts for a bare prisma command to pick up", () => {
+    expect(existsSync(path.join(root, "prisma.config.ts"))).toBe(false);
+    expect(existsSync(path.join(root, "prisma.config.js"))).toBe(false);
+  });
+
+  it("the migrate config reads MIGRATION_DATABASE_URL only; unset, its URL is an inert placeholder, never DATABASE_URL or DIRECT_URL", async () => {
+    const source = readFileSync(path.join(root, "scripts", "prisma.migrate.config.ts"), "utf8");
+    const code = source.split(/\r?\n/).filter((line) => !line.trim().startsWith("//")).join("\n");
+    expect(code.replace(/MIGRATION_DATABASE_URL/g, "")).not.toMatch(/DATABASE_URL|DIRECT_URL/);
+
+    const saved = { ...process.env };
+    try {
+      process.env["DATABASE_URL"] = url("runtime.example", "app");
+      process.env["DIRECT_URL"] = url("runtime.example", "app");
+      delete process.env["MIGRATION_DATABASE_URL"];
+      vi.resetModules();
+      const config = (await import("../scripts/prisma.migrate.config.js")).default;
+      const configured = String(config.datasource?.url);
+      expect(configured).not.toContain("runtime.example");
+      expect(configured).toContain("unset");
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  it("scripts/migrate.ts always passes --config for the migrate config and builds the child env with buildPrismaEnv", () => {
+    const source = readFileSync(path.join(root, "scripts", "migrate.ts"), "utf8");
+    expect(source).toContain('"--config", config');
+    expect(source).toContain('path.join("scripts", "prisma.migrate.config.ts")');
+    expect(source).toContain("buildPrismaEnv(process.env, target)");
   });
 });

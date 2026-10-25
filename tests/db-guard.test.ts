@@ -17,11 +17,11 @@ const check = (url: string | undefined, env: Record<string, string | undefined> 
 
 describe("assertSafeTestDatabaseUrl: accepted", () => {
   it.each([
-    "postgresql://u:p@localhost:5432/cargodev_test",
-    "postgresql://u:p@127.0.0.1:55432/cargodev_test",
-    "postgres://u:p@[::1]:5432/cargodev_test",
-    "postgresql://u:p@LOCALHOST/cargodev_test",
-    "postgresql://u:p@localhost:5432/cargodev_test_ci_run_42",
+    "postgresql://user:password@localhost:5432/cargodev_test",
+    "postgresql://user:password@127.0.0.1:55432/cargodev_test",
+    "postgres://user:password@[::1]:5432/cargodev_test",
+    "postgresql://user:password@LOCALHOST/cargodev_test",
+    "postgresql://user:password@localhost:5432/cargodev_test_ci_run_42",
   ])("%s", (url) => {
     expect(() => check(url)).not.toThrow();
   });
@@ -31,7 +31,7 @@ describe("assertSafeTestDatabaseUrl: accepted", () => {
   });
 
   it("accepts the CI service container host only when CI=true", () => {
-    const url = "postgresql://u:p@postgres:5432/cargodev_test";
+    const url = "postgresql://user:password@postgres:5432/cargodev_test";
     expect(() => check(url, { CI: "true" })).not.toThrow();
     expect(() => check(url, {})).toThrow(UnsafeTestDatabaseError);
     expect(() => check(url, { CI: "false" })).toThrow(UnsafeTestDatabaseError);
@@ -45,13 +45,13 @@ describe("assertSafeTestDatabaseUrl: refused", () => {
   });
 
   it.each([
-    ["a remote hostname", "postgresql://u:p@db.example.com:5432/cargodev_test"],
-    ["a cloud-style hostname", "postgresql://u:p@pooler.region.example-cloud.net:6543/cargodev_test"],
-    ["a private network address", "postgresql://u:p@10.0.0.5:5432/cargodev_test"],
-    ["a public IP", "postgresql://u:p@203.0.113.9:5432/cargodev_test"],
-    ["localhost as a prefix of another host", "postgresql://u:p@localhost.evil.example.com/cargodev_test"],
+    ["a remote hostname", "postgresql://user:password@db.example.com:5432/cargodev_test"],
+    ["a cloud-style hostname", "postgresql://user:password@pooler.region.example-cloud.net:6543/cargodev_test"],
+    ["a private network address", "postgresql://user:password@10.0.0.5:5432/cargodev_test"],
+    ["a public IP", "postgresql://user:password@203.0.113.9:5432/cargodev_test"],
+    ["localhost as a prefix of another host", "postgresql://user:password@localhost.evil.example.com/cargodev_test"],
     ["localhost as a user name (the host is elsewhere)", "postgresql://localhost@db.example.com/cargodev_test"],
-    ["0.0.0.0", "postgresql://u:p@0.0.0.0:5432/cargodev_test"],
+    ["0.0.0.0", "postgresql://user:password@0.0.0.0:5432/cargodev_test"],
   ])("%s", (_name, url) => {
     expect(() => check(url)).toThrow(UnsafeTestDatabaseError);
     expect(() => check(url)).toThrow(/Only localhost/);
@@ -60,17 +60,17 @@ describe("assertSafeTestDatabaseUrl: refused", () => {
   it.each(["host", "hostaddr", "service", "servicefile"])(
     "a ?%s= parameter that could redirect the connection elsewhere",
     (param) => {
-      expect(() => check(`postgresql://u:p@localhost:5432/cargodev_test?${param}=db.example.com`)).toThrow(/redirect the connection/);
+      expect(() => check(`postgresql://user:password@localhost:5432/cargodev_test?${param}=db.example.com`)).toThrow(/redirect the connection/);
     }
   );
 
   it.each([
-    "postgresql://u:p@localhost:5432/postgres",
-    "postgresql://u:p@localhost:5432/cargodev",
-    "postgresql://u:p@localhost:5432/production",
-    "postgresql://u:p@localhost:5432/my_cargodev_test",
-    "postgresql://u:p@localhost:5432/",
-    "postgresql://u:p@localhost:5432",
+    "postgresql://user:password@localhost:5432/postgres",
+    "postgresql://user:password@localhost:5432/cargodev",
+    "postgresql://user:password@localhost:5432/production",
+    "postgresql://user:password@localhost:5432/my_cargodev_test",
+    "postgresql://user:password@localhost:5432/",
+    "postgresql://user:password@localhost:5432",
   ])("a database name that is not a cargodev_test database: %s", (url) => {
     expect(() => check(url)).toThrow(/must start with "cargodev_test"/);
   });
@@ -90,11 +90,11 @@ describe("assertSafeTestDatabaseUrl: refused", () => {
     // Built at runtime so no secret-looking literal sits in the source (the secret scan has no allow-list).
     const secret = ["hunter2", "do", "not", "leak"].join("-");
     for (const url of [
-      `postgresql://u:${secret}@db.example.com/cargodev_test`,
-      `postgresql://u:${secret}@localhost/production`,
+      `postgresql://user:${secret}@db.example.com/cargodev_test`,
+      `postgresql://user:${secret}@localhost/production`,
       `mysql://u:${secret}@localhost/cargodev_test`,
-      `postgresql://u:${secret}@localhost/cargodev_test?host=elsewhere`,
-      `postgresql://u:${secret}@[broken`,
+      `postgresql://user:${secret}@localhost/cargodev_test?host=elsewhere`,
+      `postgresql://user:${secret}@[broken`,
     ]) {
       let message = "";
       try {
@@ -108,12 +108,12 @@ describe("assertSafeTestDatabaseUrl: refused", () => {
   });
 
   it("states that nothing was changed", () => {
-    expect(() => check("postgresql://u:p@db.example.com/cargodev_test")).toThrow(/Nothing was changed/);
+    expect(() => check("postgresql://user:password@db.example.com/cargodev_test")).toThrow(/Nothing was changed/);
   });
 });
 
 describe("the guard never consults the application's DATABASE_URL", () => {
-  const prod = "postgresql://prod:secret@db.prod.example.com:5432/cargodev";
+  const prod = "postgresql://prod:example-secret@db.prod.example.com:5432/cargodev";
 
   it("a real-looking DATABASE_URL in the environment does not make an unset TEST_DATABASE_URL acceptable", () => {
     expect(() => check(undefined, { DATABASE_URL: prod })).toThrow(/TEST_DATABASE_URL is not set/);
@@ -136,7 +136,7 @@ describe("the guard never consults the application's DATABASE_URL", () => {
       expect(reads, `${path.basename(file)} must not read DATABASE_URL`).toBe(false);
     }
     const setup = readFileSync(path.join(dir, "setup-env.ts"), "utf8");
-    expect(setup).toMatch(/DATABASE_URL"\] = "postgresql:\/\/never-used:never-used@invalid\.invalid/);
+    expect(setup).toMatch(/DATABASE_URL"\] = "postgresql:\/\/user:password@invalid\.invalid/);
   });
 });
 

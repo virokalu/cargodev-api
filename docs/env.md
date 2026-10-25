@@ -36,6 +36,7 @@ Read only by `npm run migrate` (`scripts/migrate.ts`), never by the app. See `do
 | MIGRATION_DATABASE_URL | The designated test database, **direct (non-pooled)** connection. Never the runtime database |
 | MIGRATION_ALLOWED_HOST | The one host migrations may run against. Must equal the URL's host exactly |
 | MIGRATION_ALLOWED_DB | The one database name migrations may run against. Must equal the URL's database exactly |
+| MIGRATION_REQUIRE_DB_SUFFIX | Optional. The allowed database name must end with this (default `_test`). Set to an empty value to turn the check off |
 
 Migrations never use `DATABASE_URL` or `DIRECT_URL`. If `MIGRATION_DATABASE_URL` is the same server and database as either, the guard refuses.
 

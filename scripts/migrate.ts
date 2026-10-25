@@ -17,6 +17,7 @@ import pg from "pg";
 import {
   UnsafeMigrationTargetError,
   assertSafeMigrationTarget,
+  buildPrismaEnv,
   parseApprovals,
   parseMigrateCommand,
   scanMigrationSql,
@@ -30,8 +31,7 @@ const prismaCli = createRequire(import.meta.url).resolve("prisma/build/index.js"
 
 function runPrisma(args: string[], target: MigrationTarget, capture = false) {
   // The child sees MIGRATION_DATABASE_URL only. The runtime connection strings are removed.
-  const env: NodeJS.ProcessEnv = { ...process.env, MIGRATION_DATABASE_URL: target.url };
-  for (const name of ["DATABASE_URL", "DIRECT_URL", "TEST_DATABASE_URL", "SHADOW_DATABASE_URL"]) delete env[name];
+  const env = buildPrismaEnv(process.env, target);
   return spawnSync(process.execPath, [prismaCli, ...args, "--config", config], {
     cwd: root,
     env,

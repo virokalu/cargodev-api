@@ -115,7 +115,7 @@ describe("TRUST_PROXY_HOPS validation", () => {
 
   const load = async () => (await import("../src/config/env.js")).loadEnv;
   const base = {
-    DATABASE_URL: "postgresql://test:test@localhost:5432/test_dummy",
+    DATABASE_URL: "postgresql://user:password@localhost:5432/test_dummy",
     MOBILE_JWT_SECRET: "test-only-dummy-value-0123456789abcdef",
     ORG_ID: "org_test_a",
   };

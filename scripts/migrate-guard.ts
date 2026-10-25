@@ -32,6 +32,8 @@ export interface MigrationTarget {
 /** Connection-string parameters that can silently redirect the connection to another server. */
 const REDIRECT_PARAMS = ["host", "hostaddr", "service", "servicefile", "options"];
 const RESERVED_DATABASES = new Set(["postgres", "template0", "template1"]);
+/** Default required ending of the allowed database name. Set MIGRATION_REQUIRE_DB_SUFFIX to an empty value to turn it off. */
+export const DEFAULT_DB_SUFFIX = "_test";
 const HOST_PATTERN = /^[A-Za-z0-9.-]+$/;
 const DB_PATTERN = /^[A-Za-z0-9_]+$/;
 
@@ -89,6 +91,18 @@ export function assertSafeMigrationTarget(env: Record<string, string | undefined
   }
   if (!DB_PATTERN.test(allowedDb!) || RESERVED_DATABASES.has(allowedDb!.toLowerCase())) {
     throw new UnsafeMigrationTargetError("MIGRATION_ALLOWED_DB must be one specific database name, not a system database.");
+  }
+
+  // Opt-out is explicit: the variable must be present AND empty. Unset means the default applies.
+  const rawSuffix = env["MIGRATION_REQUIRE_DB_SUFFIX"];
+  const suffix = rawSuffix === undefined ? DEFAULT_DB_SUFFIX : rawSuffix.trim();
+  if (suffix !== "") {
+    if (!DB_PATTERN.test(suffix)) {
+      throw new UnsafeMigrationTargetError("MIGRATION_REQUIRE_DB_SUFFIX must contain only letters, digits and underscores (or be empty to turn the check off).");
+    }
+    if (!allowedDb!.endsWith(suffix)) {
+      throw new UnsafeMigrationTargetError(`MIGRATION_ALLOWED_DB must end with "${suffix}" (MIGRATION_REQUIRE_DB_SUFFIX).`);
+    }
   }
 
   const target = parts(raw!);
@@ -282,4 +296,17 @@ export function parseApprovals(text: string): Set<string> {
       .map((line) => line.replace(/#.*/, "").trim())
       .filter(Boolean)
   );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The environment the Prisma process runs in. It gets MIGRATION_DATABASE_URL and nothing that could be
+// mistaken for a runtime or test connection, and it is always started with --config
+// scripts/prisma.migrate.config.ts (there is no root prisma.config.ts to fall back to).
+
+const STRIPPED_FROM_PRISMA_ENV = ["DATABASE_URL", "DIRECT_URL", "TEST_DATABASE_URL", "SHADOW_DATABASE_URL", "POSTGRES_URL", "PGHOST", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGPORT", "PGSERVICE", "PGSERVICEFILE"];
+
+export function buildPrismaEnv(env: NodeJS.ProcessEnv, target: MigrationTarget): NodeJS.ProcessEnv {
+  const child: NodeJS.ProcessEnv = { ...env, MIGRATION_DATABASE_URL: target.url };
+  for (const name of STRIPPED_FROM_PRISMA_ENV) delete child[name];
+  return child;
 }

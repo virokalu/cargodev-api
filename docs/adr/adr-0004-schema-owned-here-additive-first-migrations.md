@@ -40,5 +40,11 @@ be unrecoverable.
 - `prisma/migrations/` does not exist yet. The first migration must be a baseline of the current production
   schema (marked as already applied there by a maintainer, not run), otherwise `deploy` against an existing
   database would try to create tables that already exist.
-- Row level security with no policies only protects roles that do not bypass it. The API's own database role
-  must be allowed to bypass it (or policies must be added later); that is a deployment decision.
+- **Row level security stays "enabled, no policies" on every new table.** It blocks any database role that does
+  not bypass RLS (for example a direct client using the project's public API keys). The API's own database role
+  **must bypass RLS**, otherwise it would see no rows; the maintainer verifies this for each environment before
+  a table goes live. Agents never create or alter database roles.
+- A dedicated least-privilege API role (no DDL, no access beyond the tables it needs) is a hardening follow-up,
+  not part of this decision.
+- The guard also requires the allowed database name to end with `MIGRATION_REQUIRE_DB_SUFFIX` (default
+  `_test`); the maintainer can turn this off by setting the variable to an empty value.

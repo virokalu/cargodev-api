@@ -31,7 +31,7 @@ jobs:
       # Dummy values only. Never put real secrets in CI for a public repo.
       NODE_ENV: test
       PORT: "4000"
-      DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci_dummy"
+      DATABASE_URL: "postgresql://user:password@localhost:5432/ci_dummy"
       MOBILE_JWT_SECRET: "ci-dummy-value-not-for-real-use-0123456789"
       ORG_ID: "org_ci_dummy"
       TRUST_PROXY_HOPS: "0"
@@ -64,13 +64,13 @@ jobs:
       - run: npm audit --omit=dev --audit-level=high
 
   # Required. Same scan as the pre-commit hook (scripts/secret-scan.sh), run over
-  # every tracked file, because `git commit --no-verify` skips local hooks.
+  # every tracked and untracked-but-not-ignored file, because `git commit --no-verify` skips local hooks.
   secret-scan:
     name: secret-scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: git ls-files | sh scripts/secret-scan.sh
+      - run: git ls-files -co --exclude-standard | sh scripts/secret-scan.sh
 
   # Report only. Shows the full tree (including dev tools) without blocking merges.
   # Review it; dev-only findings with no fix go in "Accepted risks" in docs/security-model.md.

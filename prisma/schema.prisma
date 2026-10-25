@@ -78,25 +78,34 @@ model Organization {
   updatedAt DateTime @updatedAt
 
   // Relations
-  users               User[]
-  vehicles            Vehicle[]
-  brands              Brand[]
-  auctionHalls        AuctionHall[]
-  suppliers           Supplier[]
-  transportCos        TransportCompany[]
-  vehicleLocations    VehicleLocation[]
-  freightAgents       FreightAgent[]
-  packingAgents       PackingAgent[]
-  rowStatuses         RowColourStatus[]
-  serialCounters      SerialCounter[]
-  notifications       Notification[]
-  activityLogs        ActivityLog[]
-  refreshTokens       RefreshToken[]
-  deviceTokens        DeviceToken[]
-  customerSessions    CustomerSession[]
-  otpCodes            OtpCode[]
-  inspectionCompanies InspectionCompany[]
-  inspectionBy        InspectionBy[]
+  users                   User[]
+  vehicles                Vehicle[]
+  brands                  Brand[]
+  auctionHalls            AuctionHall[]
+  suppliers               Supplier[]
+  transportCos            TransportCompany[]
+  vehicleLocations        VehicleLocation[]
+  freightAgents           FreightAgent[]
+  packingAgents           PackingAgent[]
+  rowStatuses             RowColourStatus[]
+  serialCounters          SerialCounter[]
+  notifications           Notification[]
+  activityLogs            ActivityLog[]
+  refreshTokens           RefreshToken[]
+  deviceTokens            DeviceToken[]
+  customerSessions        CustomerSession[]
+  otpCodes                OtpCode[]
+  vehicleMilestones       VehicleMilestone[]
+  linkRequests            VehicleLinkRequest[]
+  notificationPreferences NotificationPreference[]
+  conversations           Conversation[]
+  messages                Message[]
+  faqs                    Faq[]
+  enquiries               Enquiry[]
+  stockVehicles           StockVehicle[]
+  stockImages             StockImage[]
+  inspectionCompanies     InspectionCompany[]
+  inspectionBy            InspectionBy[]
 }
 
 // ─────────────────────────────────────────────
@@ -127,32 +136,37 @@ model User {
   updatedAt           DateTime   @updatedAt
 
   // Customer accounts (Phase 2). All nullable so the staff app and existing rows are unaffected.
-  emailVerifiedAt     DateTime?
-  companyName         String?
+  emailVerifiedAt DateTime?
+  companyName     String?
   // null means "en" (the only language served today).
-  language            String?
+  language        String?
   // "light" | "dark" | "system"
-  theme               String?
-  destinationPort     String?
+  theme           String?
+  destinationPort String?
   // The staff member responsible for this customer.
-  assignedAgentId     String?
+  assignedAgentId String?
   // Set when a customer deletes their account: PII is removed, business records stay.
-  deletedAt           DateTime?
+  deletedAt       DateTime?
 
-  org Organization @relation(fields: [org_id], references: [id])
-  assignedAgent     User?  @relation("AssignedAgent", fields: [assignedAgentId], references: [id])
-  assignedCustomers User[] @relation("AssignedAgent")
+  org               Organization @relation(fields: [org_id], references: [id])
+  assignedAgent     User?        @relation("AssignedAgent", fields: [assignedAgentId], references: [id])
+  assignedCustomers User[]       @relation("AssignedAgent")
 
   // CUSTOMER users can own vehicles; STAFF users cannot (enforced in service layer)
-  vehicles          Vehicle[]         @relation("CustomerVehicles")
-  activityLogs      ActivityLog[]
-  notifications     Notification[]
-  uploadedPhotos    VehiclePhoto[]
-  uploadedDocuments VehicleDocument[]
-  refreshTokens     RefreshToken[]
-  deviceTokens      DeviceToken[]
-  customerSessions  CustomerSession[]
-  otpCodes          OtpCode[]
+  vehicles               Vehicle[]               @relation("CustomerVehicles")
+  activityLogs           ActivityLog[]
+  notifications          Notification[]
+  uploadedPhotos         VehiclePhoto[]
+  uploadedDocuments      VehicleDocument[]
+  refreshTokens          RefreshToken[]
+  deviceTokens           DeviceToken[]
+  customerSessions       CustomerSession[]
+  otpCodes               OtpCode[]
+  recordedMilestones     VehicleMilestone[]
+  linkRequests           VehicleLinkRequest[]    @relation("LinkRequestCustomer")
+  decidedLinkRequests    VehicleLinkRequest[]    @relation("LinkRequestDecider")
+  notificationPreference NotificationPreference?
+  conversations          Conversation[]          @relation("ConversationCustomer")
 
   @@unique([org_id, email])
   @@index([org_id, userType])
@@ -390,6 +404,17 @@ model Vehicle {
 
   vesselName String? // FC only — applies to both RORO and Container shipments
 
+  // Customer app (Phase 2). All nullable or defaulted, so the staff app and existing rows are unaffected.
+  portOfLoading          String?
+  portOfDischarge        String?
+  voyageNo               String?
+  // Only FC vehicles with this set to true are ever shown to their customer. Off by default.
+  customerVisible        Boolean  @default(false)
+  // What the customer is shown as the amount. The basis (FOB / CIF / invoiced) is the business's decision, hence
+  // the neutral name. null until a value is entered.
+  customerAmount         Decimal? @db.Decimal(14, 2)
+  customerAmountCurrency String?
+
   // FC only — whether this vehicle needs/had an inspection. Plain Yes/No,
   // same reasoning as hasPartnership below (whoever enters the vehicle
   // always knows). The Inspection Report itself is a VehicleDocument row
@@ -485,6 +510,9 @@ model Vehicle {
   inspectionBy      InspectionBy?      @relation(fields: [inspectionById], references: [id])
 
   photos        VehiclePhoto[]
+  milestones    VehicleMilestone[]
+  linkRequests  VehicleLinkRequest[]
+  conversations Conversation[]
   documents     VehicleDocument[]
   statusHistory StatusHistory[]
 
@@ -516,11 +544,13 @@ model Vehicle {
 
 // Multiple photos per vehicle
 model VehiclePhoto {
-  id           String   @id @default(cuid())
-  vehicleId    String
-  url          String // Cloudflare R2 URL (presigned for uploads, standard for reads)
-  uploadedById String
-  createdAt    DateTime @default(now())
+  id                String   @id @default(cuid())
+  vehicleId         String
+  url               String // Cloudflare R2 URL (presigned for uploads, standard for reads)
+  uploadedById      String
+  createdAt         DateTime @default(now())
+  // Customer app: may the vehicle's customer see this photo? A column with a default is invisible to the old app.
+  visibleToCustomer Boolean  @default(true)
 
   vehicle    Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
   uploadedBy User    @relation(fields: [uploadedById], references: [id])
@@ -530,13 +560,15 @@ model VehiclePhoto {
 
 // Multiple documents per vehicle (B/L, export cert, invoices, etc.)
 model VehicleDocument {
-  id           String              @id @default(cuid())
-  vehicleId    String
-  url          String
-  name         String // Original filename shown in the UI
-  documentType VehicleDocumentType @default(OTHER)
-  uploadedById String
-  createdAt    DateTime            @default(now())
+  id                String              @id @default(cuid())
+  vehicleId         String
+  url               String
+  name              String // Original filename shown in the UI
+  documentType      VehicleDocumentType @default(OTHER)
+  uploadedById      String
+  createdAt         DateTime            @default(now())
+  // Customer app: documents are private unless staff release them.
+  visibleToCustomer Boolean             @default(false)
 
   vehicle    Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
   uploadedBy User    @relation(fields: [uploadedById], references: [id])
@@ -752,4 +784,213 @@ model OtpCode {
   user User         @relation(fields: [userId], references: [id])
 
   @@index([org_id, userId, purpose])
+}
+
+// ─────────────────────────────────────────────
+// PHASE 2, SLICE 2: milestones, link requests, preferences, chat, FAQ, enquiries, public stock.
+// Every table has org_id and an index starting with org_id; RLS is enabled with no policies in the migration.
+// ─────────────────────────────────────────────
+
+enum MilestoneType {
+  BOUGHT
+  AUCTION_BILL_PAID
+  AT_EXPORT_YARD
+  EXPORT_CERT_ISSUED
+  BOOKING_RECEIVED
+  SHIPPED
+  BL_ISSUED
+  ARRIVED
+  DELIVERED
+}
+
+// One row per vehicle and milestone type. The unique key is what makes "recorded exactly once" true even when two
+// requests (or the daily job and a staff member) try at the same moment.
+model VehicleMilestone {
+  id           String        @id @default(cuid())
+  org_id       String
+  vehicleId    String
+  type         MilestoneType
+  occurredAt   DateTime
+  // null when the system recorded it (automation, backfill)
+  recordedById String?
+  createdAt    DateTime      @default(now())
+
+  org        Organization @relation(fields: [org_id], references: [id])
+  vehicle    Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  recordedBy User?        @relation(fields: [recordedById], references: [id])
+
+  @@unique([vehicleId, type])
+  @@index([org_id, vehicleId])
+}
+
+enum LinkRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// A customer asking to be linked to a vehicle by serial. The serial is stored as typed and NOT resolved, so a
+// request never confirms or denies that the vehicle exists.
+model VehicleLinkRequest {
+  id            String            @id @default(cuid())
+  org_id        String
+  customerId    String
+  serialEntered String
+  // set on approval
+  vehicleId     String?
+  status        LinkRequestStatus @default(PENDING)
+  decidedById   String?
+  decidedAt     DateTime?
+  createdAt     DateTime          @default(now())
+
+  org       Organization @relation(fields: [org_id], references: [id])
+  customer  User         @relation("LinkRequestCustomer", fields: [customerId], references: [id])
+  decidedBy User?        @relation("LinkRequestDecider", fields: [decidedById], references: [id])
+  vehicle   Vehicle?     @relation(fields: [vehicleId], references: [id])
+
+  @@index([org_id, status, createdAt])
+  @@index([org_id, customerId])
+}
+
+model NotificationPreference {
+  id                String   @id @default(cuid())
+  org_id            String
+  userId            String   @unique
+  // { "<event>": boolean } toggles; a missing key means "on"
+  events            Json     @default("{}")
+  // 3, 7 or 14 (validated in the app)
+  departureLeadDays Int      @default(7)
+  pushEnabled       Boolean  @default(true)
+  emailEnabled      Boolean  @default(true)
+  // Stored only. WhatsApp is not sent (needs approved templates).
+  whatsappEnabled   Boolean  @default(false)
+  updatedAt         DateTime @updatedAt
+
+  org  Organization @relation(fields: [org_id], references: [id])
+  user User         @relation(fields: [userId], references: [id])
+
+  @@index([org_id, userId])
+}
+
+enum MessageSender {
+  CUSTOMER
+  STAFF
+}
+
+model Conversation {
+  id            String    @id @default(cuid())
+  org_id        String
+  customerId    String
+  // optional: a vehicle that belongs to this customer
+  vehicleId     String?
+  lastMessageAt DateTime  @default(now())
+  handledAt     DateTime?
+  handledById   String?
+  createdAt     DateTime  @default(now())
+
+  org      Organization @relation(fields: [org_id], references: [id])
+  customer User         @relation("ConversationCustomer", fields: [customerId], references: [id])
+  vehicle  Vehicle?     @relation(fields: [vehicleId], references: [id])
+  messages Message[]
+
+  @@index([org_id, customerId])
+  @@index([org_id, lastMessageAt])
+}
+
+// Plain text only. The API stores it as text and never treats it as markup.
+model Message {
+  id             String        @id @default(cuid())
+  org_id         String
+  conversationId String
+  senderType     MessageSender
+  senderId       String
+  body           String
+  createdAt      DateTime      @default(now())
+
+  org          Organization @relation(fields: [org_id], references: [id])
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([org_id, conversationId, createdAt])
+}
+
+model Faq {
+  id        String   @id @default(cuid())
+  org_id    String
+  question  String
+  answer    String
+  sortOrder Int      @default(0)
+  published Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  org Organization @relation(fields: [org_id], references: [id])
+
+  @@index([org_id, published, sortOrder])
+}
+
+// A message from the public website. Not tied to any account.
+model Enquiry {
+  id        String    @id @default(cuid())
+  org_id    String
+  name      String
+  email     String
+  phone     String?
+  message   String
+  stockSlug String?
+  handledAt DateTime?
+  createdAt DateTime  @default(now())
+
+  org Organization @relation(fields: [org_id], references: [id])
+
+  @@index([org_id, createdAt])
+}
+
+enum StockStatus {
+  DRAFT
+  PUBLISHED
+  SOLD
+}
+
+// Curated stock for the public website. NOT the vehicle ledger: nothing here is a Vehicle row, and the public
+// API addresses it by slug, never by id.
+model StockVehicle {
+  id           String      @id @default(cuid())
+  org_id       String
+  slug         String
+  make         String
+  model        String
+  year         Int?
+  priceFob     Decimal?    @db.Decimal(14, 2)
+  mileageKm    Int?
+  bodyType     String?
+  fuel         String?
+  transmission String?
+  colour       String?
+  description  String?
+  status       StockStatus @default(DRAFT)
+  publishedAt  DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  org    Organization @relation(fields: [org_id], references: [id])
+  images StockImage[]
+
+  @@unique([org_id, slug])
+  @@index([org_id, status, publishedAt])
+}
+
+model StockImage {
+  id             String   @id @default(cuid())
+  org_id         String
+  stockVehicleId String
+  // storage key under the PUBLIC prefix, never a private file's key
+  key            String
+  altText        String?
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  org          Organization @relation(fields: [org_id], references: [id])
+  stockVehicle StockVehicle @relation(fields: [stockVehicleId], references: [id], onDelete: Cascade)
+
+  @@index([org_id, stockVehicleId, sortOrder])
 }

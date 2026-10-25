@@ -16,6 +16,7 @@
 // leak, and the original code tolerated delete failures the same way).
 
 import { loadEnv } from "../config/env.js";
+import { ServiceError } from "./errors.js";
 
 export type FileKind = "AUCTION_SHEET" | "VEHICLE_PHOTO" | "VEHICLE_DOCUMENT";
 
@@ -80,6 +81,82 @@ export function checkNewFileUrl(orgId: string, url: string, kind: FileKind, vehi
   return key ? null : "This file was not uploaded for your organisation.";
 }
 
+// ---------------------------------------------------------------------------------------------
+// The store: signing and deleting. ONE interface; the S3 implementation (src/lib/s3-store.ts) is installed at
+// startup when the R2 credentials are set, and tests install a fake. Everything that signs a URL goes through
+// presignUpload / signedDownloadUrl below, so there is exactly one place that decides lifetimes.
+
+export interface ObjectStore {
+  /** A URL a client can PUT one object to. Must sign the exact content length and type. */
+  presignPut(args: { key: string; contentType: string; contentLength: number; expiresInSeconds: number }): Promise<string>;
+  /** A URL a client can GET one object from. */
+  presignGet(args: { key: string; expiresInSeconds: number; downloadName?: string }): Promise<string>;
+  deleteKey(key: string): Promise<void>;
+}
+
+let store: ObjectStore | null = null;
+
+export function setObjectStore(next: ObjectStore | null): void {
+  store = next;
+}
+
+export function objectStoreConfigured(): boolean {
+  return store !== null;
+}
+
+function requireStore(): ObjectStore {
+  if (!store) throw new ServiceError("VALIDATION", "File storage is not configured.");
+  return store;
+}
+
+/** Uploads are signed for exactly 5 minutes. */
+export const UPLOAD_URL_TTL_SECONDS = 300;
+
+export function downloadUrlTtlSeconds(): number {
+  return loadEnv().SIGNED_URL_TTL_SECONDS;
+}
+
+/** Characters safe in a key: letters, digits, dot, dash, underscore. Everything else becomes a dash. */
+export function safeFileName(name: string): string {
+  const cleaned = name.normalize("NFKD").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+/, "").replace(/-{2,}/g, "-");
+  const trimmed = cleaned.slice(-80) || "file";
+  return trimmed;
+}
+
+/** The key a NEW upload gets. Always inside the org's folder (staging while no vehicle exists yet). */
+export function buildObjectKey(orgId: string, kind: FileKind, vehicleId: string | undefined, fileName: string, uniqueId: string): string {
+  const folder = vehicleId ? `org/${orgId}/vehicles/${vehicleId}/${KIND_FOLDER[kind]}` : `org/${orgId}/uploads/staging`;
+  return `${folder}/${uniqueId}-${safeFileName(fileName)}`;
+}
+
+export interface PresignedUpload {
+  uploadUrl: string;
+  key: string;
+  publicUrl: string;
+  expiresInSeconds: number;
+}
+
+/** Signs one upload. The key must already be inside an allowed prefix (the caller builds it with buildObjectKey). */
+export async function presignUpload(args: { key: string; contentType: string; contentLength: number }): Promise<PresignedUpload> {
+  const base = publicBaseUrl();
+  if (!base) throw new ServiceError("VALIDATION", "File storage is not configured.");
+  const uploadUrl = await requireStore().presignPut({ ...args, expiresInSeconds: UPLOAD_URL_TTL_SECONDS });
+  return { uploadUrl, key: args.key, publicUrl: `${base}/${args.key}`, expiresInSeconds: UPLOAD_URL_TTL_SECONDS };
+}
+
+/**
+ * THE one function that turns a stored key into a time-limited download link. It trusts nothing: callers must
+ * have authorised the file first. A key outside the org's folder is refused here too, as a last line of defence.
+ */
+export async function signedDownloadUrl(orgId: string, key: string, downloadName?: string): Promise<{ url: string; expiresInSeconds: number }> {
+  if (!keyFromOwnedUrl(`https://key.invalid`, `https://key.invalid/${key}`, orgPrefix(orgId))) {
+    throw new ServiceError("NOT_FOUND", "File not found.");
+  }
+  const expiresInSeconds = downloadUrlTtlSeconds();
+  const url = await requireStore().presignGet({ key, expiresInSeconds, ...(downloadName ? { downloadName } : {}) });
+  return { url, expiresInSeconds };
+}
+
 /** Best effort. Today only records the orphan: deleting needs the object-storage SDK. */
 export interface ObjectDeleter {
   (key: string): Promise<void>;
@@ -90,7 +167,7 @@ let deleter: ObjectDeleter = async (key) => {
 };
 
 export function deleteObject(key: string): Promise<void> {
-  return deleter(key);
+  return store ? store.deleteKey(key) : deleter(key);
 }
 
 /** Install the real implementation once the SDK is added (and in tests). */

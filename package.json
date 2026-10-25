@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test:db": "vitest run --config vitest.db.config.ts",
     "migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
+    "backfill:milestones": "tsx --env-file-if-exists=.env scripts/backfill-milestones.ts",
     "test:all": "npm test && npm run test:db",
     "db:test:up": "sh scripts/test-db.sh up",
     "db:test:down": "sh scripts/test-db.sh down",

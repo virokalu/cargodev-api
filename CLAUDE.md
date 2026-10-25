@@ -53,6 +53,7 @@ Customer accounts are a separate zone from staff, under `/api/customer/v1`.
 - Never trust `customerId`, `orgId` or a role from the request. They come from the verified token; the guard re-loads the account on every request.
 - Every customer query filters by `orgId` AND the customer's own id. Another customer's resource is 404. Every customer route has an IDOR test.
 - Responses are whitelisted DTOs built field by field. Never return or spread a raw Prisma row.
+- A customer's password is set at `verify-email` (together with the emailed code), never at register: nobody can pre-register someone else's address with a password they know. Passwords and hashes never appear in a response, a log or an error; the redactor scrubs bcrypt hashes.
 - Responses for register, login, verify, forgot and reset never reveal whether an email has an account (same shape, same timing).
 - Logs never contain passwords, one-time codes, tokens, message bodies or full email addresses.
 - Email goes only through `src/lib/email.ts` and is a no-op without `RESEND_API_KEY`.

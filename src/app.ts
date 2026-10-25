@@ -13,6 +13,8 @@ import { registerCustomerAuthRoutes } from "./routes/customer-auth.js";
 import { registerCustomerRoutes } from "./routes/customers.js";
 import { registerDashboardRoutes } from "./routes/dashboard.js";
 import { registerLookupRoutes } from "./routes/lookups.js";
+import { registerMilestoneRoutes } from "./routes/milestones.js";
+import { registerUploadRoutes } from "./routes/uploads.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
 import { SseHub } from "./lib/sse-hub.js";
 import { registerAdminJobRoutes } from "./routes/admin-jobs.js";
@@ -143,6 +145,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       registerNotificationRoutes(api, { sseHub });
       registerAdminJobRoutes(api, { scheduler });
       registerVehicleRoutes(api);
+      registerMilestoneRoutes(api);
+      registerUploadRoutes(api);
     },
     { prefix: "/api/v1" }
   );

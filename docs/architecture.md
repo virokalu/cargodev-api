@@ -79,6 +79,24 @@ mutation (service)
 | Scheduled job | Runs in-process | The advisory lock already stops two instances running it at once. Sequential reruns (a deploy overlap) are safe only because the job is idempotent. Set `SCHEDULER_ENABLED=false` on instances that should not try. |
 | Stream caps | Per instance | Per instance, so the effective cap multiplies by the instance count. |
 
+## Files, signed links and milestones (Phase 2, slice 2)
+
+- **Store seam** (`src/lib/object-storage.ts`): one `ObjectStore` interface (`presignPut`, `presignGet`, `deleteKey`) installed at startup. Everything that signs goes through `presignUpload` and `signedDownloadUrl`, the only places that choose lifetimes (300 s for uploads, `SIGNED_URL_TTL_SECONDS` for downloads). The S3 implementation lives behind the interface; tests install a recorder.
+- **Authorise, then sign** (`customer-file-access.service.ts`): the customer must own an export-track vehicle that staff released, and the file itself must be released, before a link exists. Failure is a uniform 404.
+- **Milestones** (`milestone.service.ts`): `VehicleMilestone` has a unique key on (vehicle, type). Automation inserts with ON CONFLICT DO NOTHING inside the status-change transaction and never deletes.
+- **Public stock images** will live under a separate key prefix from private files (slice 7).
+
+## Planned: clean-up of expired rows (Phase 2, slice 5)
+
+Nothing deletes expired rows yet: `OtpCode`, `CustomerSession` and the staff `RefreshToken` table only grow. They are
+harmless (every read checks expiry and revocation) but unbounded. Slice 5 adds a second step to the daily job
+(`src/scheduler/daily-checks-job.ts`, after the reminders, under the same advisory lock), planned as:
+
+- `OtpCode`: delete rows whose `expiresAt` is more than 1 day old.
+- `CustomerSession` and `RefreshToken`: delete rows whose `expiresAt` is more than 7 days old, or that were revoked more than 30 days ago (a short trail is kept so reuse detection still sees a recently rotated token).
+- Batched (for example 1000 rows per statement) and idempotent; a failure is reported like any other check and does not stop the rest.
+- Covered by a real-Postgres test (old rows go, recent and live rows stay).
+
 ## Customer zone
 
 `/api/customer/v1` is a second API in the same process (ADR 0005): `routes/customer-auth.ts` -> `services/customer-*.service.ts`

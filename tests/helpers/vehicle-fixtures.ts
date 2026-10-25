@@ -23,6 +23,7 @@ export const VEHICLE_RELATIONS = {
   },
   vehiclePhoto: { uploadedBy: { model: "user", fk: "uploadedById" } },
   vehicleDocument: { uploadedBy: { model: "user", fk: "uploadedById" } },
+  vehicleMilestone: { recordedBy: { model: "user", fk: "recordedById" } },
   vehicleModelRef: { brand: { model: "brand", fk: "brand_id" } },
   statusHistory: { vehicle: { model: "vehicle", fk: "vehicleId" } },
 } as const;

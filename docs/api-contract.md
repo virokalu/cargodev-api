@@ -152,6 +152,26 @@ Every write is scoped to the token's org by id; another org's, a deleted or an u
 
 Every id in a create or update body (model, grade, hall, supplier, customer, agents, locations, row colour, inspection) must belong to the caller's org, otherwise 400 with a field error. A 409 `CONFLICT` means the serial was taken by a concurrent save; retry.
 
+### Vehicle milestones (staff)
+
+The customer timeline: BOUGHT, AUCTION_BILL_PAID, AT_EXPORT_YARD, EXPORT_CERT_ISSUED, BOOKING_RECEIVED, SHIPPED, BL_ISSUED, ARRIVED, DELIVERED. One row per vehicle and type.
+
+| Method | Path | Roles | Notes |
+|---|---|---|---|
+| GET | /api/v1/vehicles/:serial/milestones | any staff | `[{ type, occurredAt, recordedBy: { id, name } \| null }]`, oldest first. `recordedBy` is null when the system recorded it |
+| PUT | /api/v1/vehicles/:id/milestones/:type | ADMINISTRATOR, MANAGER, OPERATOR | `{ occurredAt? }` (a date or timestamp; default now; not in the future). Records it, or moves its date if it exists |
+| DELETE | /api/v1/vehicles/:id/milestones/:type | ADMINISTRATOR, MANAGER, OPERATOR | Undo. The only way a milestone is ever removed |
+
+Automation records BOOKING_RECEIVED (when a vehicle enters that status) and SHIPPED (the daily job and any edit that makes it shipped; dated by the ETD) in the same transaction as the status change. It only **adds**: clearing an ETD or reverting a status removes nothing.
+
+### Uploads
+
+| Method | Path | Roles | Body | Success |
+|---|---|---|---|---|
+| POST | /api/v1/uploads/presign | ADMINISTRATOR, MANAGER, OPERATOR | `{ vehicleId?, kind: AUCTION_SHEET \| VEHICLE_PHOTO \| VEHICLE_DOCUMENT, fileName, contentType, fileSize }` | 200 `{ uploadUrl, key, publicUrl, expiresInSeconds: 300, headers: { "Content-Type" } }` |
+
+The vehicle must be the caller's org's (otherwise 404, and nothing is signed). The server builds the key (the client never chooses it): `org/<orgId>/vehicles/<vehicleId>/{photos|documents|auction-sheet}/<uuid>-<safe name>`, or `org/<orgId>/uploads/staging/...` when there is no vehicle yet. The link is signed for the exact size and type, valid 5 minutes. Images: JPEG, PNG or WebP up to 10 MB; documents: PDF up to 20 MB. Send the file with a PUT to `uploadUrl` using exactly the returned headers, then pass `publicUrl` to the add-photo / add-document / auction-sheet endpoints. 400 `File storage is not configured.` when storage is off.
+
 ### Vehicle files
 
 File bytes never pass through this API; the database stores URLs. A URL is accepted only if it is under `R2_PUBLIC_URL` and inside the caller's own org folder: `org/<orgId>/uploads/staging/` when creating a vehicle, or `org/<orgId>/vehicles/<vehicleId>/{photos|documents|auction-sheet}/` for an existing one. Anything else is 400 with `fieldErrors.url`. When `R2_PUBLIC_URL` is not set, every file URL is refused.
@@ -167,7 +187,7 @@ File bytes never pass through this API; the database stores URLs. A URL is accep
 | DELETE | /api/v1/vehicles/:id/photos/:photoId | ADMINISTRATOR, MANAGER | |
 | DELETE | /api/v1/vehicles/:id/documents/:docId | ADMINISTRATOR, MANAGER | |
 
-Deleting removes the database row. Removing the stored object needs the object-storage SDK and is not done yet; the object is left in place.
+Deleting removes the database row and then the stored object (best effort: a storage failure never blocks the delete, and only objects inside the caller's own org folder are ever removed). Without the object-storage SDK installed the object is left in place.
 
 ### Live notification stream
 
@@ -224,7 +244,7 @@ Rate limits (per IP / per email, from `src/config/customer-rate-limits.ts`): reg
 
 | Area | Why |
 |---|---|
-| File presign (`POST /uploads/presign`) and deleting stored objects | Needs an S3-compatible SDK, not added yet. Until then clients cannot upload through this API. |
+| The S3 client behind presign / signed downloads / object delete | The routes, rules and tests are built against a store interface; the S3 implementation waits for approval of `@aws-sdk/client-s3` and `@aws-sdk/s3-request-presigner`. Until then storage answers "not configured". |
 | Customer app data (vehicles, documents, alerts, chat, stock) | Phase 2 slices 2 to 7. Only auth and the profile exist so far. |
 
 ## Known doc drift

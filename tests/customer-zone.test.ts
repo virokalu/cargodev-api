@@ -1,11 +1,15 @@
 import { SignJWT } from "jose";
 import type { FastifyInstance } from "fastify";
 import bcrypt from "bcryptjs";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi  } from "vitest";
+
+// bcrypt is deliberately slow and the whole suite runs in parallel: allow this file more than the 5 s default (per file, not global).
+vi.setConfig({ testTimeout: 30_000 });
 import type { FakePrisma } from "./helpers/fake-prisma.js";
 import { ORG_A, ORG_B } from "./helpers/fixtures.js";
 import {
   CUSTOMER_PASSWORD,
+  NEW_PASSWORD,
   IDOR_WORLD,
   bearerFor,
   customerToken,
@@ -333,5 +337,120 @@ describe("timing: unknown and real addresses cost the same", () => {
       await post(app, path, body);
       expect(Date.now() - started, `${path} ${JSON.stringify(body)}`).toBeGreaterThanOrEqual(115);
     }
+  });
+});
+
+describe("a STAFF-owned email is never touched by the customer endpoints", () => {
+  const STAFF = "staff@example.test";
+  const sent: { to: string }[] = [];
+
+  it("every endpoint answers like any unknown address, changes nothing on the staff row, and contacts nobody", async () => {
+    const staffBefore = JSON.stringify(fake.rows("user").find((r) => r["email"] === STAFF));
+    const userCountBefore = fake.rows("user").length;
+
+    const probe = async (email: string) => {
+      const out: unknown[] = [];
+      const send = async (path: string, body: unknown) => {
+        const res = await post(app, path, body);
+        out.push({ path, status: res.statusCode, body: res.json() });
+      };
+      await send("/auth/register", { name: "Someone", email });
+      await send("/auth/resend-verification", { email });
+      await send("/auth/verify-email", { email, code: "123456", password: CUSTOMER_PASSWORD });
+      await send("/auth/forgot-password", { email });
+      await send("/auth/reset-password", { email, code: "123456", newPassword: CUSTOMER_PASSWORD });
+      for (let i = 0; i < 4; i++) await send("/auth/login", { email, password: "wrong-example-password" });
+      await send("/auth/login", { email, password: CUSTOMER_PASSWORD });
+      return out;
+    };
+
+    const asStaff = await probe(STAFF);
+    identifierLimiter.reset();
+    resetShadowLockouts();
+    const asUnknown = await probe("nobody.at.all@example.test");
+    // Same status and same body at every step (ignoring the address itself).
+    expect(asStaff).toEqual(asUnknown);
+
+    // The staff row is byte-for-byte what it was: no password, lockout, verification or profile change.
+    expect(JSON.stringify(fake.rows("user").find((r) => r["email"] === STAFF))).toBe(staffBefore);
+    // Only the unknown address got a (pending) row; nothing was created for the staff address.
+    expect(fake.rows("user").length).toBe(userCountBefore + 1);
+    const staffId = fake.rows("user").find((r) => r["email"] === STAFF)!["id"];
+    expect(fake.rows("otpCode").filter((o) => o["userId"] === staffId)).toHaveLength(0);
+    expect(fake.rows("customerSession").filter((s) => s["userId"] === staffId)).toHaveLength(0);
+    expect(fake.rows("activityLog").filter((l) => l["actorId"] === staffId)).toHaveLength(0);
+    void sent;
+  });
+});
+
+describe("the password value never leaves the server", () => {
+  const everyResponse = async () => {
+    const bodies: string[] = [];
+    const record = (res: { body: string }) => bodies.push(res.body);
+    const headers = await bearerFor("cust_a1");
+    record(await post(app, "/auth/login", { email: "a1@example.test", password: CUSTOMER_PASSWORD }));
+    record(await post(app, "/auth/login", { email: "a1@example.test", password: "wrong-example-password" }));
+    record(await post(app, "/auth/login", { email: "nobody@example.test", password: CUSTOMER_PASSWORD }));
+    record(await request(app, "GET", "/me", headers));
+    record(await request(app, "PATCH", "/me", headers, { name: "Changed Name" }));
+    record(await request(app, "PATCH", "/me", headers, { password: CUSTOMER_PASSWORD }));
+    record(await request(app, "PATCH", "/me", headers, { name: "" }));
+    record(await post(app, "/auth/register", { name: "N", email: "pw.check@example.test", password: CUSTOMER_PASSWORD }));
+    record(await post(app, "/auth/verify-email", { email: "a1@example.test", code: "000000", password: NEW_PASSWORD }));
+    record(await post(app, "/auth/verify-email", { email: "a1@example.test", code: "000000", password: "short" }));
+    record(await post(app, "/auth/reset-password", { email: "a1@example.test", code: "000000", newPassword: NEW_PASSWORD }));
+    record(await post(app, "/auth/delete-account", { password: "wrong-example-password" }, headers));
+    return bodies.join("\n");
+  };
+
+  it("neither the stored hash nor any plain password appears in a response, a validation error or a failure", async () => {
+    const hash = String(fake.rows("user").find((r) => r["id"] === "cust_a1")!["password"]);
+    expect(hash).toMatch(/^\$2/);
+    const all = await everyResponse();
+    for (const secret of [hash, CUSTOMER_PASSWORD, NEW_PASSWORD, "wrong-example-password"]) expect(all).not.toContain(secret);
+    expect(all).not.toMatch(/\$2[aby]\$/);
+  });
+
+  it("the login and refresh DTOs list their keys and none is a password", async () => {
+    const login = (await post(app, "/auth/login", { email: "a1@example.test", password: CUSTOMER_PASSWORD })).json().data;
+    expect(Object.keys(login).sort()).toEqual(["accessToken", "accessTokenExpiresIn", "refreshToken", "refreshTokenExpiresAt", "user"]);
+    const refreshed = (await post(app, "/auth/refresh", { refreshToken: login.refreshToken })).json().data;
+    expect(Object.keys(refreshed).sort()).toEqual(Object.keys(login).sort());
+    expect(Object.keys(refreshed.user).sort()).toEqual(["email", "id", "name"]);
+  });
+
+  it("an unexpected server error returns the generic message and logs neither the password nor the hash", async () => {
+    const lines: string[] = [];
+    const { Writable } = await import("node:stream");
+    const stream = new Writable({ write(chunk, _e, done) { lines.push(chunk.toString()); done(); } });
+    const noisy = await buildApp({ rateLimit: false, logger: true, logStream: stream });
+    try {
+      const hash = String(fake.rows("user").find((r) => r["id"] === "cust_a1")!["password"]);
+      // Make the next database call fail with a message that contains the secrets, as a driver error could.
+      const original = fake.client as unknown as { user: { findFirst: (...a: unknown[]) => unknown } };
+      const real = original.user.findFirst;
+      // (Hashes are scrubbed by the redactor; our own code never puts a plain password in a message.)
+      original.user.findFirst = () => { throw new Error(`boom ${hash}`); };
+      const res = await post(noisy, "/auth/login", { email: "a1@example.test", password: CUSTOMER_PASSWORD });
+      original.user.findFirst = real;
+      expect(res.statusCode).toBe(500);
+      expect(res.json()).toEqual({ error: { code: "INTERNAL", message: "Something went wrong." } });
+      expect(res.body).not.toContain(hash);
+      expect(lines.join("")).not.toContain(hash);
+      expect(lines.join("")).not.toContain(CUSTOMER_PASSWORD);
+      expect(lines.join("")).toContain("unexpected error");
+    } finally {
+      await noisy.close();
+    }
+  });
+});
+
+describe("redactor", () => {
+  it("scrubs bcrypt hashes out of text that is about to be logged, and leaves ordinary text alone", async () => {
+    const { redactSecrets } = await import("../src/lib/redact.js");
+    const hash = bcrypt.hashSync("example-value-for-redactor", 4);
+    expect(hash).toMatch(/^\$2[aby]\$04\$/);
+    expect(redactSecrets(`failed for ${hash} here`)).toBe("failed for [redacted] here");
+    expect(redactSecrets("a price of $20 and $2b are fine")).toBe("a price of $20 and $2b are fine");
   });
 });

@@ -18,8 +18,9 @@ Variables are validated at startup in `src/config/env.ts`. The app refuses to st
 | MOBILE_JWT_SECRET | Signs access tokens (long, random) | with auth |
 | ORG_ID | Default org for login lookup and cron only | with auth |
 | R2_PUBLIC_URL | Public base URL files are served from. Required to attach any file: every file URL is checked against it and the caller's own org folder | with files |
-| R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME | Upload signing and deleting objects. Not used yet (needs the object-storage SDK) | later |
+| R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME | Signing uploads and downloads, deleting objects. **All four or none** (a partial set fails startup). Same names as CargoDev | with files |
 | EXPO_ACCESS_TOKEN | Expo push (optional) | no |
+| SIGNED_URL_TTL_SECONDS | How long a signed DOWNLOAD link works: 300 to 900, default 600. Upload links are fixed at 300 | no |
 | CUSTOMER_JWT_SECRET | Signs customer access tokens (32+ characters, unique per environment, **different from MOBILE_JWT_SECRET**: startup fails if equal). Unset means the customer API is not mounted | for the customer app |
 | CUSTOMER_SELF_SIGNUP | true (default) or false. false: register does nothing, only customers staff created and enabled can sign in | no |
 | RESEND_API_KEY | Resend API key for transactional email (same name as CargoDev). **Unset means nothing is ever sent**: `src/lib/email.ts` only logs a masked notice. Tests delete it | no |

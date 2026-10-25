@@ -86,6 +86,12 @@ If you see "The database test harness refused to run", read the message: it says
 - `tests/db/customer-auth.db.test.ts` and `customer-auth.concurrency.db.test.ts`: the SQL and the parallel guarantees (the concurrency file needs a real Postgres).
 - The email queue is replaced by a recorder in tests so the plain code can be read back. Tests never have `RESEND_API_KEY`.
 
+## Slice 2 tests
+
+- `tests/milestones.test.ts` (routes, automation, add-only rule), `tests/storage-signing.test.ts` (presign and customer downloads against a recording store), `tests/milestone-backfill.test.ts`, `tests/env-storage.test.ts`.
+- `tests/db/milestones.db.test.ts` and `milestones.concurrency.db.test.ts`: unique index, rollback, defaults, visibility filters, and parallel writers (the concurrency file needs a real Postgres).
+- No test contacts a bucket: the store is a recorder.
+
 ## Migrations (separate from the test harness)
 
 `npm run migrate -- <command>` is the only way to run migration commands (`scripts/migrate.ts`, helpers in `scripts/migrate-tools.ts`, tested by `tests/migrate-tools.test.ts`). It aims at `MIGRATION_DATABASE_URL`, else `DIRECT_URL`. It does not check which database that is. It prints the host, port, database name and Supabase project ref (never the password) first, and **every `deploy` needs a maintainer's approval for that run** (see `docs/runbook.md`).

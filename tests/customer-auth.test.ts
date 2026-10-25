@@ -1,5 +1,8 @@
 import type { FastifyInstance } from "fastify";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi  } from "vitest";
+
+// bcrypt is deliberately slow and the whole suite runs in parallel: allow this file more than the 5 s default (per file, not global).
+vi.setConfig({ testTimeout: 30_000 });
 import type { FakePrisma } from "./helpers/fake-prisma.js";
 import { ORG_A } from "./helpers/fixtures.js";
 import { CUSTOMER_PASSWORD, NEW_PASSWORD, bearerFor, codeFrom, newCustomerFake, post, request } from "./helpers/customer-fixtures.js";

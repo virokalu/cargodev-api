@@ -30,6 +30,7 @@ import { checkNewFileUrl, type FileKind } from "../lib/object-storage.js";
 import { vehicleCreateSchema, vehicleUpdateSchema, flattenFieldErrors } from "../validation/vehicle.schema.js";
 import { assignNextSerial, assignLegacySerial, correctSerialNumber } from "./serial.service.js";
 import * as activityLog from "./activity-log.service.js";
+import { recordStatusMilestone } from "./milestone.service.js";
 import * as notificationService from "./notification.service.js";
 import { buildTrackWhere, computeEffectiveTrack, type TrackFilter } from "../lib/vehicle-track.js";
 import {
@@ -697,6 +698,7 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
           triggeredBy: user.id,
         },
       });
+      await recordStatusMilestone(tx, { orgId: user.orgId, vehicleId: created.id, status: legacyStatus, occurredAt: legacyStatus === "SHIPPED" ? (etd ?? new Date()) : new Date(), recordedById: user.id });
     } else if (!legacyStatus && startsBookingReceived) {
       await tx.statusHistory.create({
         data: {
@@ -707,6 +709,7 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
           triggeredBy: user.id,
         },
       });
+      await recordStatusMilestone(tx, { orgId: user.orgId, vehicleId: created.id, status: "BOOKING_RECEIVED", occurredAt: new Date(), recordedById: user.id });
       if (!cancelled) {
         bookingReceivedNotification = {
           orgId: user.orgId,
@@ -1045,6 +1048,9 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
           triggeredBy: user.id,
         },
       });
+      // Add-only: entering BOOKING_RECEIVED or SHIPPED records its milestone once. Going back to PENDING (ETD cleared)
+      // deliberately removes nothing (the rule for that is waiting for the maintainer's decision).
+      await recordStatusMilestone(tx, { orgId: user.orgId, vehicleId: id, status: statusTransition.to, occurredAt: statusTransition.to === "SHIPPED" ? (etd ?? new Date()) : new Date(), recordedById: user.id });
     }
 
     // Resolved once and reused below — every notification this update might
@@ -1492,6 +1498,8 @@ export async function runDailyShipmentStatusTransitions(orgId: string): Promise<
             triggeredBy: null,
           },
         });
+        // Same transaction as the status change: a rollback leaves no milestone. Dated by the ETD (when it sailed).
+        await recordStatusMilestone(tx, { orgId, vehicleId: vehicle.id, status: "SHIPPED", occurredAt: vehicle.etd ?? new Date(), recordedById: null });
         const recipientUserIds = await notificationService.listNotifiableStaffIds(tx, orgId);
         const params: notificationService.EmitParams = {
           orgId,

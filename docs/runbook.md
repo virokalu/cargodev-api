@@ -30,6 +30,10 @@ Migrations are additive-first (ADR 0004) and run only through `npm run migrate -
 - Email is sent only if both `RESEND_API_KEY` and `EMAIL_FROM` are set. Keep them unset in development.
 - A customer locked out after 5 failed sign-ins waits 15 minutes; staff can clear it by resetting the customer's password through "forgot password".
 
+## Backfill milestones (once, after the slice 2 migration is applied)
+
+`npm run backfill:milestones` is a **dry run**: it prints the target, the project ref and counts, and writes nothing. It targets `MIGRATION_DATABASE_URL` only. Run it, compare the ref with your private notes, read the counts. `npm run backfill:milestones -- --apply` writes; run it only with the maintainer's approval for that run, after a snapshot. It is idempotent (existing milestones are skipped). It plans only milestones with a known date: BOUGHT from the purchase date, BOOKING_RECEIVED and SHIPPED from the first time the status was entered.
+
 ## Roll back
 
 1. Redeploy the previous known-good version from the host.

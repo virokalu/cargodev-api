@@ -7,6 +7,8 @@ const PATTERNS: RegExp[] = [
   /Expo(?:nent)?PushToken\[[^\]\s]+\]/g,
   // JWTs (three base64url segments starting with the usual {"alg" header)
   /eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g,
+  // bcrypt password hashes ($2a$/$2b$/$2y$, cost, 53 characters)
+  /\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}/g,
   // Authorization header values
   /Bearer\s+[A-Za-z0-9._~+/=-]{8,}/gi,
 ];

@@ -144,6 +144,13 @@ function applyData(row: Row, data: Row): void {
   }
 }
 
+/** Unique indexes the fake enforces for createMany (the real database enforces all of them). */
+const UNIQUE_KEYS: Record<string, string[][]> = {
+  vehicleMilestone: [["vehicleId", "type"]],
+  stockVehicle: [["org_id", "slug"]],
+  notificationPreference: [["userId"]],
+};
+
 export function createFakePrisma(options: FakePrismaOptions = {}) {
   const tables = new Map<string, Row[]>();
   const calls: RecordedCall[] = [];
@@ -280,6 +287,21 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
         // `include` returns every column plus the named relations.
         if (args.include && !args.select) return { ...row, ...project(model, row, args.include) };
         return project(model, row, args.select);
+      },
+      async createMany(args: { data: Row[]; skipDuplicates?: boolean }) {
+        rec("createMany", args);
+        let count = 0;
+        for (const data of args.data) {
+          const keys = UNIQUE_KEYS[model] ?? [];
+          const duplicate = keys.some((fields) => table(model).some((r) => fields.every((f) => r[f] === data[f])));
+          if (duplicate) {
+            if (args.skipDuplicates) continue;
+            throw Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
+          }
+          table(model).push({ id: `${model}_${++seq}`, createdAt: new Date(), ...data });
+          count += 1;
+        }
+        return { count };
       },
       async createManyAndReturn(args: { data: Row[]; select?: Row }) {
         rec("createManyAndReturn", args);

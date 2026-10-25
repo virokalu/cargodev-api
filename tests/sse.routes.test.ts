@@ -50,6 +50,8 @@ const shortLivedToken = (userId: string, seconds: number, orgId = ORG_A) =>
   new SignJWT({ orgId, role: "VIEWER", name: "Short", email: null })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(userId)
+    .setIssuer("cargodev-api")
+    .setAudience("staff")
     .setIssuedAt()
     .setExpirationTime(Math.floor(Date.now() / 1000) + seconds)
     .sign(new TextEncoder().encode(process.env["MOBILE_JWT_SECRET"]));

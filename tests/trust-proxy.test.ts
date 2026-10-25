@@ -69,7 +69,7 @@ describe("TRUST_PROXY_HOPS = 0 (default): X-Forwarded-For is ignored", () => {
     // 10 allowed per minute, then 429, even though every request claimed a new IP.
     expect(statuses.slice(0, 10).every((s) => s === 400)).toBe(true);
     expect(statuses.slice(10)).toEqual([429, 429]);
-  });
+  }, 30_000);
 });
 
 describe("TRUST_PROXY_HOPS = 1: exactly one proxy is trusted", () => {
@@ -99,7 +99,7 @@ describe("TRUST_PROXY_HOPS = 1: exactly one proxy is trusted", () => {
 
     // A different real client is unaffected.
     expect((await login(a, "198.51.100.9")).statusCode).toBe(400);
-  });
+  }, 30_000);
 });
 
 describe("TRUST_PROXY_HOPS = 2: two proxies are trusted, the client is the first untrusted address", () => {

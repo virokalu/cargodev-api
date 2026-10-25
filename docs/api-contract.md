@@ -190,12 +190,42 @@ Deleting removes the database row. Removing the stored object needs the object-s
 
 Runs the daily job now, taking the same lock as the scheduled run. Idempotent: calling it twice, or while the scheduler runs it, creates no duplicates. Returns `{ data: { status, durationMs, result? } }` where `status` is `ran`, `skipped_overlap` (a run is in progress in this process), `skipped_locked` (another instance holds the lock) or `failed` (the detail is in the server log, never in the response). Every call is written to the activity log with who triggered it.
 
+### Customer API (`/api/customer/v1`)
+
+A separate zone (ADR 0005). Mounted only when `CUSTOMER_JWT_SECRET` is set. Same envelope and `no-store` as the staff API.
+Auth: `Authorization: Bearer <customer accessToken>` (15 minutes, audience `customer`). A staff token is 401 here; a customer token is 401 on `/api/v1`.
+Request bodies are strict: an unknown field is a 400.
+
+| Method | Path | Auth | Body | Success |
+|---|---|---|---|---|
+| POST | /auth/register | none | `{ name, email, phone?, companyName?, country? }` | 202 `{ accepted: true }` for every address |
+| POST | /auth/verify-email | none | `{ email, code, password }` (code: 6 digits; password: 12 to 72 bytes) | 200 `{ verified: true }` |
+| POST | /auth/resend-verification | none | `{ email }` | 202 `{ accepted: true }` for every address |
+| POST | /auth/login | none | `{ email, password }` | 200 session (below) |
+| POST | /auth/refresh | none | `{ refreshToken }` | 200 session; the old token stops working |
+| POST | /auth/logout | none | `{ refreshToken }` | 200 `{ loggedOut: true }` (idempotent) |
+| POST | /auth/forgot-password | none | `{ email }` | 202 `{ accepted: true }` for every address |
+| POST | /auth/reset-password | none | `{ email, code, newPassword }` | 200 `{ reset: true }`; ends every session |
+| POST | /auth/delete-account | customer | `{ password }` | 200 `{ deleted: true }`; anonymises the account, ends every session |
+| GET | /me | customer | | 200 profile (below) |
+| PATCH | /me | customer | any of `{ name, phone, companyName, country, destinationPort, language, theme }` (at least one) | 200 profile |
+
+**Session** (login and refresh): `{ accessToken, accessTokenExpiresIn (seconds, 900), refreshToken, refreshTokenExpiresAt (ISO), user: { id, name, email } }`.
+
+**Profile** (exactly these keys): `id, name, email, phone, companyName, country, destinationPort, language ("en" when unset), theme ("light" | "dark" | "system" | null), memberSince (ISO)`.
+
+How it signs up: `register` creates an unverified account with no password and emails a 6-digit code (valid 10 minutes, 5 attempts). `verify-email` takes that code **and** the password the customer chooses. A customer staff created (login enabled, no password yet) gets in through `forgot-password` then `reset-password`. `CUSTOMER_SELF_SIGNUP=false` turns register off.
+
+Errors: 400 `VALIDATION` for bad input and for any wrong or expired code or credentials (one message each, whatever the cause); 403 `FORBIDDEN` for a locked account or a dead refresh token; 401 `UNAUTHENTICATED` for a bad or expired access token or an account that can no longer sign in; 429 `RATE_LIMITED` (with `Retry-After`).
+
+Rate limits (per IP / per email, from `src/config/customer-rate-limits.ts`): register 5/min, 3/hour; verify-email 10/min, 10/10 min; resend-verification 5/min, 3/10 min; login 10/min, 20/15 min; refresh 30/min; logout 30/min; forgot-password 5/min, 3/hour; reset-password 10/min, 10/10 min; delete-account 5/min, 5/hour; me 60/min. Per-email limits count unknown addresses too.
+
 ### Not built yet
 
 | Area | Why |
 |---|---|
 | File presign (`POST /uploads/presign`) and deleting stored objects | Needs an S3-compatible SDK, not added yet. Until then clients cannot upload through this API. |
-| Customer accounts and login | Out of scope (CLAUDE.md, ADR 0001). Customers exist only as records. |
+| Customer app data (vehicles, documents, alerts, chat, stock) | Phase 2 slices 2 to 7. Only auth and the profile exist so far. |
 
 ## Known doc drift
 

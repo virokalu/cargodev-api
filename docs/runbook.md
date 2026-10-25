@@ -12,6 +12,24 @@ Rate limiting and the audit trail use the client IP. By default the server trust
 2. Deploy from the host's pipeline (details kept privately).
 3. Check `GET /health` returns `{ "data": { "status": "ok" } }`.
 
+## Run a migration
+
+Migrations are additive-first (ADR 0004) and run only through `npm run migrate -- <command>`. The tool does not know which environment a database is, so you do:
+
+1. Run `npm run migrate -- status` (read-only). It prints the target host, port and database name, what `_prisma_migrations` holds, the pending migrations and the scan result.
+2. **Compare the printed project ref** with the test project's ref (kept in the private notes, not in this repo). The host alone is not enough: pooler hosts are shared by every project in a region. For a pooler URL the ref is the part of the user name after `postgres.`; for a direct URL it is the middle of `db.<ref>.supabase.co`. It is printed to the terminal only. If it is not the project you intend, stop.
+3. Before any `deploy` against a database that holds real data, **take a backup or snapshot and confirm it with a teammate**.
+4. Read the printed SQL. A flagged migration (DROP, RENAME, type change, NOT NULL without default, a new table missing org_id/index/RLS) stays blocked until a maintainer adds its name to `prisma/migrations/scan-approved.txt`.
+5. Run `deploy` only with the maintainer's approval for that run. Coding agents never run `deploy` on their own.
+6. If the tables exist but `_prisma_migrations` is empty or missing, `deploy` stops. The maintainer baselines the history by hand; this tool never runs `migrate resolve`.
+
+## Customer API
+
+- It is mounted only when `CUSTOMER_JWT_SECRET` is set. To switch it off, unset it and restart; customers lose access immediately (their tokens cannot be verified).
+- Rotating `CUSTOMER_JWT_SECRET` signs every customer out (access tokens stop verifying and the one-time codes in flight stop matching); sessions can start again by logging in. It must never equal `MOBILE_JWT_SECRET`.
+- Email is sent only if both `RESEND_API_KEY` and `EMAIL_FROM` are set. Keep them unset in development.
+- A customer locked out after 5 failed sign-ins waits 15 minutes; staff can clear it by resetting the customer's password through "forgot password".
+
 ## Roll back
 
 1. Redeploy the previous known-good version from the host.
@@ -45,6 +63,6 @@ Notes:
 
 ## Database
 
-- This repo owns the schema. Its migration tooling (`npm run migrate`) refuses everything except the designated test database; it never touches production. To change production, **a maintainer** applies the reviewed migration files from `prisma/migrations/` by hand, after reading the SQL, taking a backup, and confirming the old Next.js app still works with it (every migration is additive-first).
+- This repo owns the schema. Migrations run only through `npm run migrate` (see "Run a migration" above): a maintainer approves every `deploy`, compares the printed host first, and takes a backup before touching a database that holds real data. The tool does not identify the environment from the database name.
 - Run the test-harness commands only against the throwaway container, through `npm run test:db` (see `docs/testing.md`).
 - Restore drills and backup procedures are owned by the CargoDev project until that backend is retired.

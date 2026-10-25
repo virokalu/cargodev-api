@@ -39,15 +39,27 @@ This file is the contract. If a change breaks a rule here, change the rule in a 
 ## Database safety
 
 - This repo owns the schema (`prisma/schema.prisma`) and `prisma/migrations/` (ADR 0004). Changes go through reviewed, **additive-first** migrations: new tables, new nullable columns or columns with a safe default, added enum values. No drops, renames, type changes, or new NOT NULL columns without a default; removing old things is a separate, explicitly approved "contract" migration. Every new table has `org_id`, an index starting with `org_id`, and `ENABLE ROW LEVEL SECURITY` with no policies.
-- Migration commands run **only** through `npm run migrate -- <command>` (`scripts/migrate-guard.ts`), and **only** against the one designated test database named by `MIGRATION_DATABASE_URL` (host must equal `MIGRATION_ALLOWED_HOST`, database must equal `MIGRATION_ALLOWED_DB`; it must not be the runtime `DATABASE_URL`/`DIRECT_URL`) and the local/CI throwaway container. Never use `DATABASE_URL` or `DIRECT_URL` for migrations. Never use `migrate reset`, `db push`, `--force-reset` or `--accept-data-loss`; if `migrate dev` reports drift or wants a reset, stop and ask. Other environments are migrated by a maintainer, outside this repo's tooling.
+- Migration commands run **only** through `npm run migrate -- <command>` (`scripts/migrate.ts`). It uses `MIGRATION_DATABASE_URL`, else `DIRECT_URL` (the direct, non-pooled connection, as in CargoDev). It does not check which database that is, so every `deploy` needs the maintainer's explicit approval for that specific run, after the runbook checks (compare the printed project ref, not just the host, with the maintainer's private notes; backup first if the database holds real data). Agents may run `status`, `drift`, `scan`, `create` and `diff-script` on their own, never `deploy`. Only the fixed commands exist (`create`, `diff-script`, `scan`, `deploy`, `status`, `drift`): never `migrate reset`, `db push`, `--force-reset` or `--accept-data-loss`, and never `migrate resolve`. If `migrate dev` reports drift or wants a reset, stop and ask. If `_prisma_migrations` is empty or missing but the tables exist, stop: the maintainer baselines it.
 - Read the generated SQL and the scan result before applying any migration. Anything the scan flags (DROP, ALTER COLUMN TYPE, RENAME, TRUNCATE, DELETE, NOT NULL without DEFAULT) means stop and ask; only a maintainer approves it (`prisma/migrations/scan-approved.txt`).
-- Never run any other database-changing command against a shared or production database. Test-harness commands run only against a local or CI throwaway Postgres container (`npm run test:db`).
+- Never run any other database-changing command against a shared or production database. The test harness runs only against a local or CI throwaway Postgres container (`npm run test:db`).
 - The harness connects through `TEST_DATABASE_URL` only and never reads `DATABASE_URL`. It refuses to run unless the host is localhost/127.0.0.1/::1 (or the CI service container), the database name starts with `cargodev_test`, and the database is empty or was created by the harness. Do not weaken or bypass this check (`tests/db/guard.ts`).
 - Seed data in tests is fake. Local development uses your own dev database.
 
+## Customer zone (Phase 2, ADR 0005)
+
+Customer accounts are a separate zone from staff, under `/api/customer/v1`.
+
+- Separate token: HS256, `aud: "customer"`, signed with `CUSTOMER_JWT_SECRET` (must differ from `MOBILE_JWT_SECRET`; startup fails if equal). Staff tokens carry `aud: "staff"`. Both guards verify the audience AND the issuer.
+- Never trust `customerId`, `orgId` or a role from the request. They come from the verified token; the guard re-loads the account on every request.
+- Every customer query filters by `orgId` AND the customer's own id. Another customer's resource is 404. Every customer route has an IDOR test.
+- Responses are whitelisted DTOs built field by field. Never return or spread a raw Prisma row.
+- Responses for register, login, verify, forgot and reset never reveal whether an email has an account (same shape, same timing).
+- Logs never contain passwords, one-time codes, tokens, message bodies or full email addresses.
+- Email goes only through `src/lib/email.ts` and is a no-op without `RESEND_API_KEY`.
+
 ## Out of scope for now
 
-Customer accounts/login, public website API, chat, email/WhatsApp, new price/category fields. If a task tempts you into these, raise it in an issue first.
+Public website API (until its slice), WhatsApp sending, phone OTP, reservations and cost estimates, new price/category fields. If a task tempts you into these, raise it in an issue first.
 
 ## Definition of done
 

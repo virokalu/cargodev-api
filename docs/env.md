@@ -20,6 +20,10 @@ Variables are validated at startup in `src/config/env.ts`. The app refuses to st
 | R2_PUBLIC_URL | Public base URL files are served from. Required to attach any file: every file URL is checked against it and the caller's own org folder | with files |
 | R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME | Upload signing and deleting objects. Not used yet (needs the object-storage SDK) | later |
 | EXPO_ACCESS_TOKEN | Expo push (optional) | no |
+| CUSTOMER_JWT_SECRET | Signs customer access tokens (32+ characters, unique per environment, **different from MOBILE_JWT_SECRET**: startup fails if equal). Unset means the customer API is not mounted | for the customer app |
+| CUSTOMER_SELF_SIGNUP | true (default) or false. false: register does nothing, only customers staff created and enabled can sign in | no |
+| RESEND_API_KEY | Resend API key for transactional email (same name as CargoDev). **Unset means nothing is ever sent**: `src/lib/email.ts` only logs a masked notice. Tests delete it | no |
+| EMAIL_FROM | Sender address for outgoing email, for example `Name <no-reply@your-domain>`. Required together with `RESEND_API_KEY` | no |
 
 ## Test-only variable
 
@@ -33,12 +37,10 @@ Read only by `npm run migrate` (`scripts/migrate.ts`), never by the app. See `do
 
 | Variable | Purpose |
 |---|---|
-| MIGRATION_DATABASE_URL | The designated test database, **direct (non-pooled)** connection. Never the runtime database |
-| MIGRATION_ALLOWED_HOST | The one host migrations may run against. Must equal the URL's host exactly |
-| MIGRATION_ALLOWED_DB | The one database name migrations may run against. Must equal the URL's database exactly |
-| MIGRATION_REQUIRE_DB_SUFFIX | Optional. The allowed database name must end with this (default `_test`). Set to an empty value to turn the check off |
+| MIGRATION_DATABASE_URL | Optional. The database migrations run against, **direct (non-pooled)** connection. If unset, `DIRECT_URL` is used |
+| DIRECT_URL | Same name as in CargoDev: the direct connection used for migrations when `MIGRATION_DATABASE_URL` is not set. The app itself never reads it |
 
-Migrations never use `DATABASE_URL` or `DIRECT_URL`. If `MIGRATION_DATABASE_URL` is the same server and database as either, the guard refuses.
+Migrations never use `DATABASE_URL` (the pooled runtime connection). Nothing checks which database `DIRECT_URL` points at, so follow the runbook before every `deploy`.
 
 ## Rules
 

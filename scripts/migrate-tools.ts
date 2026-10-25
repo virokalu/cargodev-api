@@ -1,22 +1,17 @@
-// Safety guard for schema migrations. Every migrate command in this repo goes through
-// scripts/migrate.ts, which calls this module first. Pure functions, no I/O, so they are fully tested
-// (tests/migrate-guard.test.ts).
+// Helpers for scripts/migrate.ts: the fixed command list, the SQL scan, and the Prisma environment.
+// Pure functions, no I/O, tested in tests/migrate-tools.test.ts.
 //
-// This repo owns the schema, but migrations may only ever be aimed at ONE designated test database
-// (and the throwaway container). Production and other environments are migrated by a person, outside
-// this repo's tooling. The guard therefore refuses unless ALL of these hold:
-//
-//   1. MIGRATION_DATABASE_URL, MIGRATION_ALLOWED_HOST and MIGRATION_ALLOWED_DB are all set and valid.
-//   2. The URL's host equals MIGRATION_ALLOWED_HOST and its database equals MIGRATION_ALLOWED_DB, exactly.
-//   3. The URL is not the runtime DATABASE_URL (or DIRECT_URL): same string, or the same host, port and
-//      database. DATABASE_URL is only ever COMPARED with here, never used or printed.
-//   4. It is a direct connection (not a pooler), and has no parameters that could redirect it.
-//
+// There is no check on which database is targeted: whatever MIGRATION_DATABASE_URL (or, if that is
+// not set, DIRECT_URL) points at is what migrations run against. The maintainer compares the printed host
+// before every deploy (docs/runbook.md). What the tool does enforce:
+//   - only the fixed commands below exist (no reset, no db push, no raw flags, no --accept-data-loss);
+//   - the generated SQL is printed and scanned before anything is applied;
+//   - the Prisma process only ever sees the one URL, through the migrate config.
 // Messages never contain a connection string: it holds a password.
 
 export class UnsafeMigrationTargetError extends Error {
   constructor(message: string) {
-    super(`${message}\n\nThe migration guard refused to run. Nothing was changed.`);
+    super(`${message}\n\nThe migration tool refused to run. Nothing was changed.`);
     this.name = "UnsafeMigrationTargetError";
   }
 }
@@ -27,119 +22,93 @@ export interface MigrationTarget {
   host: string;
   port: number;
   database: string;
+  /** Supabase project ref when the URL is a Supabase one, else null. Shown on the terminal only. */
+  projectRef: string | null;
 }
 
-/** Connection-string parameters that can silently redirect the connection to another server. */
-const REDIRECT_PARAMS = ["host", "hostaddr", "service", "servicefile", "options"];
-const RESERVED_DATABASES = new Set(["postgres", "template0", "template1"]);
-/** Default required ending of the allowed database name. Set MIGRATION_REQUIRE_DB_SUFFIX to an empty value to turn it off. */
-export const DEFAULT_DB_SUFFIX = "_test";
-const HOST_PATTERN = /^[A-Za-z0-9.-]+$/;
-const DB_PATTERN = /^[A-Za-z0-9_]+$/;
-
-interface Parts {
-  host: string;
-  port: number;
-  database: string;
-  params: URLSearchParams;
+/**
+ * The Supabase project ref in a connection URL, or null.
+ *  - pooler URL: the user name is `postgres.<ref>` (the pooler host is shared by every project in a region,
+ *    so the host alone does not identify the project);
+ *  - direct URL: the host is `db.<ref>.supabase.co`.
+ * Printed to the terminal so the maintainer can compare it with the private notes; never written to a file.
+ */
+export function projectRefFromUrl(url: URL): string | null {
+  const user = decodeURIComponent(url.username);
+  const fromUser = /^postgres\.([a-z0-9]+)$/i.exec(user);
+  if (fromUser) return fromUser[1]!.toLowerCase();
+  const fromHost = /^db\.([a-z0-9]+)\.supabase\.co$/i.exec(url.hostname);
+  return fromHost ? fromHost[1]!.toLowerCase() : null;
 }
 
-function parts(raw: string): Parts | null {
+/** MIGRATION_DATABASE_URL, else DIRECT_URL (the direct, non-pooled connection, as in CargoDev). */
+export function resolveMigrationTarget(env: Record<string, string | undefined> = process.env): MigrationTarget {
+  const raw = (env["MIGRATION_DATABASE_URL"] ?? env["DIRECT_URL"])?.trim();
+  if (!raw) throw new UnsafeMigrationTargetError("Set MIGRATION_DATABASE_URL or DIRECT_URL (see docs/env.md).");
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    return null;
+    // Do not echo the value: it may contain a password.
+    throw new UnsafeMigrationTargetError("The migration database URL is not a valid postgres:// or postgresql:// URL.");
   }
-  if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") return null;
-  let database: string;
-  try {
-    database = decodeURIComponent(url.pathname.replace(/^\//, ""));
-  } catch {
-    return null;
+  if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
+    throw new UnsafeMigrationTargetError("The migration database URL is not a valid postgres:// or postgresql:// URL.");
   }
   return {
+    url: raw,
     host: url.hostname.replace(/^\[|\]$/g, "").toLowerCase(),
     port: url.port ? Number(url.port) : 5432,
-    database,
-    params: url.searchParams,
+    database: decodeURIComponent(url.pathname.replace(/^\//, "")),
+    projectRef: projectRefFromUrl(url),
   };
 }
 
-function sameServerAndDatabase(a: Parts, b: Parts): boolean {
-  return a.host === b.host && a.port === b.port && a.database === b.database;
+// ---------------------------------------------------------------------------------------------
+// What _prisma_migrations says, compared with the migrations folder.
+
+export interface HistoryRow {
+  name: string;
+  finished: boolean;
+  rolledBack: boolean;
 }
 
-export function assertSafeMigrationTarget(env: Record<string, string | undefined> = process.env): MigrationTarget {
-  const raw = env["MIGRATION_DATABASE_URL"]?.trim();
-  const allowedHost = env["MIGRATION_ALLOWED_HOST"]?.trim();
-  const allowedDb = env["MIGRATION_ALLOWED_DB"]?.trim();
+export interface HistoryAnalysis {
+  pending: string[];
+  /** Reasons `deploy` must stop. Empty means the history is fine to continue from. */
+  stops: string[];
+}
 
-  const missing = [
-    ["MIGRATION_DATABASE_URL", raw],
-    ["MIGRATION_ALLOWED_HOST", allowedHost],
-    ["MIGRATION_ALLOWED_DB", allowedDb],
-  ]
-    .filter(([, value]) => !value)
-    .map(([name]) => name);
-  if (missing.length > 0) {
-    throw new UnsafeMigrationTargetError(`Not set: ${missing.join(", ")}. All three are required (see docs/env.md).`);
-  }
+/**
+ * Mirrors Prisma's own reading of the table: a row with rolled_back_at set was resolved as rolled back and is
+ * ignored. A row with neither finished_at nor rolled_back_at is a failed or interrupted run and stops deploy,
+ * even if a finished row with the same name exists.
+ */
+export function analyzeHistory(
+  rows: readonly HistoryRow[],
+  folder: readonly string[],
+  tracked: boolean,
+  tablesExist: boolean
+): HistoryAnalysis {
+  const stops: string[] = [];
+  const live = rows.filter((r) => !r.rolledBack);
 
-  if (!HOST_PATTERN.test(allowedHost!) && !(allowedHost === "::1")) {
-    throw new UnsafeMigrationTargetError("MIGRATION_ALLOWED_HOST must be a single host name or IP address (no wildcards, ports or paths).");
+  if (tablesExist && (!tracked || rows.length === 0)) {
+    stops.push(
+      "The tables already exist but _prisma_migrations is empty or missing. Nothing may be applied and migrate resolve must not be run by this tool: the maintainer baselines the history."
+    );
   }
-  if (!DB_PATTERN.test(allowedDb!) || RESERVED_DATABASES.has(allowedDb!.toLowerCase())) {
-    throw new UnsafeMigrationTargetError("MIGRATION_ALLOWED_DB must be one specific database name, not a system database.");
+  const unfinished = [...new Set(live.filter((r) => !r.finished).map((r) => r.name))];
+  if (unfinished.length > 0) {
+    stops.push(`Unfinished or failed migrations recorded: ${unfinished.join(", ")}. The maintainer resolves these.`);
   }
-
-  // Opt-out is explicit: the variable must be present AND empty. Unset means the default applies.
-  const rawSuffix = env["MIGRATION_REQUIRE_DB_SUFFIX"];
-  const suffix = rawSuffix === undefined ? DEFAULT_DB_SUFFIX : rawSuffix.trim();
-  if (suffix !== "") {
-    if (!DB_PATTERN.test(suffix)) {
-      throw new UnsafeMigrationTargetError("MIGRATION_REQUIRE_DB_SUFFIX must contain only letters, digits and underscores (or be empty to turn the check off).");
-    }
-    if (!allowedDb!.endsWith(suffix)) {
-      throw new UnsafeMigrationTargetError(`MIGRATION_ALLOWED_DB must end with "${suffix}" (MIGRATION_REQUIRE_DB_SUFFIX).`);
-    }
-  }
-
-  const target = parts(raw!);
-  if (!target) {
-    // Do not echo the value: it may contain a password.
-    throw new UnsafeMigrationTargetError("MIGRATION_DATABASE_URL is not a valid postgres:// or postgresql:// URL.");
+  const unknown = [...new Set(live.map((r) => r.name).filter((n) => !folder.includes(n)))];
+  if (unknown.length > 0) {
+    stops.push(`The database has migrations that are not in prisma/migrations/: ${unknown.join(", ")}. The histories do not match.`);
   }
 
-  for (const name of REDIRECT_PARAMS) {
-    if (target.params.has(name)) {
-      throw new UnsafeMigrationTargetError(`MIGRATION_DATABASE_URL must not use the "${name}" parameter: it can redirect the connection.`);
-    }
-  }
-
-  if (target.host !== allowedHost!.toLowerCase().replace(/^\[|\]$/g, "")) {
-    throw new UnsafeMigrationTargetError("The host in MIGRATION_DATABASE_URL does not equal MIGRATION_ALLOWED_HOST.");
-  }
-  if (target.database !== allowedDb) {
-    throw new UnsafeMigrationTargetError("The database in MIGRATION_DATABASE_URL does not equal MIGRATION_ALLOWED_DB.");
-  }
-
-  // The runtime connection strings are compared, never used.
-  for (const name of ["DATABASE_URL", "DIRECT_URL"] as const) {
-    const runtime = env[name]?.trim();
-    if (!runtime) continue;
-    const runtimeParts = parts(runtime);
-    if (runtime === raw || (runtimeParts && sameServerAndDatabase(target, runtimeParts))) {
-      throw new UnsafeMigrationTargetError(`MIGRATION_DATABASE_URL points at the same database as ${name}. Migrations never target the runtime database.`);
-    }
-  }
-
-  // Poolers in transaction mode break migrations (advisory locks, prepared statements).
-  if (target.port === 6543 || /pooler|pgbouncer/i.test(target.host) || target.params.has("pgbouncer")) {
-    throw new UnsafeMigrationTargetError("MIGRATION_DATABASE_URL must be a direct (non-pooled) connection.");
-  }
-
-  return { url: raw!, host: target.host, port: target.port, database: target.database };
+  const done = new Set(live.filter((r) => r.finished).map((r) => r.name));
+  return { pending: folder.filter((n) => !done.has(n)), stops };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -150,6 +119,7 @@ export type MigrateCommand =
   | { kind: "create"; name: string }
   | { kind: "deploy" }
   | { kind: "status" }
+  | { kind: "drift" }
   | { kind: "diff-script"; name: string }
   | { kind: "scan" };
 
@@ -172,12 +142,13 @@ export function parseMigrateCommand(args: readonly string[]): MigrateCommand {
     }
     case "deploy":
     case "status":
+    case "drift":
     case "scan":
       extra(0);
       return { kind: command };
     default:
       throw new UnsafeMigrationTargetError(
-        'Unknown command. Allowed: create <name>, diff-script <name>, scan, deploy, status. ("reset", "db push", "--force-reset" and "--accept-data-loss" are never allowed.)'
+        'Unknown command. Allowed: create <name>, diff-script <name>, scan, deploy, status, drift. ("reset", "db push", "--force-reset" and "--accept-data-loss" are never allowed.)'
       );
   }
 }
@@ -309,4 +280,34 @@ export function buildPrismaEnv(env: NodeJS.ProcessEnv, target: MigrationTarget):
   const child: NodeJS.ProcessEnv = { ...env, MIGRATION_DATABASE_URL: target.url };
   for (const name of STRIPPED_FROM_PRISMA_ENV) delete child[name];
   return child;
+}
+
+// ---------------------------------------------------------------------------------------------
+// drift: compare the live database with prisma/schema.prisma (read-only).
+
+/** The same URL with the session asked to be read-only. The original string is not changed. */
+export function withReadOnlyOption(raw: string): string {
+  const url = new URL(raw);
+  url.searchParams.set("options", "-c default_transaction_read_only=on");
+  return url.toString();
+}
+
+/** Removes anything that looks like a connection string, so tool output can never carry a password. */
+export function redactConnectionStrings(text: string): string {
+  return text.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"`]+/gi, "[connection string removed]");
+}
+
+/**
+ * The differences in a `prisma migrate diff --script` output, one line per statement (names only: this is
+ * schema, never data). An empty list means the database matches the schema.
+ */
+export function summarizeDiff(script: string): string[] {
+  const statements = script
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("--"))
+    .join("\n")
+    .split(";")
+    .map((s) => s.trim().replace(/\s+/g, " "))
+    .filter(Boolean);
+  return statements.map((s) => (s.length > 200 ? `${s.slice(0, 200)}...` : s));
 }

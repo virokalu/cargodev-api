@@ -4,7 +4,7 @@
 
 import { z } from "zod";
 
-const envSchema = z.object({
+const baseSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
@@ -31,10 +31,30 @@ const envSchema = z.object({
   R2_PUBLIC_URL: z.string().url().optional(),
   // Optional. Only raises Expo push rate limits; push works without it.
   EXPO_ACCESS_TOKEN: z.string().min(1).optional(),
+  // Transactional email through the Resend HTTP API (src/lib/email.ts). Both optional: with no
+  // RESEND_API_KEY nothing is ever sent, the message is only noted in the log (masked).
+  RESEND_API_KEY: z.string().min(1).optional(),
+  EMAIL_FROM: z.string().min(3).optional(),
+  // Signs CUSTOMER access tokens (a separate zone from staff). Long and random, unique per environment and
+  // different from MOBILE_JWT_SECRET (startup fails if they are equal). Unset means the customer API is
+  // not mounted at all.
+  CUSTOMER_JWT_SECRET: z.string().min(32, "CUSTOMER_JWT_SECRET must be at least 32 characters").optional(),
+  // true: anyone can register a customer account (it still needs a verified email). false: register
+  // does nothing; staff create customers and enable their login.
+  CUSTOMER_SELF_SIGNUP: z
+    .enum(["true", "false"], { error: "CUSTOMER_SELF_SIGNUP must be true or false" })
+    .default("true")
+    .transform((value) => value === "true"),
   // Signs access tokens. Long and random, unique per environment.
   MOBILE_JWT_SECRET: z.string().min(32, "MOBILE_JWT_SECRET must be at least 32 characters"),
   // Default org for login lookup and cron only. See config/default-org.ts.
   ORG_ID: z.string().min(1, "ORG_ID is required"),
+});
+
+const envSchema = baseSchema.superRefine((env, ctx) => {
+  if (env.CUSTOMER_JWT_SECRET !== undefined && env.CUSTOMER_JWT_SECRET === env.MOBILE_JWT_SECRET) {
+    ctx.addIssue({ code: "custom", path: ["CUSTOMER_JWT_SECRET"], message: "CUSTOMER_JWT_SECRET must differ from MOBILE_JWT_SECRET" });
+  }
 });
 
 export type Env = z.infer<typeof envSchema>;

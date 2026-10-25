@@ -93,6 +93,8 @@ model Organization {
   activityLogs        ActivityLog[]
   refreshTokens       RefreshToken[]
   deviceTokens        DeviceToken[]
+  customerSessions    CustomerSession[]
+  otpCodes            OtpCode[]
   inspectionCompanies InspectionCompany[]
   inspectionBy        InspectionBy[]
 }
@@ -110,7 +112,7 @@ model User {
   phone               String?
   country             String?
   address             String?
-  // null for CUSTOMER users until Phase 2 logins
+  // bcrypt hash. Staff, and customers who have set a password (customer accounts: Phase 2).
   password            String?
   // true for staff, false for customers (Phase 1)
   loginEnabled        Boolean    @default(false)
@@ -124,7 +126,22 @@ model User {
   createdAt           DateTime   @default(now())
   updatedAt           DateTime   @updatedAt
 
+  // Customer accounts (Phase 2). All nullable so the staff app and existing rows are unaffected.
+  emailVerifiedAt     DateTime?
+  companyName         String?
+  // null means "en" (the only language served today).
+  language            String?
+  // "light" | "dark" | "system"
+  theme               String?
+  destinationPort     String?
+  // The staff member responsible for this customer.
+  assignedAgentId     String?
+  // Set when a customer deletes their account: PII is removed, business records stay.
+  deletedAt           DateTime?
+
   org Organization @relation(fields: [org_id], references: [id])
+  assignedAgent     User?  @relation("AssignedAgent", fields: [assignedAgentId], references: [id])
+  assignedCustomers User[] @relation("AssignedAgent")
 
   // CUSTOMER users can own vehicles; STAFF users cannot (enforced in service layer)
   vehicles          Vehicle[]         @relation("CustomerVehicles")
@@ -134,6 +151,8 @@ model User {
   uploadedDocuments VehicleDocument[]
   refreshTokens     RefreshToken[]
   deviceTokens      DeviceToken[]
+  customerSessions  CustomerSession[]
+  otpCodes          OtpCode[]
 
   @@unique([org_id, email])
   @@index([org_id, userType])
@@ -670,8 +689,67 @@ model DeviceToken {
   lastSeenAt DateTime @default(now())
   createdAt  DateTime @default(now())
 
+  // App build that registered the token (customer app, Phase 2). Optional.
+  appVersion String?
+
   org  Organization @relation(fields: [org_id], references: [id])
   user User         @relation(fields: [userId], references: [id])
 
   @@index([org_id, userId])
+}
+
+// ─────────────────────────────────────────────
+// CUSTOMER ACCOUNTS (Phase 2). A separate zone from staff: own token audience and secret, own
+// session table. Same rules as RefreshToken: only the sha256 of the opaque token is stored.
+// ─────────────────────────────────────────────
+
+model CustomerSession {
+  id     String @id @default(cuid())
+  org_id String
+  userId String
+
+  tokenHash String @unique
+
+  expiresAt         DateTime
+  // Set on rotation, logout, password change/reset, account deletion, or when staff disable login.
+  revokedAt         DateTime?
+  // Audit pointer to the row that replaced this one on rotation. Not a relation (see RefreshToken).
+  replacedByTokenId String?
+
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  org  Organization @relation(fields: [org_id], references: [id])
+  user User         @relation(fields: [userId], references: [id])
+
+  @@index([org_id, userId])
+  @@index([expiresAt])
+}
+
+enum OtpPurpose {
+  VERIFY_EMAIL
+  RESET
+  // Reserved. Phone login is not built.
+  PHONE_LOGIN
+}
+
+// One-time codes for email verification and password reset. 6 digits, never stored in clear
+// (HMAC of org, user, purpose and code), expire in 10 minutes, single use, 5 attempts.
+model OtpCode {
+  id      String     @id @default(cuid())
+  org_id  String
+  userId  String
+  purpose OtpPurpose
+
+  codeHash  String
+  expiresAt DateTime
+  // Wrong or right, every check spends one attempt; at 5 the code is dead.
+  attempts  Int       @default(0)
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  org  Organization @relation(fields: [org_id], references: [id])
+  user User         @relation(fields: [userId], references: [id])
+
+  @@index([org_id, userId, purpose])
 }

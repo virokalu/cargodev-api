@@ -5,3 +5,7 @@ process.env["MOBILE_JWT_SECRET"] = "test-only-dummy-value-0123456789abcdef";
 process.env["ORG_ID"] = "org_test_a";
 // Tests never run scheduled jobs on their own.
 process.env["SCHEDULER_ENABLED"] = "false";
+// Tests must never be able to send real email, even if a developer's shell has a key.
+delete process.env["RESEND_API_KEY"];
+delete process.env["EMAIL_FROM"];
+process.env["CUSTOMER_JWT_SECRET"] = "test-only-customer-value-0123456789abcdef";

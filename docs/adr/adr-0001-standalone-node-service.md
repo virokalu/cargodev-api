@@ -25,7 +25,7 @@ Good:
 Costs:
 - A second service to host, monitor and secure.
 - Ported code can drift from the Next app's services. Mitigation: acceptance test comparing responses with the Next app, and a plan for which codebase owns each service long term.
-- Schema ownership: originally the CargoDev repo, with no migrations here. Superseded by ADR 0004 (this repo owns the schema; additive-first, guarded migrations).
+- Schema ownership: originally the CargoDev repo, with no migrations here. Superseded by ADR 0004 (this repo owns the schema; additive-first migrations through one reviewed command).
 
 ## Alternatives considered
 

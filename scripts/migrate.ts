@@ -1,12 +1,14 @@
 // The only way to run a migration command in this repo:   npm run migrate -- <command>
 //
 //   create <name>       generate a migration from schema.prisma WITHOUT applying it (migrate dev --create-only)
-//   diff-script <name>  same, without a shadow database: diffs the test DB against schema.prisma (read-only)
+//   diff-script <name>  same, without a shadow database: diffs the database against schema.prisma (read-only)
 //   scan                print the SQL of every migration and scan it for unsafe changes
-//   deploy              scan, then apply pending migrations to the designated test DB
-//   status              show which migrations are applied
+//   deploy              scan, then apply pending migrations. NEVER run without the maintainer's approval for that run
+//   status              read-only: target, what _prisma_migrations holds, pending migrations, scan result
+//   drift               read-only: compare the live database with prisma/schema.prisma (names only, no data)
 //
-// Every command runs the guard (scripts/migrate-guard.ts) first. There is no way to pass raw flags to
+// It uses MIGRATION_DATABASE_URL, else DIRECT_URL. It does not check which database that is: the maintainer
+// compares the printed host before every deploy (docs/runbook.md). There is no way to pass raw flags to
 // Prisma, so reset, db push, --force-reset and --accept-data-loss cannot be used from here.
 
 import { spawnSync } from "node:child_process";
@@ -16,26 +18,31 @@ import path from "node:path";
 import pg from "pg";
 import {
   UnsafeMigrationTargetError,
-  assertSafeMigrationTarget,
+  analyzeHistory,
   buildPrismaEnv,
   parseApprovals,
   parseMigrateCommand,
+  redactConnectionStrings,
+  resolveMigrationTarget,
+  summarizeDiff,
+  withReadOnlyOption,
   scanMigrationSql,
+  type HistoryRow,
   type MigrationTarget,
-} from "./migrate-guard.js";
+} from "./migrate-tools.js";
 
 const root = path.resolve(import.meta.dirname, "..");
 const migrationsDir = path.join(root, "prisma", "migrations");
 const config = path.join("scripts", "prisma.migrate.config.ts");
 const prismaCli = createRequire(import.meta.url).resolve("prisma/build/index.js");
 
-function runPrisma(args: string[], target: MigrationTarget, capture = false) {
+function runPrisma(args: string[], target: MigrationTarget, capture: boolean | "both" = false) {
   // The child sees MIGRATION_DATABASE_URL only. The runtime connection strings are removed.
   const env = buildPrismaEnv(process.env, target);
   return spawnSync(process.execPath, [prismaCli, ...args, "--config", config], {
     cwd: root,
     env,
-    stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit",
+    stdio: capture === "both" ? ["ignore", "pipe", "pipe"] : capture ? ["ignore", "pipe", "inherit"] : "inherit",
     encoding: "utf8",
   });
 }
@@ -76,17 +83,49 @@ function scan(names: string[], printSql: boolean): string[] {
   return blocked;
 }
 
-async function appliedMigrations(target: MigrationTarget): Promise<Set<string>> {
+interface TargetState {
+  /** The _prisma_migrations table exists. */
+  tracked: boolean;
+  applied: HistoryRow[];
+  /** Application tables already exist (so an empty history means "not baselined", not "empty database"). */
+  tablesExist: boolean;
+}
+
+/** Read-only look at the target database. */
+async function inspectTarget(target: MigrationTarget): Promise<TargetState> {
   const client = new pg.Client({ connectionString: target.url });
   await client.connect();
   try {
+    await client.query("SET default_transaction_read_only = on");
+    const tables = await client.query("SELECT to_regclass('public.\"Vehicle\"') AS vehicle, to_regclass('public.\"Organization\"') AS org");
+    const tablesExist = Boolean(tables.rows[0]?.vehicle || tables.rows[0]?.org);
     const exists = await client.query("SELECT to_regclass('public._prisma_migrations') AS t");
-    if (!exists.rows[0]?.t) return new Set();
-    const rows = await client.query("SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL");
-    return new Set(rows.rows.map((r: { migration_name: string }) => r.migration_name));
+    if (!exists.rows[0]?.t) return { tracked: false, applied: [], tablesExist };
+    const rows = await client.query(
+      "SELECT migration_name, finished_at IS NOT NULL AS finished, rolled_back_at IS NOT NULL AS rolled_back FROM _prisma_migrations ORDER BY started_at, migration_name"
+    );
+    return {
+      tracked: true,
+      tablesExist,
+      applied: rows.rows.map((r: { migration_name: string; finished: boolean; rolled_back: boolean }) => ({
+        name: r.migration_name,
+        finished: r.finished,
+        rolledBack: r.rolled_back,
+      })),
+    };
   } finally {
     await client.end();
   }
+}
+
+/** Prints the state and returns what is pending and the reasons deploy must stop. */
+function reportTarget(state: TargetState, all: string[]): { pending: string[]; stops: string[] } {
+  console.log(`_prisma_migrations: ${state.tracked ? `exists, ${state.applied.length} row(s)` : "does not exist"}; application tables: ${state.tablesExist ? "present" : "absent"}`);
+  for (const row of state.applied) {
+    const label = row.rolledBack ? "ROLLED BACK" : row.finished ? "applied" : "UNFINISHED";
+    console.log(`  ${label.padEnd(11)} ${row.name}`);
+  }
+  return analyzeHistory(state.applied, all, state.tracked, state.tablesExist);
 }
 
 function newMigrationDirName(name: string): string {
@@ -96,15 +135,42 @@ function newMigrationDirName(name: string): string {
 
 async function main(): Promise<number> {
   const command = parseMigrateCommand(process.argv.slice(2));
-  const target = assertSafeMigrationTarget();
-  console.log(`Target: ${target.host}:${target.port}/${target.database} (allowed by MIGRATION_ALLOWED_HOST / MIGRATION_ALLOWED_DB)`);
+  const target = resolveMigrationTarget();
+  console.log(`Target: ${target.host}:${target.port}/${target.database}`);
+  console.log(`Project ref: ${target.projectRef ?? "(not a Supabase URL)"}  <- compare with your private notes before any deploy`);
 
   switch (command.kind) {
-    case "status":
-      return runPrisma(["migrate", "status"], target).status ?? 1;
+    case "status": {
+      const all = migrationNames();
+      const { pending, stops } = reportTarget(await inspectTarget(target), all);
+      console.log(`Pending (${pending.length}): ${pending.join(", ") || "none"}`);
+      for (const stop of stops) console.log(`WOULD STOP deploy: ${stop}`);
+      const blocked = pending.length > 0 ? scan(pending, false) : [];
+      console.log(blocked.length > 0 ? `Scan: unapproved findings in ${blocked.join(", ")}` : "Scan: no unapproved findings in the pending migrations.");
+      return 0;
+    }
 
     case "scan":
       return scan(migrationNames(), true).length === 0 ? 0 : 1;
+
+    case "drift": {
+      // Prisma's diff only reads. The session option asks the server to refuse writes as well.
+      const readOnly: MigrationTarget = { ...target, url: withReadOnlyOption(target.url) };
+      const result = runPrisma(["migrate", "diff", "--from-config-datasource", "--to-schema", "prisma/schema.prisma", "--script"], readOnly, "both");
+      if (result.status !== 0) {
+        // Tool output is passed through a redactor: an error from the driver can contain the connection string.
+        console.error(redactConnectionStrings(String(result.stderr ?? "")).trim() || "prisma migrate diff failed.");
+        return result.status ?? 1;
+      }
+      const differences = summarizeDiff(String(result.stdout ?? ""));
+      if (differences.length === 0) {
+        console.log("Drift: no differences between the database and prisma/schema.prisma.");
+        return 0;
+      }
+      console.log(`Drift: ${differences.length} difference(s). Statements that would make the database match schema.prisma:`);
+      for (const d of differences) console.log(`  ${d}`);
+      return 0;
+    }
 
     case "create": {
       const before = new Set(migrationNames());
@@ -138,8 +204,11 @@ async function main(): Promise<number> {
 
     case "deploy": {
       const all = migrationNames();
-      const applied = await appliedMigrations(target);
-      const pending = all.filter((n) => !applied.has(n));
+      const { pending, stops } = reportTarget(await inspectTarget(target), all);
+      if (stops.length > 0) {
+        for (const stop of stops) console.error(`\nSTOPPED. ${stop}`);
+        return 1;
+      }
       if (pending.length === 0) {
         console.log("No pending migrations.");
         return 0;
@@ -162,7 +231,7 @@ main().then(
   (code) => process.exit(code),
   (error: unknown) => {
     console.error(error instanceof UnsafeMigrationTargetError ? error.message : "Migration command failed.");
-    // Prisma and pg errors can contain the connection string, so only the guard's own messages are printed.
+    // Prisma and pg errors can contain the connection string, so only this tool's own messages are printed.
     process.exit(1);
   }
 );

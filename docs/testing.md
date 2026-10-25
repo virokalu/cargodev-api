@@ -78,24 +78,33 @@ It never prints the connection string (it contains a password).
 
 If you see "The database test harness refused to run", read the message: it says which rule failed and nothing was changed.
 
+## Customer zone tests
+
+- `tests/helpers/customer-fixtures.ts` seeds two organisations, several customers, a staff user and the `IDOR_WORLD` actors (own, another customer in the same org, a customer in another org). New customer routes that return or change owned data reuse it: your own resource is found, another customer's is 404, another org's is 404.
+- `tests/customer-zone.test.ts`: forged tokens in both directions, env validation, `/me` DTO key-set, IDOR, rate limits, timing parity.
+- `tests/customer-auth.test.ts`: the flows. `tests/customer-logs.test.ts`: real log output.
+- `tests/db/customer-auth.db.test.ts` and `customer-auth.concurrency.db.test.ts`: the SQL and the parallel guarantees (the concurrency file needs a real Postgres).
+- The email queue is replaced by a recorder in tests so the plain code can be read back. Tests never have `RESEND_API_KEY`.
+
 ## Migrations (separate from the test harness)
 
-`npm run migrate -- <command>` is the only way to run migration commands. It runs the guard (`scripts/migrate-guard.ts`, tested by `tests/migrate-guard.test.ts`) first and refuses unless all of these hold:
+`npm run migrate -- <command>` is the only way to run migration commands (`scripts/migrate.ts`, helpers in `scripts/migrate-tools.ts`, tested by `tests/migrate-tools.test.ts`). It aims at `MIGRATION_DATABASE_URL`, else `DIRECT_URL`. It does not check which database that is. It prints the host, port, database name and Supabase project ref (never the password) first, and **every `deploy` needs a maintainer's approval for that run** (see `docs/runbook.md`).
 
-1. `MIGRATION_DATABASE_URL`, `MIGRATION_ALLOWED_HOST` and `MIGRATION_ALLOWED_DB` are all set. The URL's host equals the allowed host and its database equals the allowed database, exactly.
-2. The URL is not the runtime `DATABASE_URL` or `DIRECT_URL` (same string, or same host, port and database). Those two are only compared, never used or printed, and are removed from the environment of the Prisma process.
-3. It is a direct connection: poolers (port 6543, `pooler`/`pgbouncer`) and redirecting parameters (`host=`, `hostaddr=`, `service=`, `options=`) are refused.
+- Only fixed commands exist: `create <name>` (generates a migration, does **not** apply it), `diff-script <name>` (same, without a shadow database), `scan`, `deploy`, `status`, `drift`. There is no way to pass raw flags, so `reset`, `db push`, `--force-reset` and `--accept-data-loss` cannot be used, and `migrate resolve` is not offered.
+- `status` is read-only (the connection is set read-only): it prints the target, whether `_prisma_migrations` exists and what it holds, the pending migrations and the scan result.
+- `drift` is read-only: it compares the live database with `prisma/schema.prisma` and prints "no differences" or the statements that would make them match (table, column and index names; no data). It asks the session to be read-only, never prints the URL, and redacts connection strings from error text.
+- `deploy` prints the SQL of the pending migrations and scans it for DROP, ALTER COLUMN TYPE, RENAME, TRUNCATE, DELETE, NOT NULL without DEFAULT, and a new table missing `org_id`, an `org_id`-first index or row level security. A flagged migration is not applied until a maintainer lists it in `prisma/migrations/scan-approved.txt`.
+- `deploy` also stops, applying nothing, if the tables exist but `_prisma_migrations` is empty or missing, if a migration is recorded as unfinished (neither `finished_at` nor `rolled_back_at` set; a row with `rolled_back_at` is ignored, as Prisma does), or if the database has migrations that are not in `prisma/migrations/`. The maintainer fixes the history.
+- The Prisma process sees one URL only, through `scripts/prisma.migrate.config.ts`. `DATABASE_URL` and the other connection variables are removed from its environment.
 
-Commands: `create <name>` (generates a migration, does **not** apply it), `diff-script <name>` (same, without a shadow database), `scan`, `deploy`, `status`. There is no way to pass raw flags, so `reset`, `db push`, `--force-reset` and `--accept-data-loss` cannot be used.
-
-Flow: `create` → read the printed SQL and scan → `deploy` (scans again, applies only pending migrations to the test database) → `npm run test:db`. The scan flags DROP, ALTER COLUMN TYPE, RENAME, TRUNCATE, DELETE, NOT NULL without DEFAULT, and a new table missing `org_id`, an `org_id`-first index or row level security. A flagged migration is not applied until a maintainer lists it in `prisma/migrations/scan-approved.txt`.
+Flow: `create` → read the printed SQL and scan → `status` → maintainer approval → `deploy` → `npm run test:db`.
 
 If `migrate dev` cannot create its shadow database, do not loosen permissions: use `diff-script <name>`. If it reports drift or asks to reset, stop and ask.
 
 ## Rules
 
 - Test data is fake. No real names, org ids, hostnames or customer data.
-- Test-harness commands run **only** against a local or CI throwaway container, through `npm run test:db`. Migrations run only through the guarded `npm run migrate`, against the designated test database. Never against a shared or production database.
+- Test-harness commands run **only** against a local or CI throwaway container, through `npm run test:db`. Migrations run only through `npm run migrate`, never with raw Prisma commands.
 - Do not build secret-looking fixtures as string literals (`password: "..."`): the secret scan has no allow-list. Build them at runtime or use an obviously fake value containing `example`.
 - Anything that depends on real SQL behaviour (NULLs, locks, constraints, concurrency) gets a test in `tests/db`.
 - Fix a bug by first writing the test that reproduces it.

@@ -22,15 +22,19 @@ be unrecoverable.
    explicitly.
 3. **New tables** carry `org_id`, an index starting with `org_id`, and `ENABLE ROW LEVEL SECURITY` with no
    policies (so a direct database role without bypass rights sees nothing).
-4. **One designated target.** Migration commands run only through `npm run migrate -- <command>`, which runs
-   `scripts/migrate-guard.ts` first. It refuses unless `MIGRATION_DATABASE_URL` has the host in
-   `MIGRATION_ALLOWED_HOST` and the database in `MIGRATION_ALLOWED_DB`, is not the runtime `DATABASE_URL` or
-   `DIRECT_URL`, and is a direct connection. The tool exposes no raw Prisma flags, so `migrate reset`, `db push`
-   and `--accept-data-loss` are unreachable. A maintainer applies migrations to every other environment by hand.
+4. **One entry point; no check on the target; a human approves every deploy.** Migration commands run only
+   through `npm run migrate -- <command>`, which accepts a fixed list of commands, so `migrate reset`, `db push`,
+   `--accept-data-loss` and `migrate resolve` are unreachable. It targets `MIGRATION_DATABASE_URL`, else
+   `DIRECT_URL` (the direct connection, as in CargoDev), and does not check the host, the database name or any
+   suffix. Because nothing in the tool identifies the environment, the control is procedural: agents may run
+   `status`, `scan`, `create` and `diff-script`, but never `deploy` without the maintainer's explicit approval
+   for that specific run, and the runbook requires comparing the printed host and, for databases with real data,
+   a backup confirmed with a teammate. The database name
+   (for example Supabase's default `postgres`) is neither required nor treated as a warning sign.
 5. **Scan before applying.** The generated SQL is printed and scanned for DROP, ALTER COLUMN TYPE, RENAME,
    TRUNCATE, DELETE and NOT NULL without DEFAULT. A flagged migration is not applied until a maintainer lists it
    in `prisma/migrations/scan-approved.txt`.
-6. **Drift or a requested reset means stop.** If `migrate dev` reports drift or wants to reset, ask. If it cannot
+6. **Drift, a requested reset, or an untracked database means stop.** If \`_prisma_migrations\` is empty or missing but the tables exist, \`deploy\` applies nothing and the maintainer baselines the history.  If `migrate dev` reports drift or wants to reset, ask. If it cannot
    create its shadow database, do not loosen permissions: use `diff-script`, which needs none.
 
 ## Consequences
@@ -46,5 +50,3 @@ be unrecoverable.
   a table goes live. Agents never create or alter database roles.
 - A dedicated least-privilege API role (no DDL, no access beyond the tables it needs) is a hardening follow-up,
   not part of this decision.
-- The guard also requires the allowed database name to end with `MIGRATION_REQUIRE_DB_SUFFIX` (default
-  `_test`); the maintainer can turn this off by setting the variable to an empty value.

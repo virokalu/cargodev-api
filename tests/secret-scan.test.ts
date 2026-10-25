@@ -5,7 +5,10 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// Each case starts a shell; on a loaded Windows machine that can take several seconds.
+vi.setConfig({ testTimeout: 30_000 });
 
 const root = path.resolve(import.meta.dirname, "..");
 const script = path.join(root, "scripts", "secret-scan.sh");

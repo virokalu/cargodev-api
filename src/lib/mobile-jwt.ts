@@ -8,6 +8,10 @@ import { loadEnv } from "../config/env.js";
 
 export const ACCESS_TOKEN_TTL_SECONDS = 20 * 60; // 20 minutes
 
+/** Every token we issue names its issuer and its zone. Each guard checks BOTH. */
+export const TOKEN_ISSUER = "cargodev-api";
+export const STAFF_AUDIENCE = "staff";
+
 export interface AccessTokenPayload {
   sub: string; // user id
   orgId: string;
@@ -26,6 +30,8 @@ export async function signAccessToken(payload: AccessTokenPayload): Promise<stri
   return new SignJWT({ orgId: payload.orgId, role: payload.role, name: payload.name, email: payload.email })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(payload.sub)
+    .setIssuer(TOKEN_ISSUER)
+    .setAudience(STAFF_AUDIENCE)
     .setIssuedAt()
     .setExpirationTime(`${ACCESS_TOKEN_TTL_SECONDS}s`)
     .sign(getSecret());
@@ -39,7 +45,11 @@ const ROLES: readonly string[] = ["ADMINISTRATOR", "MANAGER", "OPERATOR", "VIEWE
  * token. The auth hook treats any throw as a 401. */
 export async function verifyAccessToken(token: string): Promise<AccessTokenPayload> {
   try {
-    const { payload } = await jwtVerify(token, getSecret(), { algorithms: ["HS256"] });
+    const { payload } = await jwtVerify(token, getSecret(), {
+      algorithms: ["HS256"],
+      issuer: TOKEN_ISSUER,
+      audience: STAFF_AUDIENCE,
+    });
     if (
       typeof payload.sub !== "string" ||
       typeof payload.orgId !== "string" ||

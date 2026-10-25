@@ -79,9 +79,17 @@ mutation (service)
 | Scheduled job | Runs in-process | The advisory lock already stops two instances running it at once. Sequential reruns (a deploy overlap) are safe only because the job is idempotent. Set `SCHEDULER_ENABLED=false` on instances that should not try. |
 | Stream caps | Per instance | Per instance, so the effective cap multiplies by the instance count. |
 
+## Customer zone
+
+`/api/customer/v1` is a second API in the same process (ADR 0005): `routes/customer-auth.ts` -> `services/customer-*.service.ts`
+-> Prisma, behind `plugins/customer-auth.ts` (`requireCustomer`). It shares the `User` table with staff but nothing else
+on the request path: its own secret, token audience, session table and rate limits (`config/customer-rate-limits.ts`).
+One-time codes live in `OtpCode`; email goes through `lib/email-queue.ts` after the response, so a request takes the same
+time whether or not mail is sent.
+
 ## Key design choices
 
 - Services are framework-free so they can be shared/ported and tested without HTTP.
 - `orgId` always comes from the token, so a client cannot choose another tenant.
-- This repo owns the schema and `prisma/migrations/` (ADR 0004). Migrations are additive-first because the old Next.js app may still be using the same database, and they only ever run against the designated test database through a guard.
+- This repo owns the schema and `prisma/migrations/` (ADR 0004). Migrations are additive-first because the old Next.js app may still be using the same database. They run through `npm run migrate`, which prints and scans the SQL before applying.
 - File URL generation is isolated behind one function so signed URLs can replace public ones later.

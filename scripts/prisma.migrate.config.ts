@@ -1,4 +1,4 @@
-// Prisma CLI config for MIGRATIONS, used only by scripts/migrate.ts (which runs the guard first):
+// Prisma CLI config for MIGRATIONS, used only by scripts/migrate.ts (the only entry point for migrations):
 //   prisma migrate <dev|deploy|status|diff> --config scripts/prisma.migrate.config.ts
 //
 // It reads MIGRATION_DATABASE_URL and nothing else. It never reads DATABASE_URL or DIRECT_URL, and

@@ -42,7 +42,7 @@ Invoke-RestMethod http://localhost:4000/health
 ## Rules you must know
 
 - Use a **separate dev database**. Never point this project at production.
-- **Migrations only through `npm run migrate -- <command>`**, which is guarded and aims only at the designated test database (`docs/testing.md`, ADR 0004). Never run `prisma migrate` directly, and never `migrate reset`, `db push` or `--accept-data-loss`. Other environments are migrated by a maintainer.
+- **Migrations only through `npm run migrate -- <command>`** (`docs/testing.md`, ADR 0004). It targets `MIGRATION_DATABASE_URL`, else `DIRECT_URL`, and never runs `deploy` without a maintainer's approval for that run (see `docs/runbook.md`). Never run `prisma migrate` directly, and never `migrate reset`, `db push` or `--accept-data-loss`.
 - Never commit `.env` or any real secret. See `SECURITY.md`.
 - Read `CLAUDE.md` (project rules) and `CONTRIBUTING.md` (workflow) before your first PR.
 

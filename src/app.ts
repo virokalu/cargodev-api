@@ -9,6 +9,7 @@ import { errorHandler, notFoundHandler } from "./lib/error-handler.js";
 import { success } from "./lib/response.js";
 import { registerActivityLogRoutes } from "./routes/activity-log.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerCustomerAuthRoutes } from "./routes/customer-auth.js";
 import { registerCustomerRoutes } from "./routes/customers.js";
 import { registerDashboardRoutes } from "./routes/dashboard.js";
 import { registerLookupRoutes } from "./routes/lookups.js";
@@ -78,6 +79,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
   app.decorateRequest("user", null);
   app.decorateRequest("tokenExpiresAt", null);
+  app.decorateRequest("customer", null);
+  app.decorateRequest("customerTokenExpiresAt", null);
 
   // Open notification streams on this instance.
   const sseHub = new SseHub({ maxConnections: env.SSE_MAX_CONNECTIONS });
@@ -143,6 +146,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     },
     { prefix: "/api/v1" }
   );
+
+  // The customer zone: its own prefix, guard, secret and session table. Not mounted unless it is configured.
+  if (env.CUSTOMER_JWT_SECRET) {
+    await app.register(async (customerApi) => registerCustomerAuthRoutes(customerApi), { prefix: "/api/customer/v1" });
+  }
 
   return app;
 }

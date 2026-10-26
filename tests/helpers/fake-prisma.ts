@@ -195,6 +195,8 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
   function sortValue(model: string, row: Row, spec: Row): [unknown, "asc" | "desc"] {
     const [field, dirOrNested] = Object.entries(spec)[0] as [string, unknown];
     if (typeof dirOrNested === "string") return [row[field], dirOrNested as "asc" | "desc"];
+    // { sort: "asc" | "desc", nulls: "first" | "last" }: the null placement is applied by sorted() below.
+    if (dirOrNested && typeof dirOrNested === "object" && "sort" in (dirOrNested as Row)) return [row[field], (dirOrNested as { sort: "asc" | "desc" }).sort];
     const rel = options.relations?.[model]?.[field];
     if (!rel) throw new Error(`fake-prisma: no relation configured for orderBy ${model}.${field}`);
     const related = table(rel.model).find((r) => r["id"] === row[rel.fk]);
@@ -206,12 +208,17 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
     if (list.length === 0) return rows;
     return [...rows].sort((a, b) => {
       for (const o of list as Row[]) {
-        const [av, dir] = sortValue(model, a, o) as [number | string | Date | null | undefined, "asc" | "desc"];
-        const [bv] = sortValue(model, b, o) as [number | string | Date | null | undefined, "asc" | "desc"];
+        const norm = (v: unknown) => (v instanceof Date ? v.getTime() : v);
+        const [rawA, dir] = sortValue(model, a, o) as [number | string | Date | null | undefined, "asc" | "desc"];
+        const [rawB] = sortValue(model, b, o) as [number | string | Date | null | undefined, "asc" | "desc"];
+        // Dates compare by time (two equal Dates are different objects), so ties fall through to the next sort key.
+        const av = norm(rawA) as number | string | null | undefined;
+        const bv = norm(rawB) as number | string | null | undefined;
         if (av === bv) continue;
-        // Nulls sort last ascending, first descending (PostgreSQL default).
-        if (av == null) return dir === "asc" ? 1 : -1;
-        if (bv == null) return dir === "asc" ? -1 : 1;
+        // Nulls sort last ascending, first descending (PostgreSQL default) unless the order asks for { nulls }.
+        const nulls = (Object.values(o)[0] as { nulls?: "first" | "last" } | undefined)?.nulls;
+        if (av == null) return nulls === "last" ? 1 : nulls === "first" ? -1 : dir === "asc" ? 1 : -1;
+        if (bv == null) return nulls === "last" ? -1 : nulls === "first" ? 1 : dir === "asc" ? -1 : 1;
         const cmp = av > bv ? 1 : -1;
         return dir === "desc" ? -cmp : cmp;
       }

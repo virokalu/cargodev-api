@@ -236,6 +236,33 @@ Request bodies are strict: an unknown field is a 400.
 
 **Profile** (exactly these keys): `id, name, email, phone, companyName, country, destinationPort, language ("en" when unset), theme ("light" | "dark" | "system" | null), memberSince (ISO)`.
 
+### Customer read API: what each endpoint returns
+
+Every endpoint needs a customer token (except the version check). **Which vehicles:** the customer's own, same org, not deleted, an export-track vehicle (a local vehicle converted to export counts; an export vehicle converted to local does not), released by staff (`customerVisible`), and not cancelled. Anything else is absent from lists and is `404 { error: { code: "NOT_FOUND", message: "Vehicle not found." } }` on a detail route (the same for a vehicle that does not exist, belongs to someone else, or is not released). Query parameters are strict: an unknown one is a 400. Money is `{ amount: number, currency: string }` or null.
+
+| Method | Path | Success |
+|---|---|---|
+| GET | /home | `{ name, activeCount, deliveredCount, nextDeparture: { vehicleId, serial, etd } \| null, recentVehicles: Summary[] (up to 3) }` |
+| GET | /vehicles?page&pageSize&status&brand&sort&dir | `{ rows: Summary[], total, page, pageSize }` |
+| GET | /vehicles/:vehicleId | `Detail` |
+| GET | /vehicles/:vehicleId/timeline | `[{ type, label, completed, occurredAt }]`, always the 9 steps in order |
+| GET | /vehicles/:vehicleId/photos | `[{ id, createdAt }]` released photos only; fetch the picture from `/photos/:id/image` |
+| GET | /documents?page&pageSize&vehicleId | `{ rows: [{ id, name, type, createdAt, vehicle: { id, serial } }], total, page, pageSize }` released documents only; fetch the file from `/documents/:id/file` |
+| GET | /purchase-history | `{ deliveredCount, totalSpent: Money \| null, totalSpentByCurrency: Money[], customerSince }` |
+| GET | /help/faqs | `[{ id, question, answer }]` published, in order |
+| POST | /vehicles/link-requests | `{ serial }` -> 202 `{ accepted: true }` (below) |
+| GET | /app/min-version | no token: `{ minVersion }` (from `APP_MIN_VERSION`) |
+
+**Summary** (exactly these keys): `id, serial, brand, model, grade, year, chassisNo, destination, status, purchaseDate, etd, eta, portOfLoading, portOfDischarge, vesselName, amount, coverPhotoId, photoCount`. **Detail** is Summary plus `voyageNo, blNo, shippingMethod, containerNumber`. `status` is one of `PENDING, BOOKING_RECEIVED, SHIPPED, ARRIVED, DELIVERED`: the shipping status, overridden by the ARRIVED and DELIVERED milestones. `photoCount` and `coverPhotoId` count released photos only.
+
+**List parameters:** `page` (1 and up, default 1), `pageSize` (1 to 50, default 20), `status` (one of the five above), `brand` (brand name, any case), `sort` = `purchaseDate` (default) | `arrival` (the ETA) | `price` (the amount), `dir` = `desc` (default) | `asc`. Vehicles with no value for the sort field come last in both directions.
+
+**Never in any customer response:** remarks and internal notes, auction hall, supplier, lot and item numbers, whether the auction bill is paid, transport and location, freight and packing agents, inspection details, selling price and other internal costs, partnership details, row colour, tri-state flags, other customers, the activity log, org and customer ids, or any storage address or key.
+
+**Purchase history:** `totalSpent` is a single Money only when every valued vehicle uses one currency; with several currencies it is null and `totalSpentByCurrency` lists each. It is null/empty until staff enter an amount on a vehicle. The basis of the amount (FOB, CIF, invoiced) is the business's decision.
+
+**Link requests:** `serial` must look like `FC1024` or `FL88` (any case). The answer is the same `202` whatever the serial: nothing looks the vehicle up, so a request never confirms or denies that a vehicle exists. Staff (administrators, managers and the customer's assigned agent) are notified and decide later. A repeat of a pending request, or more than 20 pending, is ignored with the same answer. Limits: 10/min per IP and 5/hour per customer. (`/documents/:id/url` from the plan is replaced by `/documents/:id/file`.)
+
 **Photos and documents** are addressed by database id only. The API checks, in order: your account (from the token), the vehicle (yours, same org, not deleted, export track, released by staff), then the file (released by staff; photos and documents are private by default). Only then does it read the object and stream it to you; it never redirects and never reveals where the file is stored. Any failure is the same `404 { error: { code: "NOT_FOUND", message: "File not found." } }`, including a file that exists but is not released. Response headers: `Content-Type` (jpeg, png, webp or pdf only), `X-Content-Type-Options: nosniff`, `Cache-Control: private, max-age=<CUSTOMER_FILE_CACHE_SECONDS>`, `ETag` (send it back as `If-None-Match` to get a body-less `304`), `Content-Disposition: inline` for images and `attachment; filename=...` for documents. `size=thumb` returns the small version of a photo when one exists and the full image otherwise (default `full`). Limits: 300 requests/min per IP and 120/min per customer; then `429` with `Retry-After`.
 
 How it signs up: `register` creates an unverified account with no password and emails a 6-digit code (valid 10 minutes, 5 attempts). `verify-email` takes that code **and** the password the customer chooses. A customer staff created (login enabled, no password yet) gets in through `forgot-password` then `reset-password`. `CUSTOMER_SELF_SIGNUP=false` turns register off.

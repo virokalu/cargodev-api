@@ -1571,7 +1571,7 @@ const CANCELLED_WHERE: Prisma.VehicleWhereInput = {
  * those. Each branch is self-contained (its own OR, not the top-level one)
  * so it composes safely inside an AND array alongside the free-text
  * search's own top-level OR in buildVehicleListWhere. */
-function buildEffectiveShipmentStatusWhere(status: EffectiveShipmentStatus): Prisma.VehicleWhereInput {
+export function buildEffectiveShipmentStatusWhere(status: EffectiveShipmentStatus): Prisma.VehicleWhereInput {
   if (status === "CANCELLED") {
     return CANCELLED_WHERE;
   }

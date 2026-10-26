@@ -10,6 +10,7 @@ import { success } from "./lib/response.js";
 import { registerActivityLogRoutes } from "./routes/activity-log.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCustomerAuthRoutes } from "./routes/customer-auth.js";
+import { registerCustomerDataRoutes } from "./routes/customer-data.js";
 import { registerCustomerFileRoutes } from "./routes/customer-files.js";
 import { registerCustomerRoutes } from "./routes/customers.js";
 import { registerDashboardRoutes } from "./routes/dashboard.js";
@@ -173,6 +174,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       async (customerApi) => {
         registerCustomerAuthRoutes(customerApi);
         registerCustomerFileRoutes(customerApi);
+        registerCustomerDataRoutes(customerApi);
       },
       { prefix: "/api/customer/v1" }
     );

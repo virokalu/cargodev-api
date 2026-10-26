@@ -35,6 +35,7 @@ jobs:
       MOBILE_JWT_SECRET: "ci-dummy-value-not-for-real-use-0123456789"
       CUSTOMER_JWT_SECRET: "ci-dummy-customer-value-not-real-0123456789"
       CUSTOMER_FILE_CACHE_SECONDS: "300"
+      APP_MIN_VERSION: "1.0.0"
       ORG_ID: "org_ci_dummy"
       TRUST_PROXY_HOPS: "0"
       SSE_MAX_CONNECTIONS: "50"

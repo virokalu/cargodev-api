@@ -27,6 +27,12 @@ export const CUSTOMER_RATE_LIMITS = {
   resetPassword: { ip: { max: 10, windowMs: MINUTE }, identifier: { max: 10, windowMs: 10 * MINUTE } },
   deleteAccount: { ip: { max: 5, windowMs: MINUTE }, identifier: { max: 5, windowMs: 60 * MINUTE } },
   me: { ip: { max: 60, windowMs: MINUTE } },
+  // Reading the customer's own data (home, vehicles, timeline, documents, FAQs).
+  read: { ip: { max: 120, windowMs: MINUTE }, identifier: { max: 240, windowMs: MINUTE } },
+  // Asking to be linked to a vehicle by serial number.
+  linkRequest: { ip: { max: 10, windowMs: MINUTE }, identifier: { max: 5, windowMs: 60 * MINUTE } },
+  // The app version check runs before sign-in.
+  appConfig: { ip: { max: 60, windowMs: MINUTE } },
   // Photos and documents streamed by the API: a list screen loads many thumbnails at once.
   fileDownload: { ip: { max: 300, windowMs: MINUTE }, identifier: { max: 120, windowMs: MINUTE } },
 } as const satisfies Record<string, RouteLimits>;

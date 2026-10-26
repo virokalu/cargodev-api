@@ -244,7 +244,7 @@ describe("rate limits", () => {
     for (const [name, limit] of Object.entries(CUSTOMER_RATE_LIMITS)) {
       expect(limit.ip.max, name).toBeGreaterThan(0);
       // Sign-in style routes stay small; only the file gateway (many thumbnails per screen) is allowed more.
-      expect(limit.ip.max, name).toBeLessThanOrEqual(name === "fileDownload" ? 300 : 60);
+      expect(limit.ip.max, name).toBeLessThanOrEqual(name === "fileDownload" ? 300 : name === "read" ? 120 : 60);
     }
   });
 

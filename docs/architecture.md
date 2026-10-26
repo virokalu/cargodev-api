@@ -79,6 +79,10 @@ mutation (service)
 | Scheduled job | Runs in-process | The advisory lock already stops two instances running it at once. Sequential reruns (a deploy overlap) are safe only because the job is idempotent. Set `SCHEDULER_ENABLED=false` on instances that should not try. |
 | Stream caps | Per instance | Per instance, so the effective cap multiplies by the instance count. |
 
+## The customer read API (Phase 2, slice 3)
+
+`routes/customer-data.ts` -> `customer-data.service.ts` / `customer-link-request.service.ts`. Everything starts from one filter, `customerVehicleWhere` (own id, same org, released, effective export track, not cancelled, not deleted). The customer-facing `status` is derived (shipping status overridden by the ARRIVED / DELIVERED milestones), so the status filter is SQL built on the existing effective-status clauses. Released photos and the milestones of a page of vehicles are loaded with one query each, never one per vehicle.
+
 ## Files, the customer file gateway and milestones (Phase 2, slice 2)
 
 - **Store seam** (`src/lib/object-storage.ts`): one `ObjectStore` interface (`presignPut`, `getObject`, `deleteKey`). The implementation is `src/lib/r2-object-store.ts`, installed at startup when the four R2 credentials are set; tests install a recorder. Cloudflare R2 is reached through its S3-compatible API, so it uses the AWS SDK for JavaScript v3 with the endpoint `https://<account id>.r2.cloudflarestorage.com`, region `auto` and both checksum settings `WHEN_REQUIRED`.

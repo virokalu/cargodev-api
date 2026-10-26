@@ -38,6 +38,8 @@ const baseSchema = z.object({
   R2_BUCKET_NAME: z.string().min(1).optional(),
   // How long a customer's browser or app may cache a file served by the API, in seconds (Cache-Control: private).
   CUSTOMER_FILE_CACHE_SECONDS: z.coerce.number().int().min(0).max(86400).default(300),
+  // The oldest customer app build the API still serves (GET /api/customer/v1/app/min-version). Raise it to force an update.
+  APP_MIN_VERSION: z.string().regex(/^\d+\.\d+\.\d+$/, "APP_MIN_VERSION must look like 1.2.3").default("1.0.0"),
   // Optional. Only raises Expo push rate limits; push works without it.
   EXPO_ACCESS_TOKEN: z.string().min(1).optional(),
   // Transactional email through the Resend HTTP API (src/lib/email.ts). Both optional: with no

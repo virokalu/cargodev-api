@@ -86,6 +86,11 @@ If you see "The database test harness refused to run", read the message: it says
 - `tests/db/customer-auth.db.test.ts` and `customer-auth.concurrency.db.test.ts`: the SQL and the parallel guarantees (the concurrency file needs a real Postgres).
 - The email queue is replaced by a recorder in tests so the plain code can be read back. Tests never have `RESEND_API_KEY`.
 
+## Slice 3 tests
+
+- `tests/customer-data.test.ts`: the customer read API with fake data. Internal values are seeded as `SENTINEL-...` strings and searched for in every response; every DTO's exact key set is asserted; every route has the ownership matrix (owner, another customer, another org, unreleased, local, cancelled, converted, deleted, unknown) and the link request block.
+- `tests/db/customer-data.db.test.ts`: the SQL parts on real Postgres: derived status filters (each vehicle under exactly one status), sorting with nulls last, brand filter, visibility as SQL, Decimal money, link requests.
+
 ## Slice 2 tests
 
 - `tests/milestones.test.ts` (routes, automation, the removal rule branch by branch), `tests/storage-signing.test.ts` (presign, content types, and the customer file gateway against a recording store, including a scan of every customer response and log for storage details), `tests/r2-object-store.test.ts` (endpoint, checksum settings, signed headers; offline), `tests/milestone-backfill.test.ts`, `tests/photo-release-report.test.ts`, `tests/env-storage.test.ts`, `tests/thumbnail.test.ts` (sharp on hostile bytes, and the service).

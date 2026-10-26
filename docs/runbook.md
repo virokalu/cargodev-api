@@ -25,6 +25,9 @@ Migrations are additive-first (ADR 0004) and run only through `npm run migrate -
 
 ## Customer API
 
+- **Forcing an app update:** set `APP_MIN_VERSION` (for example `2.0.0`) and restart. The app checks `GET /api/customer/v1/app/min-version` at start and shows an update screen to older builds. It takes no token, so it also reaches users who are signed out.
+- **Releasing a vehicle to its customer:** vehicles, photos and documents are all private by default. Review with `npm run photos:release-report`, then release in the app (slice 4). A vehicle is shown to its customer only when it is theirs, an export vehicle, released, and not cancelled.
+
 - It is mounted only when `CUSTOMER_JWT_SECRET` is set. To switch it off, unset it and restart; customers lose access immediately (their tokens cannot be verified).
 - Rotating `CUSTOMER_JWT_SECRET` signs every customer out (access tokens stop verifying and the one-time codes in flight stop matching); sessions can start again by logging in. It must never equal `MOBILE_JWT_SECRET`.
 - Email is sent only if both `RESEND_API_KEY` and `EMAIL_FROM` are set. Keep them unset in development.

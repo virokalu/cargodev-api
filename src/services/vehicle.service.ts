@@ -132,6 +132,14 @@ export interface VehicleDetailData {
   // existed elsewhere (it doesn't, this is the first).
   sellingPrice: number | null;
   sellingPriceCurrency: string | null;
+
+  // ── Customer app (what staff have released and entered for the customer) ──
+  customerVisible: boolean;
+  portOfLoading: string | null;
+  portOfDischarge: string | null;
+  voyageNo: string | null;
+  customerAmount: number | null;
+  customerAmountCurrency: string | null;
 }
 
 /** Fetches a vehicle shaped for display — the edit form and the read-only
@@ -166,6 +174,12 @@ export async function getVehicleDetail(orgId: string, serial: string): Promise<V
       paidByCustomer: true,
       sellingPrice: true,
       sellingPriceCurrency: true,
+      customerVisible: true,
+      portOfLoading: true,
+      portOfDischarge: true,
+      voyageNo: true,
+      customerAmount: true,
+      customerAmountCurrency: true,
       etd: true,
       eta: true,
       blNo: true,
@@ -299,6 +313,12 @@ export async function getVehicleDetail(orgId: string, serial: string): Promise<V
     paidByCustomer: vehicle.paidByCustomer,
     sellingPrice: vehicle.sellingPrice ? Number(vehicle.sellingPrice) : null,
     sellingPriceCurrency: vehicle.sellingPriceCurrency,
+    customerVisible: vehicle.customerVisible,
+    portOfLoading: vehicle.portOfLoading,
+    portOfDischarge: vehicle.portOfDischarge,
+    voyageNo: vehicle.voyageNo,
+    customerAmount: vehicle.customerAmount === null ? null : Number(vehicle.customerAmount.toString()),
+    customerAmountCurrency: vehicle.customerAmountCurrency,
   };
 }
 

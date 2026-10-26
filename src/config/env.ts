@@ -38,6 +38,8 @@ const baseSchema = z.object({
   R2_BUCKET_NAME: z.string().min(1).optional(),
   // How long a customer's browser or app may cache a file served by the API, in seconds (Cache-Control: private).
   CUSTOMER_FILE_CACHE_SECONDS: z.coerce.number().int().min(0).max(86400).default(300),
+  // Days after a vehicle's SHIPPED milestone before staff are reminded that no arrival has been recorded (then weekly).
+  ARRIVAL_REMINDER_DAYS: z.coerce.number().int().min(1).max(365).default(45),
   // The oldest customer app build the API still serves (GET /api/customer/v1/app/min-version). Raise it to force an update.
   APP_MIN_VERSION: z.string().regex(/^\d+\.\d+\.\d+$/, "APP_MIN_VERSION must look like 1.2.3").default("1.0.0"),
   // Optional. Only raises Expo push rate limits; push works without it.

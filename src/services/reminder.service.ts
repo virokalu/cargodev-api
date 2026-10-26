@@ -21,6 +21,8 @@ import type { NotificationEvent } from "./notification.service.js";
 import * as vehicleService from "./vehicle.service.js";
 import { todayAtMidnight, CANCEL_SHIPMENT_ROW_COLOUR_NAMES } from "../lib/shipment-status.js";
 import { LC_OPEN_DESTINATIONS } from "../lib/shipment-milestones.js";
+import { loadEnv } from "../config/env.js";
+import { buildTrackWhere } from "../lib/vehicle-track.js";
 
 const NOT_CANCELLED: Prisma.VehicleWhereInput = {
   NOT: { rowColourStatus: { name: { in: [...CANCEL_SHIPMENT_ROW_COLOUR_NAMES] } } },
@@ -39,6 +41,7 @@ const CRON_EVENTS: NotificationEvent[] = [
   "LC_REMINDER",
   "ETD_APPROACHING",
   "MISSING_DOCUMENTS",
+  "ARRIVAL_NOT_RECORDED",
 ];
 
 function addDays(date: Date, days: number): Date {
@@ -288,6 +291,49 @@ async function runMissingDocumentReminders(
   return sent;
 }
 
+/**
+ * Vehicles that shipped a long time ago and still have no ARRIVED (or DELIVERED) milestone: staff are reminded to mark them
+ * arrived. First on the day the threshold (ARRIVAL_REMINDER_DAYS) is reached, then once a week, so it nags without flooding.
+ * Only export-track vehicles that are not cancelled or deleted. Once a day per vehicle at most (alreadySent).
+ */
+async function runArrivalReminders(orgId: string, recipientUserIds: string[], alreadySent: Set<string>): Promise<number> {
+  const threshold = loadEnv().ARRIVAL_REMINDER_DAYS;
+  const today = todayAtMidnight();
+  const cutoff = addDays(today, -threshold);
+
+  const prisma = getPrisma();
+  const shippedRows = await prisma.vehicleMilestone.findMany({
+    where: { org_id: orgId, type: "SHIPPED", occurredAt: { lte: cutoff } },
+    select: { vehicleId: true, occurredAt: true },
+  });
+  if (shippedRows.length === 0) return 0;
+  const shippedIds = shippedRows.map((m) => m.vehicleId);
+  const doneRows = await prisma.vehicleMilestone.findMany({
+    where: { org_id: orgId, vehicleId: { in: shippedIds }, type: { in: ["ARRIVED", "DELIVERED"] } },
+    select: { vehicleId: true },
+  });
+  const done = new Set(doneRows.map((m) => m.vehicleId));
+  const shippedAtById = new Map(shippedRows.map((m) => [m.vehicleId, m.occurredAt]));
+  const openIds = shippedIds.filter((id) => !done.has(id));
+
+  const vehicles = await prisma.vehicle.findMany({
+    where: { AND: [{ org_id: orgId, deletedAt: null, id: { in: openIds } }, buildTrackWhere("FC"), NOT_CANCELLED] },
+    select: { id: true, serial: true },
+  });
+
+  let sent = 0;
+  for (const vehicle of vehicles) {
+    const shippedAt = shippedAtById.get(vehicle.id);
+    if (!shippedAt) continue;
+    const days = daysBetween(shippedAt, today);
+    // The threshold day, then every 7th day after it.
+    if (days < threshold || (days - threshold) % 7 !== 0) continue;
+    const body = `${vehicle.serial} shipped ${days} days ago and has no arrival recorded.`;
+    if (await emitReminder(orgId, recipientUserIds, vehicle.id, "ARRIVAL_NOT_RECORDED", "Arrival not recorded", body, alreadySent)) sent++;
+  }
+  return sent;
+}
+
 export interface DailyCheckSummary {
   shippedTransitions: number;
   paymentReminders: number;
@@ -295,6 +341,7 @@ export interface DailyCheckSummary {
   lcReminders: number;
   etdApproachingReminders: number;
   missingDocumentReminders: number;
+  arrivalReminders: number;
   errors: string[];
 }
 
@@ -310,6 +357,7 @@ export async function runDailyVehicleChecks(orgId: string): Promise<DailyCheckSu
     lcReminders: 0,
     etdApproachingReminders: 0,
     missingDocumentReminders: 0,
+    arrivalReminders: 0,
     errors,
   };
 
@@ -352,6 +400,12 @@ export async function runDailyVehicleChecks(orgId: string): Promise<DailyCheckSu
     summary.missingDocumentReminders = await runMissingDocumentReminders(orgId, recipientUserIds, alreadySent);
   } catch (error) {
     errors.push(`missingDocumentReminders: ${String(error)}`);
+  }
+
+  try {
+    summary.arrivalReminders = await runArrivalReminders(orgId, recipientUserIds, alreadySent);
+  } catch (error) {
+    errors.push(`arrivalReminders: ${String(error)}`);
   }
 
   return summary;

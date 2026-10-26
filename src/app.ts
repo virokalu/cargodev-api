@@ -9,6 +9,7 @@ import { errorHandler, notFoundHandler } from "./lib/error-handler.js";
 import { success } from "./lib/response.js";
 import { registerActivityLogRoutes } from "./routes/activity-log.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerCustomerAdminRoutes } from "./routes/customer-admin.js";
 import { registerCustomerAuthRoutes } from "./routes/customer-auth.js";
 import { registerCustomerDataRoutes } from "./routes/customer-data.js";
 import { registerCustomerFileRoutes } from "./routes/customer-files.js";
@@ -17,6 +18,7 @@ import { registerDashboardRoutes } from "./routes/dashboard.js";
 import { registerLookupRoutes } from "./routes/lookups.js";
 import { registerMilestoneRoutes } from "./routes/milestones.js";
 import { registerUploadRoutes } from "./routes/uploads.js";
+import { registerVehicleReleaseRoutes } from "./routes/vehicle-release.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
 import { SseHub } from "./lib/sse-hub.js";
 import { objectStoreConfigured, setObjectStore } from "./lib/object-storage.js";
@@ -164,6 +166,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       registerVehicleRoutes(api);
       registerMilestoneRoutes(api);
       registerUploadRoutes(api);
+      registerCustomerAdminRoutes(api);
+      registerVehicleReleaseRoutes(api);
     },
     { prefix: "/api/v1" }
   );

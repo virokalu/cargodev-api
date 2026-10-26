@@ -18,6 +18,7 @@ export async function createLinkRequest(customer: { id: string; orgId: string },
   const { serial } = parseInput(linkRequestBodySchema, rawBody, "Enter a serial number such as FC1024.");
   const prisma = getPrisma();
 
+  let ignored: "duplicate" | "cap" | null = null;
   const notification = await prisma.$transaction(async (tx) => {
     const account = await tx.user.findFirst({
       where: { id: customer.id, org_id: customer.orgId, userType: "CUSTOMER", deletedAt: null },
@@ -29,7 +30,10 @@ export async function createLinkRequest(customer: { id: string; orgId: string },
       tx.vehicleLinkRequest.count({ where: { org_id: customer.orgId, customerId: customer.id, status: "PENDING" } }),
       tx.vehicleLinkRequest.count({ where: { org_id: customer.orgId, customerId: customer.id, status: "PENDING", serialEntered: serial } }),
     ]);
-    if (duplicate > 0 || pending >= MAX_PENDING_PER_CUSTOMER) return null;
+    if (duplicate > 0 || pending >= MAX_PENDING_PER_CUSTOMER) {
+      ignored = duplicate > 0 ? "duplicate" : "cap";
+      return null;
+    }
 
     const created = await tx.vehicleLinkRequest.create({
       data: { org_id: customer.orgId, customerId: customer.id, serialEntered: serial, status: "PENDING" },
@@ -65,5 +69,8 @@ export async function createLinkRequest(customer: { id: string; orgId: string },
   });
 
   if (notification) notificationService.notifyRealtime(notification);
+  // The customer's answer is identical either way. Staff can see an ignored request in the log: the customer id only,
+  // never the serial.
+  if (ignored) console.warn(`customer link request ignored (${ignored}): customer=${customer.id}`);
   return LINK_REQUEST_ACCEPTED;
 }

@@ -30,6 +30,9 @@ type TxClient = Prisma.TransactionClient;
 // Reserved, not emitted by anything yet: NAME_CHANGE_DEADLINE
 export type NotificationEvent =
   | "VEHICLE_LINK_REQUESTED"
+  | "LINK_REQUEST_APPROVED"
+  | "LINK_REQUEST_REJECTED"
+  | "ARRIVAL_NOT_RECORDED"
   | "BOOKING_RECEIVED"
   | "SHIPMENT_REVERTED_TO_PENDING"
   | "SHIPPED"

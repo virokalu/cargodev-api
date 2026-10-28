@@ -23,6 +23,7 @@ import { todayAtMidnight, CANCEL_SHIPMENT_ROW_COLOUR_NAMES } from "../lib/shipme
 import { LC_OPEN_DESTINATIONS } from "../lib/shipment-milestones.js";
 import { loadEnv } from "../config/env.js";
 import { buildTrackWhere } from "../lib/vehicle-track.js";
+import { DEFAULT_DEPARTURE_LEAD_DAYS, DEPARTURE_LEAD_DAYS } from "../config/customer-events.js";
 
 const NOT_CANCELLED: Prisma.VehicleWhereInput = {
   NOT: { rowColourStatus: { name: { in: [...CANCEL_SHIPMENT_ROW_COLOUR_NAMES] } } },
@@ -42,6 +43,7 @@ const CRON_EVENTS: NotificationEvent[] = [
   "ETD_APPROACHING",
   "MISSING_DOCUMENTS",
   "ARRIVAL_NOT_RECORDED",
+  "DEPARTURE_REMINDER",
 ];
 
 function addDays(date: Date, days: number): Date {
@@ -334,6 +336,46 @@ async function runArrivalReminders(orgId: string, recipientUserIds: string[], al
   return sent;
 }
 
+/**
+ * Tells customers their vehicle is about to leave: DEPARTURE_REMINDER on the day the ETD is exactly the customer's chosen
+ * number of days away (3, 7 or 14, default 7). Only vehicles the customer may see (theirs, released, export track, not
+ * cancelled). At most one per vehicle per day (alreadySent), and the customer's notification settings decide whether it
+ * becomes an alert, a push and an email (emit applies them).
+ */
+async function runDepartureReminders(orgId: string, alreadySent: Set<string>): Promise<number> {
+  const prisma = getPrisma();
+  const today = todayAtMidnight();
+  const vehicles = await prisma.vehicle.findMany({
+    where: {
+      AND: [
+        { org_id: orgId, deletedAt: null, customerId: { not: null }, customerVisible: true, etd: { gte: today, lte: addDays(today, Math.max(...DEPARTURE_LEAD_DAYS)) } },
+        buildTrackWhere("FC"),
+        NOT_CANCELLED,
+      ],
+    },
+    select: { id: true, serial: true, etd: true, customerId: true },
+  });
+  if (vehicles.length === 0) return 0;
+
+  const customerIds = [...new Set(vehicles.map((v) => v.customerId).filter((id): id is string => id !== null))];
+  const preferences = await prisma.notificationPreference.findMany({
+    where: { org_id: orgId, userId: { in: customerIds } },
+    select: { userId: true, departureLeadDays: true },
+  });
+  const leadByCustomer = new Map(preferences.map((p) => [p.userId, p.departureLeadDays]));
+
+  let sent = 0;
+  for (const vehicle of vehicles) {
+    if (!vehicle.customerId || !vehicle.etd) continue;
+    const lead = leadByCustomer.get(vehicle.customerId) ?? DEFAULT_DEPARTURE_LEAD_DAYS;
+    if (daysBetween(today, vehicle.etd) !== lead) continue;
+    const when = lead === 1 ? "tomorrow" : `in ${lead} days`;
+    const body = `${vehicle.serial} is due to depart ${when}.`;
+    if (await emitReminder(orgId, [vehicle.customerId], vehicle.id, "DEPARTURE_REMINDER", "Departure reminder", body, alreadySent)) sent++;
+  }
+  return sent;
+}
+
 export interface DailyCheckSummary {
   shippedTransitions: number;
   paymentReminders: number;
@@ -342,6 +384,7 @@ export interface DailyCheckSummary {
   etdApproachingReminders: number;
   missingDocumentReminders: number;
   arrivalReminders: number;
+  departureReminders: number;
   errors: string[];
 }
 
@@ -358,6 +401,7 @@ export async function runDailyVehicleChecks(orgId: string): Promise<DailyCheckSu
     etdApproachingReminders: 0,
     missingDocumentReminders: 0,
     arrivalReminders: 0,
+    departureReminders: 0,
     errors,
   };
 
@@ -406,6 +450,12 @@ export async function runDailyVehicleChecks(orgId: string): Promise<DailyCheckSu
     summary.arrivalReminders = await runArrivalReminders(orgId, recipientUserIds, alreadySent);
   } catch (error) {
     errors.push(`arrivalReminders: ${String(error)}`);
+  }
+
+  try {
+    summary.departureReminders = await runDepartureReminders(orgId, alreadySent);
+  } catch (error) {
+    errors.push(`departureReminders: ${String(error)}`);
   }
 
   return summary;

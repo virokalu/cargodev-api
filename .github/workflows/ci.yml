@@ -34,10 +34,19 @@ jobs:
       DATABASE_URL: "postgresql://user:password@localhost:5432/ci_dummy"
       MOBILE_JWT_SECRET: "ci-dummy-value-not-for-real-use-0123456789"
       CUSTOMER_JWT_SECRET: "ci-dummy-customer-value-not-real-0123456789"
+      OTP_PEPPER: "ci-dummy-otp-pepper-value-not-real-0123456789"
       CUSTOMER_FILE_CACHE_SECONDS: "300"
       APP_MIN_VERSION: "1.0.0"
+      ARRIVAL_REMINDER_DAYS: "45"
+      PUBLIC_STOCK_ENABLED: "false"
+      PUBLIC_ALLOWED_ORIGINS: "https://www.example.test"
+      PUBLIC_STOCK_IMAGE_BASE_URL: "https://img.example.test"
       ORG_ID: "org_ci_dummy"
       TRUST_PROXY_HOPS: "0"
+      CLIENT_IP_SOURCE: "socket"
+      DATABASE_POOL_MAX: "5"
+      SHUTDOWN_TIMEOUT_MS: "30000"
+      SCHEDULER_SHUTDOWN_TIMEOUT_MS: "20000"
       SSE_MAX_CONNECTIONS: "50"
       DAILY_JOB_UTC_HOUR: "2"
       SCHEDULER_ENABLED: "false"
@@ -59,6 +68,36 @@ jobs:
       # Real Postgres: serial concurrency, advisory locks, NULL semantics, vehicle SQL.
       - run: npm run test:db
       # Blocking: a high or critical finding in a runtime dependency fails the build.
+      - run: npm audit --omit=dev --audit-level=high
+
+  # Required. Builds the production image and checks what is inside it. Nothing is pushed or deployed.
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t cargodev-api:ci .
+      # The image must carry no .env file of any kind (a local .env must never be baked in).
+      - name: The image contains no .env file
+        run: |
+          found=$(docker run --rm --entrypoint sh cargodev-api:ci -c 'find / -xdev \( -name ".env" -o -name ".env.*" \) 2>/dev/null')
+          if [ -n "$found" ]; then echo "A .env file is in the image:"; echo "$found"; exit 1; fi
+          echo "no .env files in the image"
+      - name: The image runs as a non-root user
+        run: |
+          uid=$(docker run --rm --entrypoint id cargodev-api:ci -u)
+          if [ "$uid" = "0" ]; then echo "the image runs as root"; exit 1; fi
+          echo "runs as uid $uid"
+      - name: No tests, docs or TypeScript sources in the image
+        run: |
+          docker run --rm --entrypoint sh cargodev-api:ci -c 'for p in tests docs src scripts .git; do [ -e "/app/$p" ] && { echo "unexpected /app/$p"; exit 1; }; done; exit 0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # Blocking, like the ci job: a high or critical finding in a runtime dependency fails the build.
       - run: npm audit --omit=dev --audit-level=high
 
   # Required. Same scan as the pre-commit hook (scripts/secret-scan.sh), run over

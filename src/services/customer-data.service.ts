@@ -43,11 +43,6 @@ export function customerVehicleWhere(customer: CustomerPrincipalLike): Prisma.Ve
 // ---------------------------------------------------------------------------------------------
 // DTOs
 
-export interface Money {
-  amount: number;
-  currency: string;
-}
-
 export interface CustomerVehicleSummary {
   id: string;
   serial: string;
@@ -64,7 +59,6 @@ export interface CustomerVehicleSummary {
   portOfLoading: string | null;
   portOfDischarge: string | null;
   vesselName: string | null;
-  amount: Money | null;
   coverPhotoId: string | null;
   photoCount: number;
 }
@@ -97,19 +91,6 @@ export interface TimelineStep {
 
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
 
-function toNumber(value: unknown): number | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "number") return value;
-  if (typeof value === "object" && typeof (value as { toNumber?: unknown }).toNumber === "function") return (value as { toNumber(): number }).toNumber();
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function money(amount: unknown, currency: string | null): Money | null {
-  const n = toNumber(amount);
-  return n === null || !currency ? null : { amount: n, currency };
-}
-
 /** What the customer sees: the later of the shipping status and the arrival / delivery milestones. */
 function customerStatus(stored: "PENDING" | "BOOKING_RECEIVED" | "SHIPPED", etd: Date | null, milestones: ReadonlySet<MilestoneType>): CustomerStatus {
   if (milestones.has("DELIVERED")) return "DELIVERED";
@@ -135,8 +116,6 @@ const detailSelect = {
   blNo: true,
   shippingMethod: true,
   containerNumber: true,
-  customerAmount: true,
-  customerAmountCurrency: true,
   model: { select: { name: true, brand: { select: { name: true } } } },
   grade: { select: { name: true } },
 } as const;
@@ -186,7 +165,6 @@ function toSummary(row: VehicleRow, extras: Extras): CustomerVehicleSummary {
     portOfLoading: row.portOfLoading,
     portOfDischarge: row.portOfDischarge,
     vesselName: row.vesselName,
-    amount: money(row.customerAmount, row.customerAmountCurrency),
     coverPhotoId: photoIds[0] ?? null,
     photoCount: photoIds.length,
   };
@@ -221,7 +199,7 @@ export async function listCustomerVehicles(customer: CustomerPrincipalLike, rawQ
     ],
   };
 
-  const field = q.sort === "arrival" ? "eta" : q.sort === "price" ? "customerAmount" : "purchaseDate";
+  const field = q.sort === "arrival" ? "eta" : "purchaseDate";
   const [total, rows] = await Promise.all([
     prisma.vehicle.count({ where }),
     prisma.vehicle.findMany({
@@ -334,35 +312,20 @@ export async function listCustomerDocuments(customer: CustomerPrincipalLike, raw
 
 export interface PurchaseHistory {
   deliveredCount: number;
-  /** Set when every valued vehicle uses one currency; otherwise null and see totalSpentByCurrency. */
-  totalSpent: Money | null;
-  totalSpentByCurrency: Money[];
   customerSince: string;
 }
-
+// Deliberately NO total purchase value (not per currency either): the business does not want customers shown one.
 export async function getPurchaseHistory(customer: CustomerPrincipalLike): Promise<PurchaseHistory> {
   const prisma = getPrisma();
   const [user, vehicles] = await Promise.all([
     prisma.user.findFirst({ where: { id: customer.id, org_id: customer.orgId, userType: "CUSTOMER", deletedAt: null }, select: { createdAt: true } }),
-    prisma.vehicle.findMany({ where: customerVehicleWhere(customer), select: { id: true, customerAmount: true, customerAmountCurrency: true }, take: 1000 }),
+    prisma.vehicle.findMany({ where: customerVehicleWhere(customer), select: { id: true }, take: 1000 }),
   ]);
   if (!user) throw new ServiceError("NOT_FOUND", "Account not found.");
 
   const extras = await loadExtras(customer.orgId, vehicles.map((v) => v.id));
   const deliveredCount = vehicles.filter((v) => extras.milestones.get(v.id)?.has("DELIVERED")).length;
-
-  const totals = new Map<string, number>();
-  for (const v of vehicles) {
-    const m = money(v.customerAmount, v.customerAmountCurrency);
-    if (m) totals.set(m.currency, Math.round(((totals.get(m.currency) ?? 0) + m.amount) * 100) / 100);
-  }
-  const byCurrency = [...totals].map(([currency, amount]) => ({ amount, currency })).sort((a, b) => a.currency.localeCompare(b.currency));
-  return {
-    deliveredCount,
-    totalSpent: byCurrency.length === 1 ? byCurrency[0]! : null,
-    totalSpentByCurrency: byCurrency,
-    customerSince: user.createdAt.toISOString(),
-  };
+  return { deliveredCount, customerSince: user.createdAt.toISOString() };
 }
 
 export interface CustomerHome {

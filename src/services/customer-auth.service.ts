@@ -16,6 +16,7 @@ import { alreadyRegisteredEmail, passwordResetEmail, verificationEmail } from ".
 import { queueEmail } from "../lib/email-queue.js";
 import { ServiceError } from "../lib/errors.js";
 import { withResponseFloor } from "../lib/min-duration.js";
+import { otpRequestAllowed } from "../lib/otp-request-limit.js";
 import { parseInput } from "../lib/parse.js";
 import { getPrisma } from "../lib/prisma.js";
 import { isShadowLocked, recordShadowFailure } from "../lib/shadow-lockout.js";
@@ -53,6 +54,8 @@ class SessionAlreadyUsed extends Error {}
 
 export interface RequestMeta {
   userAgent?: string;
+  /** The client IP as the server sees it (never taken from a body). Used by the hourly code-request cap. */
+  ip?: string;
 }
 
 export interface CustomerSessionResult {
@@ -117,10 +120,11 @@ async function createPendingCustomer(orgId: string, input: ReturnType<typeof cus
   });
 }
 
-export async function registerCustomer(rawBody: unknown): Promise<typeof GENERIC_ACCEPTED> {
+export async function registerCustomer(rawBody: unknown, meta: RequestMeta = {}): Promise<typeof GENERIC_ACCEPTED> {
   return withResponseFloor(async () => {
     const input = parseInput(customerRegisterSchema, rawBody, INVALID_INPUT);
     if (!selfSignupAllowed(loadEnv().CUSTOMER_SELF_SIGNUP)) return GENERIC_ACCEPTED;
+    if (!otpRequestAllowed(input.email, meta.ip)) return GENERIC_ACCEPTED;
 
     const orgId = getDefaultOrgId();
     const existing = await findByEmail(orgId, input.email);
@@ -151,9 +155,10 @@ export async function registerCustomer(rawBody: unknown): Promise<typeof GENERIC
   });
 }
 
-export async function resendVerification(rawBody: unknown): Promise<typeof GENERIC_ACCEPTED> {
+export async function resendVerification(rawBody: unknown, meta: RequestMeta = {}): Promise<typeof GENERIC_ACCEPTED> {
   return withResponseFloor(async () => {
     const { email } = parseInput(customerEmailOnlySchema, rawBody, INVALID_INPUT);
+    if (!otpRequestAllowed(email, meta.ip)) return GENERIC_ACCEPTED;
     const orgId = getDefaultOrgId();
     const user = await findByEmail(orgId, email);
     if (user && user.userType === "CUSTOMER" && user.deletedAt === null && user.emailVerifiedAt === null && user.password === null) {
@@ -313,9 +318,10 @@ export async function revokeAllCustomerSessions(tx: Prisma.TransactionClient | R
 // ---------------------------------------------------------------------------------------------
 // Forgot / reset password
 
-export async function forgotPassword(rawBody: unknown): Promise<typeof GENERIC_ACCEPTED> {
+export async function forgotPassword(rawBody: unknown, meta: RequestMeta = {}): Promise<typeof GENERIC_ACCEPTED> {
   return withResponseFloor(async () => {
     const { email } = parseInput(customerEmailOnlySchema, rawBody, INVALID_INPUT);
+    if (!otpRequestAllowed(email, meta.ip)) return GENERIC_ACCEPTED;
     const orgId = getDefaultOrgId();
     const user = await findByEmail(orgId, email);
     // Staff-created customers have no password yet and no verified email: this is how they get in.
@@ -397,6 +403,14 @@ export async function deleteCustomerAccount(customer: { id: string; orgId: strin
     await revokeAllCustomerSessions(tx, customer.orgId, user.id);
     await tx.otpCode.deleteMany({ where: { org_id: customer.orgId, userId: user.id } });
     await tx.deviceToken.deleteMany({ where: { org_id: customer.orgId, userId: user.id } });
+    // Personal content goes with the account: chat, alerts and notification settings.
+    const conversations = await tx.conversation.findMany({ where: { org_id: customer.orgId, customerId: user.id }, select: { id: true } });
+    if (conversations.length > 0) {
+      await tx.message.deleteMany({ where: { org_id: customer.orgId, conversationId: { in: conversations.map((c) => c.id) } } });
+      await tx.conversation.deleteMany({ where: { org_id: customer.orgId, customerId: user.id } });
+    }
+    await tx.notification.deleteMany({ where: { org_id: customer.orgId, userId: user.id } });
+    await tx.notificationPreference.deleteMany({ where: { org_id: customer.orgId, userId: user.id } });
     await activityLog.record(tx, { orgId: customer.orgId, actorId: user.id, action: "CUSTOMER_DELETE_ACCOUNT", entity: "Customer", entityId: user.id });
   });
   return { deleted: true };

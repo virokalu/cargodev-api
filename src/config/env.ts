@@ -4,6 +4,9 @@
 
 import { z } from "zod";
 
+// Not addresses: a client address is never read from these.
+const FORBIDDEN_IP_HEADERS = new Set(["authorization", "cookie", "set-cookie", "host", "content-type", "content-length", "user-agent", "origin", "referer", "accept"]);
+
 const baseSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
@@ -15,6 +18,28 @@ const baseSchema = z.object({
   // X-Forwarded-For. 0 (default) trusts none: the client IP is the socket address
   // and the header is ignored, so it cannot be spoofed to dodge rate limits.
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
+  // Where the client address (request.ip, rate-limit keys, logs) comes from.
+  //   socket (default): the TCP peer. Every forwarding header is ignored, so none can be spoofed.
+  //   hops: X-Forwarded-For, trusting exactly TRUST_PROXY_HOPS proxies you control (needs TRUST_PROXY_HOPS > 0).
+  //   header: the single header named by CLIENT_IP_HEADER. Safe ONLY when the host's edge overwrites that header on every
+  //           request (a client-supplied copy must never reach this server). A missing or invalid value falls back to the socket.
+  // Unset means: hops when TRUST_PROXY_HOPS > 0 (the old behaviour), otherwise socket.
+  CLIENT_IP_SOURCE: z.enum(["socket", "hops", "header"], { error: "CLIENT_IP_SOURCE must be socket, hops or header" }).optional(),
+  CLIENT_IP_HEADER: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "CLIENT_IP_HEADER must be a plain header name such as true-client-ip")
+    .max(64)
+    .refine((name) => !FORBIDDEN_IP_HEADERS.has(name), "CLIENT_IP_HEADER cannot be a header that is not an address")
+    .optional(),
+  // Database connections this instance may hold open (the pool size). Keep it below the database pooler's limit divided by instances.
+  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  // After SIGTERM the whole shutdown (stop accepting, close streams, wait for a running job, disconnect) must finish within
+  // this many milliseconds, or the process exits anyway.
+  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(30_000),
+  // Of that, how long a running scheduled job may take to finish. Must be shorter than SHUTDOWN_TIMEOUT_MS.
+  SCHEDULER_SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(0).max(110_000).default(20_000),
   // Most simultaneous GET /notifications/stream connections on this instance.
   SSE_MAX_CONNECTIONS: z.coerce.number().int().min(1).max(100000).default(500),
   // UTC hour (0-23) the daily job runs at.
@@ -52,12 +77,35 @@ const baseSchema = z.object({
   // different from MOBILE_JWT_SECRET (startup fails if they are equal). Unset means the customer API is
   // not mounted at all.
   CUSTOMER_JWT_SECRET: z.string().min(32, "CUSTOMER_JWT_SECRET must be at least 32 characters").optional(),
+  // Keys the HMAC that protects one-time codes at rest (a 6-digit code has only a million values, so an unkeyed hash
+  // could be reversed instantly). At least 32 bytes, random, unique per environment, and different from both JWT
+  // secrets. Required whenever the customer API is configured (CUSTOMER_JWT_SECRET is set).
+  OTP_PEPPER: z
+    .string()
+    .refine((value) => Buffer.byteLength(value, "utf8") >= 32, "OTP_PEPPER must be at least 32 bytes")
+    .optional(),
   // true: anyone can register a customer account (it still needs a verified email). false: register
   // does nothing; staff create customers and enable their login.
   CUSTOMER_SELF_SIGNUP: z
     .enum(["true", "false"], { error: "CUSTOMER_SELF_SIGNUP must be true or false" })
     .default("true")
     .transform((value) => value === "true"),
+  // The public website API (/api/public). Off by default: with it off none of those routes exist.
+  PUBLIC_STOCK_ENABLED: z
+    .enum(["true", "false"], { error: "PUBLIC_STOCK_ENABLED must be true or false" })
+    .default("false")
+    .transform((value) => value === "true"),
+  // Comma-separated website origins allowed to call /api/public from a browser. Empty means none. Never "*".
+  // Separate from CORS_ALLOWED_ORIGINS (the staff and customer apps).
+  PUBLIC_ALLOWED_ORIGINS: z.string().default(""),
+  // The public base URL (a custom domain on the PUBLIC stock bucket) that stock images are served from.
+  // Unset means stock images are not shown. Never the private bucket's address.
+  PUBLIC_STOCK_IMAGE_BASE_URL: z.string().url().optional(),
+  // The PUBLIC bucket stock images are uploaded to (same R2 account and credentials as the private one, a different
+  // bucket). Unset means stock image uploads are refused.
+  R2_PUBLIC_STOCK_BUCKET_NAME: z.string().min(1).optional(),
+  // Cloudflare Turnstile secret for the enquiry form. Unset means the check is skipped.
+  TURNSTILE_SECRET: z.string().min(1).optional(),
   // Signs access tokens. Long and random, unique per environment.
   MOBILE_JWT_SECRET: z.string().min(32, "MOBILE_JWT_SECRET must be at least 32 characters"),
   // Default org for login lookup and cron only. See config/default-org.ts.
@@ -73,12 +121,38 @@ const envSchema = baseSchema.superRefine((env, ctx) => {
       if (env[name] === undefined) ctx.addIssue({ code: "custom", path: [name], message: `${name} is required when any R2 credential is set` });
     }
   }
+  if (env.CLIENT_IP_SOURCE === "header" && env.CLIENT_IP_HEADER === undefined) {
+    ctx.addIssue({ code: "custom", path: ["CLIENT_IP_HEADER"], message: "CLIENT_IP_HEADER is required when CLIENT_IP_SOURCE is header" });
+  }
+  if (env.CLIENT_IP_SOURCE === "hops" && env.TRUST_PROXY_HOPS === 0) {
+    ctx.addIssue({ code: "custom", path: ["TRUST_PROXY_HOPS"], message: "TRUST_PROXY_HOPS must be above 0 when CLIENT_IP_SOURCE is hops" });
+  }
+  if (env.SCHEDULER_SHUTDOWN_TIMEOUT_MS >= env.SHUTDOWN_TIMEOUT_MS) {
+    ctx.addIssue({ code: "custom", path: ["SCHEDULER_SHUTDOWN_TIMEOUT_MS"], message: "SCHEDULER_SHUTDOWN_TIMEOUT_MS must be shorter than SHUTDOWN_TIMEOUT_MS" });
+  }
+  if (env.PUBLIC_ALLOWED_ORIGINS.split(",").some((origin) => origin.trim() === "*")) {
+    ctx.addIssue({ code: "custom", path: ["PUBLIC_ALLOWED_ORIGINS"], message: "PUBLIC_ALLOWED_ORIGINS must list origins, never *" });
+  }
+  if (env.R2_PUBLIC_STOCK_BUCKET_NAME !== undefined && env.R2_ACCOUNT_ID === undefined) {
+    ctx.addIssue({ code: "custom", path: ["R2_PUBLIC_STOCK_BUCKET_NAME"], message: "R2_PUBLIC_STOCK_BUCKET_NAME needs the R2 credentials" });
+  }
+  if (env.CUSTOMER_JWT_SECRET !== undefined && env.OTP_PEPPER === undefined) {
+    ctx.addIssue({ code: "custom", path: ["OTP_PEPPER"], message: "OTP_PEPPER is required when CUSTOMER_JWT_SECRET is set" });
+  }
+  if (env.OTP_PEPPER !== undefined && (env.OTP_PEPPER === env.MOBILE_JWT_SECRET || env.OTP_PEPPER === env.CUSTOMER_JWT_SECRET)) {
+    ctx.addIssue({ code: "custom", path: ["OTP_PEPPER"], message: "OTP_PEPPER must differ from the JWT secrets" });
+  }
   if (env.CUSTOMER_JWT_SECRET !== undefined && env.CUSTOMER_JWT_SECRET === env.MOBILE_JWT_SECRET) {
     ctx.addIssue({ code: "custom", path: ["CUSTOMER_JWT_SECRET"], message: "CUSTOMER_JWT_SECRET must differ from MOBILE_JWT_SECRET" });
   }
 });
 
 export type Env = z.infer<typeof envSchema>;
+
+/** The client address source in effect: the explicit setting, or (unset) hops when TRUST_PROXY_HOPS > 0, otherwise socket. */
+export function effectiveClientIpSource(env: Pick<Env, "CLIENT_IP_SOURCE" | "TRUST_PROXY_HOPS">): "socket" | "hops" | "header" {
+  return env.CLIENT_IP_SOURCE ?? (env.TRUST_PROXY_HOPS > 0 ? "hops" : "socket");
+}
 
 let cached: Env | undefined;
 

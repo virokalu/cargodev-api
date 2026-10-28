@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { ACCESS_TOKEN_TTL_SECONDS } from "../lib/mobile-jwt.js";
-import { errorBody } from "../lib/response.js";
+import { openSseStream } from "../lib/sse-route.js";
 import type { SseHub } from "../lib/sse-hub.js";
 import { authenticate, currentUser } from "../plugins/auth.js";
 import { parseInput } from "../lib/parse.js";
@@ -36,44 +36,12 @@ export function registerNotificationRoutes(app: FastifyInstance, deps: Notificat
   // would end up in logs, so no query-string fallback exists.
   app.get("/notifications/stream", { ...auth, ...STREAM_RATE_LIMIT }, async (request, reply) => {
     const user = currentUser(request);
-
-    if (!deps.sseHub.hasCapacity()) {
-      reply.header("Retry-After", "30");
-      return reply.status(429).send(errorBody("RATE_LIMITED", "Too many open streams. Try again later."));
-    }
-
-    // From here on we own the socket: the error handler and onSend hooks no longer apply.
-    reply.hijack();
-    const raw = reply.raw;
-    // Headers already set on the reply (no-store, security headers, CORS) are not sent after hijack.
-    const inherited: Record<string, string | number | string[]> = {};
-    for (const [name, value] of Object.entries(reply.getHeaders())) {
-      if (value !== undefined) inherited[name] = value;
-    }
-    raw.writeHead(200, {
-      ...inherited,
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-store",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no", // tell reverse proxies not to buffer the stream
-    });
-    raw.write("retry: 5000\n: connected\n\n");
-
-    const connection = deps.sseHub.open({
+    return openSseStream(deps.sseHub, request, reply, {
       userId: user.id,
       orgId: user.orgId,
-      sink: raw,
       // Never outlive the token that opened the stream.
       expiresAt: request.tokenExpiresAt ?? Date.now() + ACCESS_TOKEN_TTL_SECONDS * 1000,
     });
-
-    const cleanup = () => connection.dispose();
-    request.raw.on("close", cleanup);
-    request.raw.on("error", cleanup);
-    raw.on("close", cleanup);
-    raw.on("error", cleanup);
-
-    return reply;
   });
 
   app.get("/notifications", auth, async (request) => {

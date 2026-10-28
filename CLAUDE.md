@@ -26,7 +26,7 @@ This file is the contract. If a change breaks a rule here, change the rule in a 
 ## Response contract
 
 - Success: `{ "data": ... }`. Error: `{ "error": { "code", "message", "fieldErrors?" } }`.
-- Every response sends `Cache-Control: no-store`, with two deliberate exceptions: the customer file endpoints (`private, max-age=<CUSTOMER_FILE_CACHE_SECONDS>`) and, in slice 7, the read endpoints under `/api/public`.
+- Every response sends `Cache-Control: no-store`, with two deliberate exceptions: the customer file endpoints (`private, max-age=<CUSTOMER_FILE_CACHE_SECONDS>`) and the successful read endpoints under `/api/public` (`public, max-age=60`; the enquiry POST and every error stay `no-store`). `/api/public` has its own CORS allow-list (`PUBLIC_ALLOWED_ORIGINS`, never `*`) and exists only when `PUBLIC_STOCK_ENABLED=true`.
 - Never leak internal error messages. Unexpected errors log server side and return `INTERNAL`.
 
 ## Security rules
@@ -58,11 +58,12 @@ Customer accounts are a separate zone from staff, under `/api/customer/v1`.
 - Logs never contain passwords, one-time codes, tokens, message bodies or full email addresses.
 - Email goes only through `src/lib/email.ts` and is a no-op without `RESEND_API_KEY`.
 - Customers get photos and documents only through the API (`/photos/:id/image`, `/documents/:id/file`, by database id): the API checks, then reads from R2 and streams. A customer response, DTO, error or log never contains an R2 address, an object key or the account id. Presigned URLs exist only for staff uploads.
+- No amount of any kind (price, per-vehicle amount, total purchase value) is ever shown to a customer, and cancelled vehicles are never shown (FTJ decisions).
 - Only jpeg, png, webp and pdf are accepted, stored or served. Never svg, html or anything a browser could run.
 
 ## Out of scope for now
 
-Public website API (until its slice), WhatsApp sending, phone OTP, reservations and cost estimates, new price/category fields. If a task tempts you into these, raise it in an issue first.
+WhatsApp sending, phone OTP, reservations and cost estimates, new price/category fields. If a task tempts you into these, raise it in an issue first.
 
 ## Definition of done
 

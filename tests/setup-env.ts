@@ -9,3 +9,5 @@ process.env["SCHEDULER_ENABLED"] = "false";
 delete process.env["RESEND_API_KEY"];
 delete process.env["EMAIL_FROM"];
 process.env["CUSTOMER_JWT_SECRET"] = "test-only-customer-value-0123456789abcdef";
+process.env["OTP_PEPPER"] = "test-only-otp-pepper-value-0123456789abcdef";
+process.env["PUBLIC_STOCK_IMAGE_BASE_URL"] = "https://img.example.test";

@@ -210,7 +210,16 @@ describe("GET /notifications/stream: stream behaviour", () => {
 describe("GET /notifications/stream: lifecycle", () => {
   it("closes after the access token expires, with event: reauth", async () => {
     await start();
-    const res = await openStream(await shortLivedToken("user_1", 1));
+    // Mint and connect under a frozen clock (at an exact second), so a slow machine cannot let the 1 second token expire
+    // before the request reaches the guard. The stream's expiry timer is measured from that same instant.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let res: Awaited<ReturnType<typeof openStream>>;
+    try {
+      vi.setSystemTime(new Date(Math.floor(Date.now() / 1000) * 1000));
+      res = await openStream(await shortLivedToken("user_1", 1));
+    } finally {
+      vi.useRealTimers();
+    }
     expect(res.status).toBe(200);
     await res.waitFor("event: reauth", 4000);
     expect(res.text()).toContain('"reason":"token_expired"');

@@ -42,3 +42,8 @@ organisation. Customers are also untrusted strangers by default: anyone can try 
 - The `User.password` column holds customer password hashes as well; `country` and `lastActiveAt` already existed.
 - Slices 2 to 7 add milestones, files, the customer read API, staff tools, notifications, chat and the public stock API
   on top of this zone.
+
+## Decisions recorded later
+
+- **One-time codes go by email only.** There is no phone, SMS, WhatsApp or other code channel (FTJ decision). Email codes for verification and for password reset stay. The enum value `PHONE_LOGIN` in `OtpPurpose` is kept but unused (removing an enum value is a non-additive change); nothing issues or accepts it. **The customer app screens must not include a phone-login option.**
+- **Codes are stored as an HMAC keyed by `OTP_PEPPER`**, with hourly request caps per address and per IP (see `docs/security-model.md`).

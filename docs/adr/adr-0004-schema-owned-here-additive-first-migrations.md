@@ -37,6 +37,19 @@ be unrecoverable.
 6. **Drift, a requested reset, or an untracked database means stop.** If \`_prisma_migrations\` is empty or missing but the tables exist, \`deploy\` applies nothing and the maintainer baselines the history.  If `migrate dev` reports drift or wants to reset, ask. If it cannot
    create its shadow database, do not loosen permissions: use `diff-script`, which needs none.
 
+## Note: where the database lives (added 2026-10-27)
+
+The database **stays on Supabase**, a separate failure domain from the API host: if the host has an outage the data is
+untouched, and if the host is replaced the data does not move. The API reaches it through the **session pooler**; migrations
+run from the maintainer's laptop against the **direct** connection (never from the API host).
+
+If the distance between the API host and the database turns out to matter, the first option is a **Singapore** Supabase
+project (closest to the users), reached by dump, restore and a connection-string change. Measure first with `npm run db:latency`
+(it prints min, p50, p95 and max for 50 sequential `SELECT 1`, never the address). **Triggers to revisit this decision:** p50
+above roughly 40 ms or p95 above roughly 150 ms from the API host; user-visible slowness traced to the database round trips;
+a provider change of pricing, limits or reliability; a regulation that fixes where the data may live; or moving the API
+host to a region far from the database.
+
 ## Consequences
 
 - The test harness still rebuilds its throwaway database from `schema.prisma`; once migrations exist, a test

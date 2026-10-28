@@ -25,6 +25,7 @@ export const VEHICLE_RELATIONS = {
   vehicleDocument: { uploadedBy: { model: "user", fk: "uploadedById" } },
   vehicleMilestone: { recordedBy: { model: "user", fk: "recordedById" } },
   vehicleModelRef: { brand: { model: "brand", fk: "brand_id" } },
+  conversation: { customer: { model: "user", fk: "customerId" } },
   statusHistory: { vehicle: { model: "vehicle", fk: "vehicleId" } },
 } as const;
 

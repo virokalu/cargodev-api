@@ -15,7 +15,7 @@ export const customerVehicleListQuerySchema = z
     pageSize,
     status: z.enum(CUSTOMER_STATUSES).optional(),
     brand: z.string().trim().min(1).max(100).optional(),
-    sort: z.enum(["arrival", "purchaseDate", "price"]).default("purchaseDate"),
+    sort: z.enum(["arrival", "purchaseDate"]).default("purchaseDate"),
     dir: z.enum(["asc", "desc"]).default("desc"),
   })
   .strict();

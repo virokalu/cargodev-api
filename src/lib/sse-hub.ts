@@ -51,7 +51,7 @@ export interface SseConnection {
 }
 
 /** Event types that may be streamed. Anything else published on the bus is ignored. */
-const STREAMABLE_TYPES = new Set(["notification"]);
+const STREAMABLE_TYPES = new Set(["notification", "message"]);
 
 /** Strips line breaks so a value can never inject extra SSE fields. */
 function field(value: unknown): string {
@@ -64,11 +64,20 @@ export function formatSseEvent(event: { id?: string; event: string; data: unknow
 
 /** The wire shape of a notification event: explicit fields only. */
 function toWireData(event: AppEvent): unknown | null {
-  if (event.type !== "notification") return null;
+  if (event.type !== "notification" && event.type !== "message") return null;
   const p = event.payload;
   if (typeof p !== "object" || p === null) return null;
   const o = p as Record<string, unknown>;
   const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  // A chat message event says THAT something arrived (the client fetches the text): ids and sender type only.
+  if (event.type === "message") {
+    return {
+      conversationId: str(o["conversationId"]),
+      messageId: str(o["messageId"]),
+      senderType: o["senderType"] === "STAFF" ? "STAFF" : "CUSTOMER",
+      createdAt: str(o["createdAt"]),
+    };
+  }
   return {
     id: str(o["id"]),
     event: str(o["event"]),

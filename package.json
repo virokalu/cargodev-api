@@ -15,7 +15,10 @@
     "db:test:up": "sh scripts/test-db.sh up",
     "db:test:down": "sh scripts/test-db.sh down",
     "dev": "tsx watch --env-file=.env src/server.ts",
-    "start": "tsx --env-file=.env src/server.ts"
+    "start": "tsx --env-file=.env src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start:prod": "node dist/server.js",
+    "db:latency": "tsx --env-file-if-exists=.env scripts/db-latency.ts"
   },
   "keywords": [],
   "type": "module",

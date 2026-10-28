@@ -45,3 +45,6 @@ next-env.d.ts
 # Private planning material (keep out of this public repo)
 docs/private/
 *-brief.md
+
+# production build output
+/dist

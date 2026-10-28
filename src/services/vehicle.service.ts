@@ -33,6 +33,7 @@ import * as activityLog from "./activity-log.service.js";
 import { recordStatusMilestone, syncMilestonesForStatusChange } from "./milestone.service.js";
 import { createPhotoThumbnail } from "./photo-thumbnail.service.js";
 import * as notificationService from "./notification.service.js";
+import { emitToVehicleCustomer } from "./customer-notify.service.js";
 import { buildTrackWhere, computeEffectiveTrack, type TrackFilter } from "../lib/vehicle-track.js";
 import {
   computeEffectiveShipmentStatus,
@@ -138,8 +139,6 @@ export interface VehicleDetailData {
   portOfLoading: string | null;
   portOfDischarge: string | null;
   voyageNo: string | null;
-  customerAmount: number | null;
-  customerAmountCurrency: string | null;
 }
 
 /** Fetches a vehicle shaped for display — the edit form and the read-only
@@ -178,8 +177,6 @@ export async function getVehicleDetail(orgId: string, serial: string): Promise<V
       portOfLoading: true,
       portOfDischarge: true,
       voyageNo: true,
-      customerAmount: true,
-      customerAmountCurrency: true,
       etd: true,
       eta: true,
       blNo: true,
@@ -317,8 +314,6 @@ export async function getVehicleDetail(orgId: string, serial: string): Promise<V
     portOfLoading: vehicle.portOfLoading,
     portOfDischarge: vehicle.portOfDischarge,
     voyageNo: vehicle.voyageNo,
-    customerAmount: vehicle.customerAmount === null ? null : Number(vehicle.customerAmount.toString()),
-    customerAmountCurrency: vehicle.customerAmountCurrency,
   };
 }
 
@@ -1068,6 +1063,7 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
 
     let bookingReceivedNotification: notificationService.EmitParams | null = null;
     let revertedToPendingNotification: notificationService.EmitParams | null = null;
+    let customerBookingNotification: notificationService.EmitParams | null = null;
     let vehiclePurchasedNotification: notificationService.EmitParams | null = null;
     let auctionBillPaidNotification: notificationService.EmitParams | null = null;
 
@@ -1113,6 +1109,14 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
             recipientUserIds,
           };
           await notificationService.emit(tx, bookingReceivedNotification);
+          // The customer who owns it hears about it too, if they may see the vehicle.
+          customerBookingNotification = await emitToVehicleCustomer(tx, {
+            orgId: user.orgId,
+            vehicleId: id,
+            event: "BOOKING_RECEIVED",
+            title: () => "Booking received",
+            body: (serial) => `Your booking for ${serial} has been received.`,
+          });
         } else if (statusTransition?.trigger === "ETD_CLEARED") {
           revertedToPendingNotification = {
             orgId: user.orgId,
@@ -1165,6 +1169,7 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
       result,
       bookingReceivedNotification,
       revertedToPendingNotification,
+      customerBookingNotification,
       vehiclePurchasedNotification,
       auctionBillPaidNotification,
     };
@@ -1172,6 +1177,7 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
 
   if (updated.bookingReceivedNotification) notificationService.notifyRealtime(updated.bookingReceivedNotification);
   if (updated.revertedToPendingNotification) notificationService.notifyRealtime(updated.revertedToPendingNotification);
+  if (updated.customerBookingNotification) notificationService.notifyRealtime(updated.customerBookingNotification);
   if (updated.vehiclePurchasedNotification) notificationService.notifyRealtime(updated.vehiclePurchasedNotification);
   if (updated.auctionBillPaidNotification) notificationService.notifyRealtime(updated.auctionBillPaidNotification);
 

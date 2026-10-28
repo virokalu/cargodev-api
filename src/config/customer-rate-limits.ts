@@ -35,6 +35,15 @@ export const CUSTOMER_RATE_LIMITS = {
   appConfig: { ip: { max: 60, windowMs: MINUTE } },
   // Photos and documents streamed by the API: a list screen loads many thumbnails at once.
   fileDownload: { ip: { max: 300, windowMs: MINUTE }, identifier: { max: 120, windowMs: MINUTE } },
+  // Alerts: marking read, preferences, device tokens, the presence heartbeat and the live stream.
+  alertsWrite: { ip: { max: 60, windowMs: MINUTE }, identifier: { max: 60, windowMs: MINUTE } },
+  preferences: { ip: { max: 30, windowMs: MINUTE }, identifier: { max: 30, windowMs: MINUTE } },
+  devices: { ip: { max: 20, windowMs: MINUTE }, identifier: { max: 30, windowMs: 60 * MINUTE } },
+  presence: { ip: { max: 60, windowMs: MINUTE }, identifier: { max: 30, windowMs: MINUTE } },
+  stream: { ip: { max: 30, windowMs: MINUTE }, identifier: { max: 30, windowMs: MINUTE } },
+  // Chat: sending a message, and opening a new conversation (rarer, so tighter).
+  chatSend: { ip: { max: 60, windowMs: MINUTE }, identifier: { max: 15, windowMs: MINUTE } },
+  chatStart: { ip: { max: 20, windowMs: MINUTE }, identifier: { max: 10, windowMs: 60 * MINUTE } },
 } as const satisfies Record<string, RouteLimits>;
 
 export type CustomerLimitName = keyof typeof CUSTOMER_RATE_LIMITS;

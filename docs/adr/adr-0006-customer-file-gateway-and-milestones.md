@@ -59,3 +59,8 @@ can overlap. Existing files are stored as full public URLs (see Consequences).
   (d) removing the public base from the staff clients. Step (a) must exist before (c).
 - Customer downloads use API bandwidth and one open connection each until a Worker gateway exists.
 - Enquiry and Message rows hold personal data; see the retention note in `docs/runbook.md` and `docs/privacy-checklist.md`.
+
+## Decisions recorded later
+
+- **Cancelled vehicles** (row colour "Unit Canceled" / "Resold in Auction") are never shown to customers and there is no placeholder card; the cancellation reason and the row colour name stay hidden everywhere. Closed by FTJ.
+- **No amount of any kind** is shown to customers (no price, no per-vehicle amount, no total purchase value). The unused columns are listed in `docs/deferred/unused-columns.md`.

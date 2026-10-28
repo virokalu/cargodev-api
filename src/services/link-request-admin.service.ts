@@ -1,14 +1,15 @@
 // Staff decide on customers' requests to be linked to a vehicle. Approving creates the ownership link (the vehicle's
 // customer) and tells the customer; it does NOT release the vehicle (that is a separate step), and the customer is never
-// told why a request was declined.
+// told why a request was declined unless staff choose to give a reason, which then arrives as a chat message from them.
 
 import type { LinkRequestStatus } from "@prisma/client";
 import { ServiceError } from "../lib/errors.js";
 import { parseInput } from "../lib/parse.js";
 import { getPrisma } from "../lib/prisma.js";
 import type { SessionUser } from "../lib/session-user.js";
-import { emptyBodySchema, linkApproveBodySchema, linkRequestListQuerySchema } from "../validation/customer-admin.schema.js";
+import { emptyBodySchema, linkApproveBodySchema, linkRequestListQuerySchema, rejectBodySchema } from "../validation/customer-admin.schema.js";
 import * as activityLog from "./activity-log.service.js";
+import { postStaffMessageToCustomer } from "./chat.service.js";
 import * as notificationService from "./notification.service.js";
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -153,9 +154,10 @@ export async function approveLinkRequest(actor: SessionUser, requestId: string, 
 }
 
 export async function rejectLinkRequest(actor: SessionUser, requestId: string, rawBody: unknown): Promise<{ id: string; status: "REJECTED" }> {
-  parseInput(emptyBodySchema, rawBody ?? {}, "Invalid request body.");
+  const { reason } = parseInput(rejectBodySchema, rawBody ?? {}, "Invalid request body.");
   const request = await loadPending(actor.orgId, requestId);
 
+  let publishChat: () => void = () => undefined;
   const notification = await getPrisma().$transaction(async (tx) => {
     const claimed = await tx.vehicleLinkRequest.updateMany({
       where: { id: request.id, org_id: actor.orgId, status: "PENDING" },
@@ -170,10 +172,19 @@ export async function rejectLinkRequest(actor: SessionUser, requestId: string, r
       entity: "VehicleLinkRequest",
       entityId: request.id,
       before: { status: "PENDING" },
-      after: { status: "REJECTED" },
+      after: { status: "REJECTED", reasonGiven: reason !== undefined },
     });
 
-    // No reason is given to the customer, and nothing says whether the vehicle exists.
+    // The standing answer carries no reason and nothing about whether the vehicle exists. A reason is something staff
+    // CHOOSE to say, and it reaches the customer as a chat message from them (the text is not in the log).
+    if (reason !== undefined) {
+      publishChat = await postStaffMessageToCustomer(tx, {
+        orgId: actor.orgId,
+        staffId: actor.id,
+        customerId: request.customerId,
+        body: `About your request to link ${request.serialEntered}: ${reason}`,
+      });
+    }
     const params: notificationService.EmitParams = {
       orgId: actor.orgId,
       event: "LINK_REQUEST_REJECTED",
@@ -186,5 +197,6 @@ export async function rejectLinkRequest(actor: SessionUser, requestId: string, r
   });
 
   notificationService.notifyRealtime(notification);
+  publishChat();
   return { id: request.id, status: "REJECTED" };
 }

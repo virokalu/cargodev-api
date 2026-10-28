@@ -1,6 +1,7 @@
 // Bodies and queries for the staff tools for customers. Strict: an unknown field is a 400.
 
 import { z } from "zod";
+import { rejectionReasonSchema } from "./chat.schema.js";
 import { DOCUMENT_TYPES } from "./file.schema.js";
 
 const id = z.string("an id is required").regex(/^[A-Za-z0-9_-]{1,64}$/, "Invalid id");
@@ -21,31 +22,9 @@ export const customerInfoBodySchema = z
     portOfLoading: shortText.optional(),
     portOfDischarge: shortText.optional(),
     voyageNo: shortText.optional(),
-    customerAmount: z
-      .number("customerAmount must be a number or null")
-      .min(0, "Must be zero or more")
-      .max(9_999_999_999.99, "Too large")
-      .nullable()
-      .transform((v) => (v === null ? null : Math.round(v * 100) / 100))
-      .optional(),
-    customerAmountCurrency: z
-      .string()
-      .trim()
-      .toUpperCase()
-      .regex(/^[A-Z]{3}$/, "Use a 3-letter currency code such as USD")
-      .nullable()
-      .optional(),
   })
   .strict()
-  .refine((v) => Object.values(v).some((x) => x !== undefined), { message: "Send at least one field to change" })
-  .superRefine((v, ctx) => {
-    const amount = v.customerAmount;
-    const currency = v.customerAmountCurrency;
-    // The amount and its currency always travel together: both set, or both cleared.
-    if ((amount === undefined) !== (currency === undefined) || (amount === null) !== (currency === null)) {
-      ctx.addIssue({ code: "custom", path: ["customerAmount"], message: "Send the amount and its currency together (both values, or both null)" });
-    }
-  });
+  .refine((v) => Object.values(v).some((x) => x !== undefined), { message: "Send at least one field to change" });
 
 export const documentReleaseBodySchema = z
   .object({ documentType: z.enum(DOCUMENT_TYPES).optional(), visibleToCustomer: z.boolean().optional() })
@@ -66,6 +45,8 @@ export const linkRequestListQuerySchema = z
   .strict();
 export const linkApproveBodySchema = z.object({ vehicleId: id.optional() }).strict();
 export const emptyBodySchema = z.object({}).strict();
+/** Rejecting a link request: an optional reason, which reaches the customer as a chat message from staff. */
+export const rejectBodySchema = z.object({ reason: rejectionReasonSchema.optional() }).strict();
 
 const faqText = (max: number, label: string) => z.string(`${label} is required`).trim().min(1, `${label} is required`).max(max, `Must be ${max} characters or fewer`);
 export const faqCreateSchema = z

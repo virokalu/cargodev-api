@@ -23,7 +23,7 @@ Error: `{ "error": { "code": "...", "message": "...", "fieldErrors": { "field": 
 
 ## Conventions
 
-- Every response has `Cache-Control: no-store`, except the customer file endpoints (`private, max-age=300` by default) and, later, the public stock reads.
+- Every response has `Cache-Control: no-store`, except the customer file endpoints (`private, max-age=300` by default) and the successful `GET`s under `/api/public` (`public, max-age=60`). Errors and the enquiry `POST` are `no-store` even there.
 - Dates are ISO 8601 strings. Decimals are plain numbers.
 - A resource in another org returns 404, never 403.
 - `orgId` always comes from the verified token. Any `orgId` in a request is ignored.
@@ -248,18 +248,18 @@ Every endpoint needs a customer token (except the version check). **Which vehicl
 | GET | /vehicles/:vehicleId/timeline | `[{ type, label, completed, occurredAt }]`, always the 9 steps in order |
 | GET | /vehicles/:vehicleId/photos | `[{ id, createdAt }]` released photos only; fetch the picture from `/photos/:id/image` |
 | GET | /documents?page&pageSize&vehicleId | `{ rows: [{ id, name, type, createdAt, vehicle: { id, serial } }], total, page, pageSize }` released documents only; fetch the file from `/documents/:id/file` |
-| GET | /purchase-history | `{ deliveredCount, totalSpent: Money \| null, totalSpentByCurrency: Money[], customerSince }` |
+| GET | /purchase-history | `{ deliveredCount, customerSince }` (no total purchase value of any kind: the business does not want customers shown one) |
 | GET | /help/faqs | `[{ id, question, answer }]` published, in order |
 | POST | /vehicles/link-requests | `{ serial }` -> 202 `{ accepted: true }` (below) |
 | GET | /app/min-version | no token: `{ minVersion }` (from `APP_MIN_VERSION`) |
 
-**Summary** (exactly these keys): `id, serial, brand, model, grade, year, chassisNo, destination, status, purchaseDate, etd, eta, portOfLoading, portOfDischarge, vesselName, amount, coverPhotoId, photoCount`. **Detail** is Summary plus `voyageNo, blNo, shippingMethod, containerNumber`. `status` is one of `PENDING, BOOKING_RECEIVED, SHIPPED, ARRIVED, DELIVERED`: the shipping status, overridden by the ARRIVED and DELIVERED milestones. `photoCount` and `coverPhotoId` count released photos only.
+**Summary** (exactly these keys): `id, serial, brand, model, grade, year, chassisNo, destination, status, purchaseDate, etd, eta, portOfLoading, portOfDischarge, vesselName, coverPhotoId, photoCount`. **Detail** is Summary plus `voyageNo, blNo, shippingMethod, containerNumber`. `status` is one of `PENDING, BOOKING_RECEIVED, SHIPPED, ARRIVED, DELIVERED`: the shipping status, overridden by the ARRIVED and DELIVERED milestones. `photoCount` and `coverPhotoId` count released photos only.
 
-**List parameters:** `page` (1 and up, default 1), `pageSize` (1 to 50, default 20), `status` (one of the five above), `brand` (brand name, any case), `sort` = `purchaseDate` (default) | `arrival` (the ETA) | `price` (the amount), `dir` = `desc` (default) | `asc`. Vehicles with no value for the sort field come last in both directions.
+**List parameters:** `page` (1 and up, default 1), `pageSize` (1 to 50, default 20), `status` (one of the five above), `brand` (brand name, any case), `sort` = `purchaseDate` (default) | `arrival` (the ETA), `dir` = `desc` (default) | `asc`. Vehicles with no value for the sort field come last in both directions.
 
-**Never in any customer response:** remarks and internal notes, auction hall, supplier, lot and item numbers, whether the auction bill is paid, transport and location, freight and packing agents, inspection details, selling price and other internal costs, partnership details, row colour, tri-state flags, other customers, the activity log, org and customer ids, or any storage address or key.
+**No amount of any kind** is shown to a customer, anywhere (FTJ decision): no price, no per-vehicle amount, no total purchase value. `sort=price` is a 400. **Cancelled vehicles** (row colour "Unit Canceled" / "Resold in Auction") are never shown to customers, with no placeholder card; the cancellation reason and the row colour name stay hidden everywhere (question closed by FTJ). **Never in any customer response:** remarks and internal notes, auction hall, supplier, lot and item numbers, whether the auction bill is paid, transport and location, freight and packing agents, inspection details, selling price and other internal costs, partnership details, row colour, tri-state flags, other customers, the activity log, org and customer ids, or any storage address or key.
 
-**Purchase history:** `totalSpent` is a single Money only when every valued vehicle uses one currency; with several currencies it is null and `totalSpentByCurrency` lists each. It is null/empty until staff enter an amount on a vehicle. The basis of the amount (FOB, CIF, invoiced) is the business's decision.
+**Purchase history:** only the number of delivered vehicles and the member-since date. There is no total purchase value (and no per-currency total): it was removed on the business's instruction. Each vehicle still shows its own `amount`, if staff entered one.
 
 **Link requests:** `serial` must look like `FC1024` or `FL88` (any case). The answer is the same `202` whatever the serial: nothing looks the vehicle up, so a request never confirms or denies that a vehicle exists. Staff (administrators, managers and the customer's assigned agent) are notified and decide later. A repeat of a pending request, or more than 20 pending, is ignored with the same answer. Limits: 10/min per IP and 5/hour per customer. (`/documents/:id/url` from the plan is replaced by `/documents/:id/file`.)
 
@@ -271,12 +271,118 @@ Errors: 400 `VALIDATION` for bad input and for any wrong or expired code or cred
 
 Rate limits (per IP / per email or customer, from `src/config/customer-rate-limits.ts`; file gateway: 300/min per IP, 120/min per customer): register 5/min, 3/hour; verify-email 10/min, 10/10 min; resend-verification 5/min, 3/10 min; login 10/min, 20/15 min; refresh 30/min; logout 30/min; forgot-password 5/min, 3/hour; reset-password 10/min, 10/10 min; delete-account 5/min, 5/hour; me 60/min. Per-email limits count unknown addresses too.
 
+### Public website API (Phase 2, slice 7)
+
+Everything here exists only when `PUBLIC_STOCK_ENABLED=true` (otherwise 404, for the public routes and the staff stock tools alike). **No authentication**: a token, cookie or org in the request is ignored; the org is the server's default org. **CORS:** `PUBLIC_ALLOWED_ORIGINS` (the website origins), GET / POST / OPTIONS, header `Content-Type` only, no credentials, never `*`; the app origins (`CORS_ALLOWED_ORIGINS`) have no access to these routes and the website origin has none to the rest of the API. Query strings are strict (an unknown parameter is a 400).
+
+| Method | Path | Success |
+|---|---|---|
+| GET | /api/public/stock?page&pageSize&make&model&bodyType&fuel&transmission&yearMin&yearMax&priceMin&priceMax&mileageMax&q&sort | `{ rows: Card[], total, page, pageSize }`. `pageSize` 1 to 24 (default 12). `sort` = newest (default) \| priceAsc \| priceDesc \| yearDesc \| yearAsc \| mileageAsc. Text filters ignore case; `q` searches make and model as plain text: it is trimmed and cut at 100 characters, `%`, `_` and backslash are literal characters (escaped), and a blank `q` means no search. A row with no price or mileage never matches a price or mileage range |
+| GET | /api/public/stock/:slug | `Detail`; a draft, sold, other-org, malformed or unknown slug is the same `404 Stock vehicle not found.` |
+| POST | /api/public/enquiries | `{ name, email, phone?, message, stockSlug?, website?, turnstileToken? }` -> **202 `{ accepted: true }`** whatever happens to it (stored; dropped as a bot; listing no longer public) |
+
+**Card** (exactly these keys): `slug, make, model, year, price, mileageKm, bodyType, fuel, transmission, colour, publishedAt, image` (`image` is `{ url, alt }` or null). **Detail** is Card plus `description` and `images: [{ url, alt }]`, in order. `price` is `{ amount, currency: "LKR" }` or null, **never a bare number**: every listing price is in Sri Lankan rupees (whole rupees), with no conversion and no currency parameter (`STOCK_PRICE_CURRENCY` in `src/config/public-stock.ts`; the database column `StockVehicle.priceFob` holds that LKR price, its name is historical). The website must always label it LKR. Multi-currency is deferred (`docs/deferred/currency-localization.md`). **Never** in any public response: ids, the org, the status, internal timestamps, storage keys, serials, customer data, supplier, auction, costs. Only `PUBLISHED` listings are returned. Image URLs are `PUBLIC_STOCK_IMAGE_BASE_URL/<key>` of the PUBLIC bucket; a listing with no public base URL configured has no images.
+
+**Enquiry form rules.** `name` 1 to 100, `email` valid (max 150, stored lower case), `phone` optional (digits, `+`, spaces, dashes, brackets), `message` plain text 1 to 2000 (no control characters), `stockSlug` optional (dropped if not a published listing), body at most 8 KB (413 becomes 400 `Invalid request.`). `website` is a hidden field: if it holds anything the visitor gets the normal 202 and nothing is stored or announced. With `TURNSTILE_SECRET` set a missing, wrong or unverifiable `turnstileToken` is a 400 (fails closed); unset, the check is skipped. Limits: 5 a minute per IP (route), 10 an hour per IP, 3 an hour per email (429 with Retry-After); honeypot hits count. Nothing the visitor typed is written to a log, notification or error. No ActivityLog row is written when a visitor submits (there is no actor).
+
+**Staff stock tools** (`/api/v1`, ADMINISTRATOR and MANAGER, `STOCK_ROLES`; another org's id is 404; each mutation writes an ActivityLog row in the same transaction):
+
+| Method | Path | Notes |
+|---|---|---|
+| GET / POST | /stock | list (`status`, `page`, `pageSize`) / create a DRAFT `{ make, model, year?, price? (whole rupees, > 0, at most 2,000,000,000, or null), mileageKm?, bodyType?, fuel?, transmission?, colour?, description? }` -> 201; the slug is generated and cannot be set |
+| GET / PATCH / DELETE | /stock/:id | one listing with its images / partial edit (null clears; status and slug cannot be edited) / delete with its images and objects |
+| POST | /stock/:id/publish | DRAFT -> PUBLISHED, needs at least one image (400 otherwise), `{ notifyCustomers?: boolean }` tells customers who have not switched "new stock" off (at most 1000); 409 if not a draft |
+| POST | /stock/:id/unpublish | PUBLISHED or SOLD -> DRAFT |
+| POST | /stock/:id/mark-sold | PUBLISHED -> SOLD (no longer public) |
+| POST | /stock/:id/images/presign | `{ contentType: jpeg \| png \| webp, fileSize <= 8 MB }` -> a 5 minute signed upload to the PUBLIC bucket, key `stock/<org hash>/<random>.<ext>` (no org id in the address) |
+| POST | /stock/:id/images | `{ key, altText? }` registers an uploaded image: the key must be one this API issued for this org (400), unused (409); at most 20 per listing |
+| PATCH / DELETE | /stock/:id/images/:imageId | alt text and position / delete (a published listing keeps at least one image) |
+| POST | /stock/:id/images/reorder | `{ imageIds }` must be exactly the listing's own images, each once |
+| GET | /enquiries?status=open\|handled\|all | the website enquiries inbox |
+| POST | /enquiries/:id/handled | `{ handled: boolean }` |
+
+### Chat (Phase 2, slice 6)
+
+Plain text only; no attachments. A message is trimmed, 1 to 2000 characters, with no control characters except line breaks and tabs; line breaks are normalised to `\n`. It is stored exactly as typed and only ever returned as a JSON string (the API never renders it as markup). Bodies are strict: a sender, customer, org or attachment field is a 400.
+
+**Customer** (`/api/customer/v1`, customer token; another customer's or another org's conversation, an unknown id and a bad id are all the same `404 Conversation not found.`):
+
+| Method | Path | Success |
+|---|---|---|
+| GET | /chat/suggested-questions | `{ questions: string[] }` (static) |
+| GET | /conversations?page&pageSize | `{ rows: [{ id, vehicle: { id, serial } \| null, lastMessageAt, lastMessage: { senderType, snippet, createdAt } \| null }], total, page, pageSize }`. The vehicle is named only while the customer may still see it |
+| POST | /conversations | `{ vehicleId?, body }` -> 201 `{ conversation: { id, vehicleId }, message }`. A vehicle must be the customer's own and released (otherwise `404 Vehicle not found.`, the same for unknown, someone else's and unreleased). At most 50 conversations (409) and 10 new ones an hour |
+| GET | /conversations/:id/messages?page&pageSize | `{ rows: [{ id, senderType: "CUSTOMER" \| "STAFF", body, createdAt }], total, page, pageSize }`, newest first. Staff identity is never shown |
+| POST | /conversations/:id/messages | `{ body }` -> 201 the message. 15 a minute per customer (429 with Retry-After) |
+
+**Staff** (`/api/v1`; `CHAT_ROLES` = ADMINISTRATOR, MANAGER, OPERATOR; VIEWER is 403 on every chat route). **Scope** (`src/config/roles.ts`, FTJ decision): ADMINISTRATOR and MANAGER reach every conversation of their org; an OPERATOR reaches only conversations of customers whose `assignedAgentId` is that operator. The assignment, the user's `loginEnabled` and the user's CURRENT role are read from the database on every request, so reassigning a customer removes the old agent's access at once and a deactivated user has none (403). Anything out of scope (another agent's customer, an unassigned customer, another org's conversation, an unknown id) is the same `404 Conversation not found.` The scope applies to the inbox list, reading, replying and marking handled. Link request approval and rejection stay ADMINISTRATOR and MANAGER:
+
+| Method | Path | Success |
+|---|---|---|
+| GET | /chat/conversations?status=open\|handled\|all&page&pageSize | inbox, newest activity first: `{ rows: [{ id, customer: { id, name, companyName }, vehicle \| null, lastMessageAt, handled, lastMessage }], total, page, pageSize }` |
+| GET | /chat/conversations/:id/messages?page&pageSize | `{ conversation: { id, customer, vehicle, handled }, rows: [{ id, senderType, senderName \| null, body, createdAt }], total, page, pageSize }` |
+| POST | /chat/conversations/:id/messages | `{ body }` -> 201 the reply (writes ActivityLog `REPLY_CHAT_MESSAGE`, without the text) |
+| POST | /chat/conversations/:id/handled | `{ handled: boolean }` -> `{ id, handled }` (`MARK_CONVERSATION_HANDLED` / `REOPEN_CONVERSATION`). A new customer message reopens it |
+
+**Who is told.** After the transaction commits, the other party only gets (1) a live `event: message` on their stream with `{ conversationId, messageId, senderType, createdAt }` (never the text; the client fetches it) and (2) at most one alert per burst (the first message, a change of sender, or a pause of more than 5 minutes) with a fixed text ("New message from <customer name>" for staff, "You have a new message from the CargoDev team." for the customer): no message text ever travels by push or email. Recipients are decided from the database at that moment: the customer's assigned agent if they are an active staff member of the org whose role may open chat; otherwise (no agent, or an agent who cannot open chat) the active administrators and managers. Never a user who could not open the conversation. The live event goes to the same people as the alert. A customer who switched off `CHAT_MESSAGE` alerts still gets the live message.
+
+**Assigned agents (closed by FTJ).** An OPERATOR who is a customer's assigned agent reads and answers that customer's chat (and only theirs). Operators have no access to link request decisions, and VIEWERs have no access to chat at all.
+
+**Rejection reasons.** `POST /link-requests/:id/reject` now takes an optional `{ reason }` (1 to 500 characters, plain text). The reason reaches the customer as a staff chat message ("About your request to link FC999: ...") in their most recent general conversation (created if needed), in the same transaction as the decision. The standing alert still says only that the request could not be approved. The text is not written to the ActivityLog (only `reasonGiven`). Deleting a customer account deletes their conversations, messages, alerts and notification settings.
+
+### Customer alerts, preferences, devices, presence and stream (Phase 2, slice 5)
+
+All under `/api/customer/v1`, customer token. Everything is the token's own customer (org and id from the verified token). A staff token, no token or a disabled customer is 401. Bodies and queries are strict.
+
+| Method | Path | Success |
+|---|---|---|
+| GET | /alerts?page&pageSize | `{ days: [{ date: "YYYY-MM-DD" (UTC), alerts: [{ id, event, title, body, isRead, vehicleId \| null, createdAt }] }], unreadCount, total, page, pageSize }`, newest first. `vehicleId` is shown only while the customer may still see that vehicle |
+| POST | /alerts/mark-read | body `{ ids: string[1..200] }` or `{ all: true }` -> `{ updated }`. An id that is not the customer's changes nothing and is not an error |
+| GET / PATCH | /me/notification-preferences | `{ events: { BOOKING_RECEIVED, PHOTOS_ADDED, DOCUMENTS_READY, DEPARTURE_REMINDER, NEW_STOCK, CHAT_MESSAGE: boolean }, departureLeadDays: 3 \| 7 \| 14, pushEnabled, emailEnabled, whatsappEnabled }`. PATCH takes any of those (at least one; events is a partial map). Defaults: all on, 7 days, WhatsApp off and never sent. Link request results (`LINK_REQUEST_APPROVED`, `LINK_REQUEST_REJECTED`) cannot be switched off |
+| POST | /devices | `{ expoPushToken, platform: "ios" \| "android", appVersion? }` -> `{ id, platform, lastSeenAt }` (the token is never echoed). At most 10 devices per customer (the oldest is dropped). A token that belongs to a staff device is refused (400) |
+| DELETE | /devices/:id | `{ deleted: true }`; another customer's or an unknown device is 404 |
+| POST | /presence/heartbeat | `{ ok: true }` always. Writes `lastActiveAt` only if the stored value is older than 60 s. "Active" (for staff) is the last 5 minutes |
+| GET | /stream | Server-Sent Events, token in the Authorization header. `event: notification` with `{ id, event, title, body, vehicleId, createdAt }`; `event: reauth` and close at token expiry; at most 3 streams per customer (oldest closed with `event: closed`). Delivers only events published for this customer, never a staff event. No replay: call `GET /alerts` after reconnecting |
+
+**How a customer is told.** Staff actions write the alert in the same transaction, then (after commit) publish to the stream, send Expo push, and queue email: booking received (the staff edit that makes the vehicle Booking Received), photos added (photos released; one alert per 10-minute burst), document ready (export certificate or bill of lading released), departure reminder (the daily job, on the day the ETD is exactly the chosen 3, 7 or 14 days away, once per vehicle per day), link request approved or rejected. Alerts exist only for vehicles the customer may see. A switched-off event produces no alert, push or email; `pushEnabled` and `emailEnabled` switch the channels. Email goes to a verified, enabled, undeleted customer only, after the response, through `src/lib/email.ts`. "New stock" is reserved for slice 7 and not sent yet.
+
+**One-time codes.** Stored as HMAC-SHA256 keyed by `OTP_PEPPER`. At most 5 code requests per address and 20 per IP per hour (register, resend and forgot together, `src/config/otp-limits.ts`); beyond that the answer is the same 202 but no code is issued and no email is sent. Email is sent after the response.
+
+### Staff tools for customers (Phase 2, slice 4)
+
+All under `/api/v1`, staff token. Roles come from `src/config/roles.ts`: **ADMIN** = ADMINISTRATOR, MANAGER; **ARRIVAL** = ADMINISTRATOR, MANAGER, OPERATOR. A customer token is 401. Another org's id, a deleted or an unknown id is 404 (never 403). Bodies are strict (unknown fields are 400). Every mutation writes an ActivityLog row in the same transaction.
+
+| Method | Path | Roles | Body | Success / notes |
+|---|---|---|---|---|
+| PATCH | /customers/:id/login-access | ADMIN | `{ loginEnabled }` | `{ id, loginEnabled }`. Disabling revokes **all** the customer's sessions and deletes their device tokens in the same transaction, so an access token already issued stops working at the next request. Enabling needs an email address (400 otherwise) |
+| PATCH | /customers/:id/agent | ADMIN | `{ agentId \| null }` | `{ id, assignedAgentId }`. The agent must be an active staff member of the same org (400 otherwise) |
+| GET | /staff/customers/active | ADMIN | | `[{ id, name, companyName, lastActiveAt }]`, customers seen in the last 5 minutes, newest first |
+| GET | /link-requests?status&page&pageSize | ADMIN | | `{ rows, total, page, pageSize }`; status PENDING (default), APPROVED, REJECTED. Each row: `id, status, serialEntered, createdAt, decidedAt, customer { id, name, email, companyName }, vehicle, matchedVehicle { id, serial, ownedByThisCustomer, ownedByAnotherCustomer } \| null` |
+| POST | /link-requests/:id/approve | ADMIN | `{ vehicleId? }` | `{ id, status, vehicle { id, serial } }`. Links the vehicle to the customer, notifies them (`LINK_REQUEST_APPROVED`). Does **not** release the vehicle. 409 if already decided or the vehicle belongs to another customer; 400 when no vehicle has the typed serial and none was named |
+| POST | /link-requests/:id/reject | ADMIN | `{}` | `{ id, status }`. Notifies the customer (`LINK_REQUEST_REJECTED`) with no reason and no hint about the vehicle. 409 if already decided |
+| GET / POST | /faqs | ADMIN | create: `{ question, answer, sortOrder?, published? }` | list includes drafts; create is 201 |
+| PATCH / DELETE | /faqs/:id | ADMIN | update: any of the create fields (at least one) | |
+| PATCH | /vehicles/:id/customer-visibility | ADMIN | `{ customerVisible }` | `{ id, customerVisible }`. 400 when the vehicle has no customer or is a local (FL) vehicle |
+| PATCH | /vehicles/:id/customer-info | ADMIN | any of `portOfLoading, portOfDischarge, voyageNo` (text, empty or null clears), (an amount or currency is an unknown field: 400) | the saved ports and voyage |
+| PATCH | /vehicles/:id/documents/:docId | ADMIN | `{ documentType?, visibleToCustomer? }` | `{ id, documentType, visibleToCustomer }`. The document must belong to that vehicle |
+| PATCH | /vehicles/:id/photos/:photoId | ADMIN | `{ visibleToCustomer }` | `{ id, visibleToCustomer }` |
+| PATCH | /vehicles/:id/photos | ADMIN | `{ visibleToCustomer, photoIds: string[1..200] }` | `{ updated, visibleToCustomer }`. All or nothing: any id that is not this vehicle's is 404 and nothing changes. There is no "all photos" form |
+| GET | /vehicles/:id/release-readiness | ADMINISTRATOR, MANAGER, OPERATOR | | Read-only. Booleans and counts only, nothing else: `{ customerLinked, customerVisible, photosReleased, photosHidden, documentsReleased, documentsHidden }`. No ids, names or addresses; another org's, a deleted or an unknown vehicle is 404 |
+| POST | /vehicles/:id/mark-arrived | ARRIVAL | `{ occurredAt? }` | the ARRIVED milestone (same as `PUT /milestones/ARRIVED`) |
+| POST | /vehicles/:id/mark-delivered | ARRIVAL | `{ occurredAt? }` | the DELIVERED milestone |
+
+ARRIVED and DELIVERED are recorded by staff only; nothing sets them automatically. The daily job reminds staff (`ARRIVAL_NOT_RECORDED` notification) about a vehicle shipped `ARRIVAL_REMINDER_DAYS` (default 45) days ago with no ARRIVED or DELIVERED milestone: on that day, then every 7th day, at most once a day per vehicle. Export-track vehicles that are not cancelled or deleted only. A link request that is ignored (duplicate or over the pending cap) logs a masked warning with the customer id only; the customer's answer is unchanged.
+
+**Staff vehicle detail** (`GET /vehicles/:serial`) now also returns `customerVisible, portOfLoading, portOfDischarge, voyageNo`.
+
 ### Not built yet
 
 | Area | Why |
 |---|---|
 | Live check of the R2 store | The R2 client is built and tested offline (endpoint, checksum settings, signed headers). It has not talked to a real bucket yet; the maintainer runs the first upload and read against staging. |
-| Customer app data (vehicles, documents, alerts, chat, stock) | Phase 2 slices 2 to 7. Only auth and the profile exist so far. |
+| Reserve with 48 hour expiry, cost / CIF estimator, phone or any other OTP channel (decided: email codes only), WhatsApp sending, OpenAPI generation, chat attachments | Deferred or declined on purpose. |
+| Customer app stock tab and saved vehicles | Pending FTJ decision; proposed design in `docs/deferred/customer-app-stock.md`. No customer-side stock endpoint exists. |
+| Customer message inbox for staff | Slice 6 (with chat). |
 
 ## Known doc drift
 

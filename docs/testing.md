@@ -86,6 +86,37 @@ If you see "The database test harness refused to run", read the message: it says
 - `tests/db/customer-auth.db.test.ts` and `customer-auth.concurrency.db.test.ts`: the SQL and the parallel guarantees (the concurrency file needs a real Postgres).
 - The email queue is replaced by a recorder in tests so the plain code can be read back. Tests never have `RESEND_API_KEY`.
 
+## Deployment tests
+
+- `tests/deployment.test.ts`: the settings and their refusals (pool size, shutdown deadlines, client address source and header name), graceful shutdown (order, a second signal, a failing close, the deadline cutting off a hang, a real app sending `event: shutdown`), the pool size reaching the driver, the client address modes (socket ignores every forwarding header; hops; header mode with validation, fallback, one masked warning a minute, and rate-limit keys that follow the header), the database latency script with a fake client, and the container files (pinned tag, non-root, exec-form CMD, health check, `--ignore-scripts`, no `.env` copied, `.dockerignore`, the CI image job).
+- `tests/route-inventory.test.ts` with `tests/route-inventory.table.ts`: every registered route against one explicit table, in both directions, then 401 / cross-zone 401 / 403 per role for every non-public route, and the operator scope for chat.
+
+## Slice 7 tests
+
+- `tests/public-stock.test.ts`: the flag (off means none of the routes exist), what the public sees (only PUBLISHED of the default org; exact key sets; the same 404 for draft, sold, other-org, malformed and unknown slugs; filters, sorts, the 24 cap and strict parameters), cache and CORS headers (per-route allow-lists, preflight, no `*`), the enquiry form (validation, honeypot, body limit, per-IP and per-email limits, Turnstile on/off/fails closed, nothing typed in logs), the staff inbox, the staff access matrix (401, 403 for OPERATOR and VIEWER on all 15 routes), stock management (draft, edit, explicit publish, sold, unpublish, new-stock alerts), and images (presign, registration, order, delete, limits).
+- `tests/db/public-stock.db.test.ts` (real Postgres): public filters with NULL, case and wildcards, Decimal prices, sorting and paging, the unique slug, the image cascade, four staff publishing at once (one wins), and enquiries.
+- Mutation checks run on this slice: 25 breakages (public filter, page cap, id and key leaks, org and listing scoping, key ownership, publish rules, honeypot, Turnstile, alert content, slug check, rate limits, body limit, cache headers, CORS, roles, the flag, image types), each caught.
+- The in-memory fake now treats a comparison with NULL as false (`gt`, `gte`, `lt`, `lte`), like Postgres.
+
+## Slice 6 tests
+
+- `tests/chat.test.ts`: the access matrix (customer and staff routes: 401, 403 per disallowed role), own-conversation IDOR, vehicle ownership, plain-text rules (length 2000, trim, control characters, markup stored verbatim, no sender or attachment fields), rate limits and the conversation cap, who receives the live event and the alert (staff, agent, the customer; never the wrong party or org), alert coalescing, inbox filters and org scoping, reply and handled with ActivityLog, rejection reasons, account deletion, and the live stream on a real socket.
+- `tests/db/chat.db.test.ts` (real Postgres): scoping as SQL, 20 parallel messages (which found and fixed a last-message-time race), the foreign-key cascade, account deletion, and three parallel rejections with a reason producing exactly one message.
+- Mutation checks run on this slice: 21 breakages (scoping, ownership, the length/control/trim/strict rules, coalescing, text in alerts, wrong recipient, rate limit, roles, cap, account deletion, the stream whitelist), each caught (one more test was added for the trim and the whitelist; the org filter next to the customer id is redundant because ids are unique).
+
+## Slice 5 tests
+
+- `tests/otp-hardening.test.ts`: the pepper (required, 32+ bytes, differs from both JWT secrets; the stored hash is the keyed HMAC and cannot be brute-forced without it), email only after the response (a slow or failing provider changes nothing), the hourly caps per address and per IP, and response-time equality between a registered, an unregistered and a staff address on register, resend and forgot.
+- `tests/customer-notifications.test.ts`: the access matrix on every route, alerts grouped by day and their IDOR, preferences, devices, presence, delivery that respects each switch (alert, push, email), the staff actions that tell the customer, departure reminders (3, 7, 14, idempotent), and the customer stream on a real local socket (no staff events, closes at token expiry, 3 per customer).
+- `tests/db/customer-alerts.db.test.ts` (real Postgres): grouping and scoping, JSON preferences, parallel first saves, parallel device registration, presence on real timestamps, departure reminders and the advisory lock with six parallel runs.
+- Mutation checks run on this slice: 28 breakages of the OTP, email, cap, alert, preference, device, presence, reminder and stream rules, each caught by a test (two needed a test added first).
+
+## Slice 4 tests
+
+- `tests/customer-admin.test.ts` (fake data): every staff route has the access matrix (401 without a token and with a customer token; 403 for each disallowed role, with the tables unchanged; allowed roles pass), the foreign-org 404 list, validation (strict bodies), behaviour and ActivityLog rows, session revocation end to end, FAQs, release of vehicles, photos and documents, mark arrived/delivered, the arrival reminder cadence, and the masked link-request warning.
+- `tests/db/customer-admin.db.test.ts` (real Postgres): disabling revokes sessions and device tokens; 15 parallel rounds of two customers claiming one vehicle and of approve/reject on one request; all-or-nothing bulk release; the 5 minute online window; the arrival reminder query and its once-a-day idempotency.
+- Mutation checks run on this slice: removing the session revoke, the device token delete, any org filter, the vehicle scoping of photo/document lookups or the online window each fails a test. The two race guards in `approveLinkRequest` survive the fake and are caught only by the real-Postgres file.
+
 ## Slice 3 tests
 
 - `tests/customer-data.test.ts`: the customer read API with fake data. Internal values are seeded as `SENTINEL-...` strings and searched for in every response; every DTO's exact key set is asserted; every route has the ownership matrix (owner, another customer, another org, unreleased, local, cancelled, converted, deleted, unknown) and the link request block.

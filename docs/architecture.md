@@ -79,6 +79,26 @@ mutation (service)
 | Scheduled job | Runs in-process | The advisory lock already stops two instances running it at once. Sequential reruns (a deploy overlap) are safe only because the job is idempotent. Set `SCHEDULER_ENABLED=false` on instances that should not try. |
 | Stream caps | Per instance | Per instance, so the effective cap multiplies by the instance count. |
 
+## Running it (deployment shape)
+
+One container, one process, nothing on disk (docs/deployment.md). `lib/shutdown.ts` is the SIGTERM path: `app.close()` (its preClose hook tells streams `event: shutdown`, its onClose hook waits for the scheduler for at most `SCHEDULER_SHUTDOWN_TIMEOUT_MS`), then the database pool is closed, all under `SHUTDOWN_TIMEOUT_MS`. `lib/client-ip.ts` implements `CLIENT_IP_SOURCE=header`: an early hook that replaces `request.ip` with one validated header, before the rate limiter reads it. The pool size is `DATABASE_POOL_MAX`. The image is built from `Dockerfile` (`npm run build` compiles `src` to `dist`); `scripts/db-latency.ts` measures database distance without printing the address.
+
+## Public stock and enquiries (Phase 2, slice 7)
+
+`routes/public.ts` (no auth, its own CORS list, cache header on successful reads) and `routes/staff-stock.ts` -> `stock.service.ts` / `enquiry.service.ts`. `StockVehicle` is a curated table, not the vehicle ledger; the public service starts every query from one filter (default org, PUBLISHED) and builds DTOs field by field. Publishing is a conditional status change in a transaction with its ActivityLog row. The CORS plugin uses a delegator that picks the allow-list by path (`/api/public/` or everything else). Everything (public routes, staff stock tools, the image bucket) exists only when `PUBLIC_STOCK_ENABLED` is true.
+
+## Chat (Phase 2, slice 6)
+
+`routes/customer-chat.ts` and `routes/staff-chat.ts` -> `chat.service.ts`. `appendMessage` is the one place a message is written: it stores the row, moves the conversation's last-message time forward only (so out-of-order commits cannot leave it behind), reopens a handled conversation on a customer message, and decides the alert (once per burst). Delivery happens after commit: a `message` event with ids only to the other party on the shared SSE hub (the hub whitelists the fields), and the alert through the normal notification path (which applies the recipient's switches). Link request rejection calls `postStaffMessageToCustomer` inside its own transaction so the reason and the decision are one step.
+
+## Customer notifications, presence and OTP hardening (Phase 2, slice 5)
+
+`notification.service.ts` stays the one place that writes alerts and delivers them. `emit` narrows the recipients by each customer's own switches (inside the transaction); `notifyRealtime` then publishes to the event bus (stream), sends Expo push to customers whose push is on, and queues email for customers whose email is on. `customer-notify.service.ts` tells the owner of a vehicle, only while they may see it. The customer routes (`routes/customer-notifications.ts`) have their own guard and share only the SSE hub (`lib/sse-route.ts` is the one place that opens a stream). Email is queued with `lib/post-response.ts`, which runs it after the response is sent (outside a request, on the next tick). Departure reminders are a step of the existing daily job, which is already advisory-lock guarded. Customer mutations that are not logged in ActivityLog by design: alert read state, device tokens and the presence heartbeat (the same as the staff equivalents); preference changes are logged.
+
+## Staff tools for customers (Phase 2, slice 4)
+
+`routes/customer-admin.ts` and `routes/vehicle-release.ts` -> `customer-admin`, `link-request-admin`, `vehicle-release` and `faq` services. Role lists come from `config/roles.ts`. Decisions that must not race (approving a request, linking a vehicle) are conditional updates inside one transaction together with their ActivityLog row and notification. Disabling a login reuses `revokeAllCustomerSessions` in the same transaction. The arrival reminder is a daily-job step (`runArrivalReminders`) built from plain queries (shipped milestones, arrived or delivered milestones, then vehicles).
+
 ## The customer read API (Phase 2, slice 3)
 
 `routes/customer-data.ts` -> `customer-data.service.ts` / `customer-link-request.service.ts`. Everything starts from one filter, `customerVehicleWhere` (own id, same org, released, effective export track, not cancelled, not deleted). The customer-facing `status` is derived (shipping status overridden by the ARRIVED / DELIVERED milestones), so the status filter is SQL built on the existing effective-status clauses. Released photos and the milestones of a page of vehicles are loaded with one query each, never one per vehicle.
@@ -90,7 +110,7 @@ mutation (service)
 - **Customer downloads go through the API (the gateway).** The customer app asks for `/photos/:id/image` or `/documents/:id/file`; the API authorises (own vehicle, same org, export track, released; file released), reads the object with its own R2 credentials and streams it with safe headers (`nosniff`, private caching, ETag/304, inline for images and attachment for documents). The client never sees an R2 address, a key or a link.
 - **Options considered.** (1) **API proxy, now:** simplest, one place for authorisation and logging, nothing private is exposed; costs API bandwidth and a connection per download. (2) **Cloudflare Worker gateway, later:** the same checks in front of a private bucket at the edge, with caching, offloading bytes from the API; it needs a signed token or a call back to the API for the decision and a separate deployment. (3) Presigned GET links for customers: rejected, because a link is a bearer secret that can be forwarded and cached. The API proxy is kept behind `openCustomerFile`, so a Worker can replace it without changing the authorisation rules.
 - **Thumbnails:** made by `photo-thumbnail.service.ts` with `sharp` after a photo is added (best effort, never fatal), stored beside the photos folder. See ADR 0006 for how untrusted image bytes are handled.
-- **Public stock images (slice 7)** will live in a SEPARATE public bucket served on a custom domain with long-cache headers and random ids, with nothing private in it, behind `PUBLIC_STOCK_ENABLED`. They are never mixed with the private bucket.
+- **Public stock images (slice 7)** live in a SEPARATE public bucket (`R2_PUBLIC_STOCK_BUCKET_NAME`, same account and credentials) served from `PUBLIC_STOCK_IMAGE_BASE_URL`, with nothing private in it, behind `PUBLIC_STOCK_ENABLED`. Keys are `stock/<hash of org id>/<random>.<ext>`. They are never mixed with the private bucket (`lib/public-stock-storage.ts` is the only code that talks to it).
 - **Milestones** (`milestone.service.ts`): a unique key on (vehicle, type); automation inserts with ON CONFLICT DO NOTHING inside the status-change transaction and, going down, removes only automatic milestones nobody touched (rule in ADR 0006).
 
 ## Planned: clean-up of expired rows (Phase 2, slice 5)

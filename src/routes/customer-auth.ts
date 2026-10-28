@@ -54,7 +54,7 @@ export function registerCustomerAuthRoutes(app: FastifyInstance) {
 
   app.post("/auth/register", ipLimit("register"), async (request, reply) => {
     limitByIdentifier("register", bodyEmail(request), reply);
-    return reply.status(202).send(success(await registerCustomer(request.body)));
+    return reply.status(202).send(success(await registerCustomer(request.body, { ip: request.ip })));
   });
 
   app.post("/auth/verify-email", ipLimit("verifyEmail"), async (request, reply) => {
@@ -64,7 +64,7 @@ export function registerCustomerAuthRoutes(app: FastifyInstance) {
 
   app.post("/auth/resend-verification", ipLimit("resendVerification"), async (request, reply) => {
     limitByIdentifier("resendVerification", bodyEmail(request), reply);
-    return reply.status(202).send(success(await resendVerification(request.body)));
+    return reply.status(202).send(success(await resendVerification(request.body, { ip: request.ip })));
   });
 
   app.post("/auth/login", ipLimit("login"), async (request, reply) => {
@@ -81,7 +81,7 @@ export function registerCustomerAuthRoutes(app: FastifyInstance) {
 
   app.post("/auth/forgot-password", ipLimit("forgotPassword"), async (request, reply) => {
     limitByIdentifier("forgotPassword", bodyEmail(request), reply);
-    return reply.status(202).send(success(await forgotPassword(request.body)));
+    return reply.status(202).send(success(await forgotPassword(request.body, { ip: request.ip })));
   });
 
   app.post("/auth/reset-password", ipLimit("resetPassword"), async (request, reply) => {

@@ -150,10 +150,10 @@ describe("status filters (derived, so they are SQL)", () => {
 
 describe("sorting and paging", () => {
   beforeEach(async () => {
-    await make(1, { purchaseDate: day(-30), eta: day(20), customerAmount: 100, customerAmountCurrency: "USD" });
-    await make(2, { purchaseDate: day(-10), eta: day(5), customerAmount: 300, customerAmountCurrency: "USD" });
-    await make(3, { purchaseDate: null, eta: null, customerAmount: null });
-    await make(4, { purchaseDate: day(-20), eta: day(40), customerAmount: 200, customerAmountCurrency: "USD" });
+    await make(1, { purchaseDate: day(-30), eta: day(20), });
+    await make(2, { purchaseDate: day(-10), eta: day(5) });
+    await make(3, { purchaseDate: null, eta: null });
+    await make(4, { purchaseDate: day(-20), eta: day(40) });
   });
 
   it.each([
@@ -161,14 +161,12 @@ describe("sorting and paging", () => {
     ["purchaseDate", "desc", ["FC2", "FC4", "FC1", "FC3"]],
     ["arrival", "asc", ["FC2", "FC1", "FC4", "FC3"]],
     ["arrival", "desc", ["FC4", "FC1", "FC2", "FC3"]],
-    ["price", "asc", ["FC1", "FC4", "FC2", "FC3"]],
-    ["price", "desc", ["FC2", "FC4", "FC1", "FC3"]],
   ])("%s %s puts vehicles without a value last", async (sort, dir, expected) => {
     expect(await ids({ sort, dir })).toEqual(expected);
   });
 
   it("pages are stable, complete and non-overlapping, and the total is the full count", async () => {
-    const pages = [await listCustomerVehicles(ME, { pageSize: 3, page: 1, sort: "price", dir: "asc" }), await listCustomerVehicles(ME, { pageSize: 3, page: 2, sort: "price", dir: "asc" })];
+    const pages = [await listCustomerVehicles(ME, { pageSize: 3, page: 1, sort: "purchaseDate", dir: "asc" }), await listCustomerVehicles(ME, { pageSize: 3, page: 2, sort: "purchaseDate", dir: "asc" })];
     expect(pages.map((p) => p.rows.map((r) => r.serial))).toEqual([["FC1", "FC4", "FC2"], ["FC3"]]);
     expect(pages.map((p) => p.total)).toEqual([4, 4]);
   });
@@ -180,21 +178,13 @@ describe("sorting and paging", () => {
   });
 });
 
-describe("money is exact", () => {
-  it("amounts come back as plain numbers and sum per currency without float drift", async () => {
-    await make(1, { customerAmount: "0.10", customerAmountCurrency: "USD" } as V);
-    await make(2, { customerAmount: "0.20", customerAmountCurrency: "USD" } as V);
-    await make(3, { customerAmount: "5000.50", customerAmountCurrency: "EUR" } as V);
-    const history = await getPurchaseHistory(ME);
-    expect(history.totalSpent).toBeNull();
-    expect(history.totalSpentByCurrency).toEqual([{ amount: 5000.5, currency: "EUR" }, { amount: 0.3, currency: "USD" }]);
-    const row = (await listCustomerVehicles(ME, {})).rows.find((r) => r.serial === "FC3")!;
-    expect(row.amount).toEqual({ amount: 5000.5, currency: "EUR" });
-  });
-
-  it("a vehicle with an amount but no currency has no amount", async () => {
-    await make(1, { customerAmount: "10.00", customerAmountCurrency: null } as V);
-    expect((await listCustomerVehicles(ME, {})).rows[0]!.amount).toBeNull();
+describe("no amount is ever shown", () => {
+  it("amounts stored in the unused columns appear nowhere, and price is not a sort", async () => {
+    await make(1, { customerAmount: "424242.42", customerAmountCurrency: "XSC" } as V);
+    const list = await listCustomerVehicles(ME, {});
+    expect(JSON.stringify(list)).not.toMatch(/424242|XSC|amount/i);
+    expect(Object.keys(await getPurchaseHistory(ME)).sort()).toEqual(["customerSince", "deliveredCount"]); // no total of any kind
+    await expect(listCustomerVehicles(ME, { sort: "price" })).rejects.toMatchObject({ code: "VALIDATION" });
   });
 });
 

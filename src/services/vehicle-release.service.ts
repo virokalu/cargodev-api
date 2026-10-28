@@ -15,6 +15,10 @@ import {
 } from "../validation/customer-admin.schema.js";
 import * as activityLog from "./activity-log.service.js";
 import { getOwnedVehicle } from "./file.service.js";
+import { emitToVehicleCustomer } from "./customer-notify.service.js";
+import { notifyRealtime, type EmitParams } from "./notification.service.js";
+
+const DOCUMENT_NAMES: Record<string, string> = { EC: "export certificate", BL: "bill of lading" };
 
 const INVALID = "Invalid request body.";
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -60,12 +64,7 @@ export interface CustomerInfo {
   portOfLoading: string | null;
   portOfDischarge: string | null;
   voyageNo: string | null;
-  customerAmount: number | null;
-  customerAmountCurrency: string | null;
 }
-
-const toNumber = (value: unknown): number | null =>
-  value === null || value === undefined ? null : typeof value === "number" ? value : Number((value as { toString(): string }).toString());
 
 export async function setVehicleCustomerInfo(actor: SessionUser, vehicleId: string, rawBody: unknown): Promise<CustomerInfo> {
   const changes = parseInput(customerInfoBodySchema, rawBody, INVALID);
@@ -78,14 +77,12 @@ export async function setVehicleCustomerInfo(actor: SessionUser, vehicleId: stri
     const updated = await tx.vehicle.update({
       where: { id: vehicle.id },
       data,
-      select: { portOfLoading: true, portOfDischarge: true, voyageNo: true, customerAmount: true, customerAmountCurrency: true },
+      select: { portOfLoading: true, portOfDischarge: true, voyageNo: true },
     });
     const dto: CustomerInfo = {
       portOfLoading: updated.portOfLoading,
       portOfDischarge: updated.portOfDischarge,
       voyageNo: updated.voyageNo,
-      customerAmount: toNumber(updated.customerAmount),
-      customerAmountCurrency: updated.customerAmountCurrency,
     };
     await activityLog.record(tx, {
       orgId: actor.orgId,
@@ -97,8 +94,6 @@ export async function setVehicleCustomerInfo(actor: SessionUser, vehicleId: stri
         portOfLoading: vehicle.portOfLoading,
         portOfDischarge: vehicle.portOfDischarge,
         voyageNo: vehicle.voyageNo,
-        customerAmount: toNumber(vehicle.customerAmount),
-        customerAmountCurrency: vehicle.customerAmountCurrency,
       },
       after: dto,
     });
@@ -118,7 +113,8 @@ export async function setDocumentRelease(
   const vehicle = await getOwnedVehicle(actor.orgId, vehicleId);
   if (!ID.test(documentId)) throw documentNotFound();
 
-  return getPrisma().$transaction(async (tx) => {
+  let alert: EmitParams | null = null;
+  const result = await getPrisma().$transaction(async (tx) => {
     // Scoped to the (already org-checked) vehicle: another vehicle's or org's document id is a 404.
     const document = await tx.vehicleDocument.findFirst({ where: { id: documentId, vehicleId: vehicle.id }, select: { id: true, documentType: true, visibleToCustomer: true } });
     if (!document) throw documentNotFound();
@@ -140,8 +136,21 @@ export async function setDocumentRelease(
       before: { documentType: document.documentType, visibleToCustomer: document.visibleToCustomer },
       after: { documentType: updated.documentType, visibleToCustomer: updated.visibleToCustomer },
     });
+    // Newly released export certificate or bill of lading: the customer is waiting for these.
+    const name = DOCUMENT_NAMES[updated.documentType];
+    if (name && updated.visibleToCustomer && !(document.visibleToCustomer && document.documentType === updated.documentType)) {
+      alert = await emitToVehicleCustomer(tx, {
+        orgId: actor.orgId,
+        vehicleId: vehicle.id,
+        event: "DOCUMENTS_READY",
+        title: () => "Document ready",
+        body: (serial) => `The ${name} for ${serial} is ready.`,
+      });
+    }
     return { id: updated.id, documentType: updated.documentType, visibleToCustomer: updated.visibleToCustomer };
   });
+  if (alert) notifyRealtime(alert);
+  return result;
 }
 
 export async function setPhotoRelease(actor: SessionUser, vehicleId: string, photoId: string, rawBody: unknown): Promise<{ id: string; visibleToCustomer: boolean }> {
@@ -149,7 +158,8 @@ export async function setPhotoRelease(actor: SessionUser, vehicleId: string, pho
   const vehicle = await getOwnedVehicle(actor.orgId, vehicleId);
   if (!ID.test(photoId)) throw photoNotFound();
 
-  return getPrisma().$transaction(async (tx) => {
+  let alert: EmitParams | null = null;
+  const result = await getPrisma().$transaction(async (tx) => {
     const photo = await tx.vehiclePhoto.findFirst({ where: { id: photoId, vehicleId: vehicle.id }, select: { id: true, visibleToCustomer: true } });
     if (!photo) throw photoNotFound();
     await tx.vehiclePhoto.update({ where: { id: photo.id }, data: { visibleToCustomer } });
@@ -162,7 +172,22 @@ export async function setPhotoRelease(actor: SessionUser, vehicleId: string, pho
       before: { visibleToCustomer: photo.visibleToCustomer },
       after: { visibleToCustomer },
     });
+    if (visibleToCustomer && !photo.visibleToCustomer) alert = await photosAddedAlert(tx, actor.orgId, vehicle.id);
     return { id: photo.id, visibleToCustomer };
+  });
+  if (alert) notifyRealtime(alert);
+  return result;
+}
+
+/** One alert per burst of photo releases (10 minutes), never one per photo. */
+function photosAddedAlert(tx: Parameters<typeof emitToVehicleCustomer>[0], orgId: string, vehicleId: string) {
+  return emitToVehicleCustomer(tx, {
+    orgId,
+    vehicleId,
+    event: "PHOTOS_ADDED",
+    title: () => "New photos",
+    body: (serial) => `New photos are available for ${serial}.`,
+    coalesceMinutes: 10,
   });
 }
 
@@ -172,8 +197,9 @@ export async function setPhotosRelease(actor: SessionUser, vehicleId: string, ra
   const vehicle = await getOwnedVehicle(actor.orgId, vehicleId);
   const ids = [...new Set(photoIds)];
 
-  return getPrisma().$transaction(async (tx) => {
-    const found = await tx.vehiclePhoto.findMany({ where: { vehicleId: vehicle.id, id: { in: ids } }, select: { id: true } });
+  let alert: EmitParams | null = null;
+  const outcome = await getPrisma().$transaction(async (tx) => {
+    const found = await tx.vehiclePhoto.findMany({ where: { vehicleId: vehicle.id, id: { in: ids } }, select: { id: true, visibleToCustomer: true } });
     if (found.length !== ids.length) throw photoNotFound();
 
     const result = await tx.vehiclePhoto.updateMany({ where: { vehicleId: vehicle.id, id: { in: ids } }, data: { visibleToCustomer } });
@@ -185,6 +211,40 @@ export async function setPhotosRelease(actor: SessionUser, vehicleId: string, ra
       entityId: vehicle.id,
       after: { visibleToCustomer, photoIds: ids },
     });
+    if (visibleToCustomer && found.some((photo) => !photo.visibleToCustomer)) alert = await photosAddedAlert(tx, actor.orgId, vehicle.id);
     return { updated: result.count, visibleToCustomer };
   });
+  if (alert) notifyRealtime(alert);
+  return outcome;
+}
+
+// ---------------------------------------------------------------------------------------------
+
+/** Booleans and counts only: no ids, no names, no addresses. Read-only. */
+export interface ReleaseReadiness {
+  customerLinked: boolean;
+  customerVisible: boolean;
+  photosReleased: number;
+  photosHidden: number;
+  documentsReleased: number;
+  documentsHidden: number;
+}
+
+export async function getReleaseReadiness(actor: SessionUser, vehicleId: string): Promise<ReleaseReadiness> {
+  const vehicle = await getOwnedVehicle(actor.orgId, vehicleId); // another org's, a deleted or an unknown vehicle: 404
+  const prisma = getPrisma();
+  const [photosReleased, photosHidden, documentsReleased, documentsHidden] = await Promise.all([
+    prisma.vehiclePhoto.count({ where: { vehicleId: vehicle.id, visibleToCustomer: true } }),
+    prisma.vehiclePhoto.count({ where: { vehicleId: vehicle.id, visibleToCustomer: false } }),
+    prisma.vehicleDocument.count({ where: { vehicleId: vehicle.id, visibleToCustomer: true } }),
+    prisma.vehicleDocument.count({ where: { vehicleId: vehicle.id, visibleToCustomer: false } }),
+  ]);
+  return {
+    customerLinked: vehicle.customerId !== null && vehicle.customerId !== undefined,
+    customerVisible: vehicle.customerVisible === true,
+    photosReleased,
+    photosHidden,
+    documentsReleased,
+    documentsHidden,
+  };
 }

@@ -25,3 +25,10 @@ export function alreadyRegisteredEmail(to: string): EmailMessage {
     text: "Someone tried to register with this email address, but an account already exists. If it was you, sign in, or use \"Forgot password\" in the app. If not, ignore this email.",
   };
 }
+
+/** An alert the customer asked to receive by email. Title and body only: nothing else about the account. */
+export function notificationEmail(to: string, title: string, body: string): EmailMessage {
+  return { to, subject: title, text: `${body}
+
+You can change which emails you get in the app, under notification settings.` };
+}

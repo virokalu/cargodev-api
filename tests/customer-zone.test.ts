@@ -175,7 +175,7 @@ describe("environment validation", () => {
 
   it("accepts a different long secret; CUSTOMER_SELF_SIGNUP defaults to true and must be true or false", async () => {
     const loadEnv = await load();
-    const env = loadEnv({ ...base, CUSTOMER_JWT_SECRET: "another-customer-value-0123456789abcdef" });
+    const env = loadEnv({ ...base, CUSTOMER_JWT_SECRET: "another-customer-value-0123456789abcdef", OTP_PEPPER: "another-otp-pepper-value-0123456789abcdef" });
     expect(env.CUSTOMER_SELF_SIGNUP).toBe(true);
     vi.resetModules();
     const again = await load();

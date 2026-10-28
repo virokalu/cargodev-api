@@ -444,6 +444,26 @@ describe("customer file gateway: authorise first, then stream", () => {
       expect(bodies.size).toBe(1);
     });
 
+    it("the whole response is identical, status and headers included, and so is an authorised file whose object is missing", async () => {
+      const shape = async (path: string) => {
+        const res = await get(path);
+        const { date: _date, "x-request-id": _id, ...headers } = res.headers as Record<string, string>;
+        return JSON.stringify({ status: res.statusCode, headers, body: res.body });
+      };
+      const shapes = new Set<string>();
+      for (const [, path] of cases) shapes.add(await shape(path));
+      // an authorised photo whose object is not in the bucket is the same answer too (it does read the store, once)
+      calls.get.length = 0;
+      shapes.add(await shape("/photos/ph_missing_object/image"));
+      expect(calls.get.length).toBeGreaterThan(0);
+      expect(shapes.size).toBe(1);
+      const only = JSON.parse([...shapes][0]!) as { status: number; headers: Record<string, string> };
+      expect(only.status).toBe(404);
+      expect(only.headers["cache-control"]).toBe("no-store"); // never cacheable: a 404 must not be remembered as "private"
+      expect(only.headers["etag"]).toBeUndefined();
+      expect(only.headers["content-disposition"]).toBeUndefined();
+    });
+
     it("other customers and other orgs cannot read the first customer's files", async () => {
       // Another customer in the same org, and a customer of another org: 404. A token naming the wrong org for the
       // account is rejected by the guard itself (401) before any file is looked at.

@@ -10,5 +10,33 @@ export const CUSTOMER_ADMIN_ROLES: readonly StaffRole[] = ["ADMINISTRATOR", "MAN
 /** Approve or reject a customer's request to be linked to a vehicle. */
 export const LINK_REQUEST_DECIDERS: readonly StaffRole[] = CUSTOMER_ADMIN_ROLES;
 
+/**
+ * Customer chat (FTJ decision).
+ *  - ADMINISTRATOR and MANAGER see every conversation in their org.
+ *  - OPERATOR sees ONLY the conversations of customers whose `assignedAgentId` is that operator, checked against the
+ *    database on every request. Any other conversation (another agent's, an unassigned customer's, another org's) is a 404.
+ *  - VIEWER (and anyone else) has no access: 403 on every chat route.
+ * Link request approval and rejection stay with CUSTOMER_ADMIN_ROLES; this list does not widen them.
+ */
+export const CHAT_FULL_ROLES: readonly StaffRole[] = ["ADMINISTRATOR", "MANAGER"];
+export const CHAT_SCOPED_ROLES: readonly StaffRole[] = ["OPERATOR"];
+/** Every role that may use a chat route at all (the route guard); the scope below narrows what each can reach. */
+export const CHAT_ROLES: readonly StaffRole[] = [...CHAT_FULL_ROLES, ...CHAT_SCOPED_ROLES];
+
+export type ChatScopeKind = "ALL" | "ASSIGNED";
+
+/** The scoping rule: how much of the chat a role may reach. null means no access. */
+export function chatScopeFor(role: StaffRole | null | undefined): ChatScopeKind | null {
+  if (role && CHAT_FULL_ROLES.includes(role)) return "ALL";
+  if (role && CHAT_SCOPED_ROLES.includes(role)) return "ASSIGNED";
+  return null;
+}
+
+/** See how ready a vehicle is to be shown to its customer (booleans and counts only, nothing is changed). */
+export const RELEASE_READINESS_ROLES: readonly StaffRole[] = ["ADMINISTRATOR", "MANAGER", "OPERATOR"];
+
+/** Manage the public stock (create, edit, publish, images) and read the website enquiries. */
+export const STOCK_ROLES: readonly StaffRole[] = CUSTOMER_ADMIN_ROLES;
+
 /** Mark a vehicle arrived or delivered (the same people who can record any milestone). */
 export const ARRIVAL_ROLES: readonly StaffRole[] = ["ADMINISTRATOR", "MANAGER", "OPERATOR"];

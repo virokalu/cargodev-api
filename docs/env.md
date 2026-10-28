@@ -10,6 +10,11 @@ Variables are validated at startup in `src/config/env.ts`. The app refuses to st
 | PORT | Listen port | yes (default 4000) |
 | LOG_LEVEL | Logger verbosity | no |
 | TRUST_PROXY_HOPS | Number of reverse proxies we control in front of the server (default 0 = trust none). Decides which X-Forwarded-For entry is the client IP for rate limiting | no (set before go-live) |
+| CLIENT_IP_SOURCE | Where the client address (rate limits, logs) comes from: `socket` (default: the TCP peer, every forwarding header ignored), `hops` (X-Forwarded-For through exactly TRUST_PROXY_HOPS proxies) or `header` (the single header in CLIENT_IP_HEADER; safe only when the host's edge overwrites it). Unset means `hops` if TRUST_PROXY_HOPS > 0, otherwise `socket`. See docs/deployment.md | set before go-live |
+| CLIENT_IP_HEADER | The header name for `header` mode (for example `true-client-ip`); required then, ignored otherwise. A plain header name; not `authorization`, `cookie`, `host` and similar. A missing or non-IP value falls back to the socket address with a masked warning | with header mode |
+| DATABASE_POOL_MAX | Database connections this instance may hold (default 10, 1 to 100) | no |
+| SHUTDOWN_TIMEOUT_MS | Deadline for the whole graceful shutdown after SIGTERM (default 30000, 1000 to 120000). The host's termination grace should be a few seconds longer | no |
+| SCHEDULER_SHUTDOWN_TIMEOUT_MS | Of that, how long a running scheduled job may take to finish (default 20000). Must be shorter than SHUTDOWN_TIMEOUT_MS | no |
 | SSE_MAX_CONNECTIONS | Cap on simultaneous notification streams on this instance (default 500) | no |
 | DAILY_JOB_UTC_HOUR | UTC hour 0-23 the daily job runs (default 2) | no |
 | SCHEDULER_ENABLED | true/false (default true). Set false on instances and in tests that must not run scheduled jobs | no |
@@ -17,11 +22,18 @@ Variables are validated at startup in `src/config/env.ts`. The app refuses to st
 | DATABASE_URL | Runtime DB connection. Local dev DB only, never a shared or production one | yes |
 | MOBILE_JWT_SECRET | Signs access tokens (long, random) | with auth |
 | ORG_ID | Default org for login lookup and cron only | with auth |
+| PUBLIC_STOCK_ENABLED | `true` turns on the public website API (`/api/public`), the staff stock tools and the enquiries inbox; default `false` (none of them exist) | no |
+| PUBLIC_ALLOWED_ORIGINS | Comma-separated website origins allowed to call `/api/public` from a browser. Empty means none. Never `*` (startup fails). Separate from CORS_ALLOWED_ORIGINS | with the website |
+| PUBLIC_STOCK_IMAGE_BASE_URL | Public base URL (a custom domain on the PUBLIC bucket) stock images are served from. Unset means stock images are not shown | with the website |
+| R2_PUBLIC_STOCK_BUCKET_NAME | The PUBLIC R2 bucket stock images are uploaded to (same account and credentials as the private bucket, which must be configured). Unset means stock image uploads are refused | with the website |
+| TURNSTILE_SECRET | Cloudflare Turnstile secret for the enquiry form. Unset skips the check; set, a missing or invalid token is refused | no |
 | R2_PUBLIC_URL | Public base URL files are served from. Required to attach any file: every file URL is checked against it and the caller's own org folder | with files |
 | R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME | Cloudflare R2: signing staff uploads, reading files for customers, deleting objects. **All four or none** (a partial set fails startup). `R2_ACCOUNT_ID` is the 32-character Cloudflare account id; the client always talks to `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`. Same names as CargoDev | with files |
 | EXPO_ACCESS_TOKEN | Expo push (optional) | no |
 | APP_MIN_VERSION | The oldest customer app build the API still serves, like `1.2.3` (default `1.0.0`). Returned by `GET /api/customer/v1/app/min-version`, which needs no token. Raise it to make old app builds ask the user to update | no |
+| ARRIVAL_REMINDER_DAYS | Days after a vehicle ships before staff are reminded that no arrival is recorded (then weekly), 1 to 365, default 45 | no |
 | CUSTOMER_FILE_CACHE_SECONDS | How long a customer's app may cache a photo or document the API serves (`Cache-Control: private, max-age=N`), 0 to 86400, default 300 | no |
+| OTP_PEPPER | Keys the HMAC that protects one-time codes at rest (32+ **bytes**, random, unique per environment, **different from MOBILE_JWT_SECRET and CUSTOMER_JWT_SECRET**: startup fails otherwise). Required whenever CUSTOMER_JWT_SECRET is set. Rotating it makes outstanding codes invalid (they live 10 minutes) | with the customer API |
 | CUSTOMER_JWT_SECRET | Signs customer access tokens (32+ characters, unique per environment, **different from MOBILE_JWT_SECRET**: startup fails if equal). Unset means the customer API is not mounted | for the customer app |
 | CUSTOMER_SELF_SIGNUP | true (default) or false. false: register does nothing, only customers staff created and enabled can sign in | no |
 | RESEND_API_KEY | Resend API key for transactional email (same name as CargoDev). **Unset means nothing is ever sent**: `src/lib/email.ts` only logs a masked notice. Tests delete it | no |

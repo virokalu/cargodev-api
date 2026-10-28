@@ -2,6 +2,8 @@
 
 import { buildApp } from "./app.js";
 import { loadEnv } from "./config/env.js";
+import { disconnectPrisma } from "./lib/prisma.js";
+import { createShutdown } from "./lib/shutdown.js";
 
 const env = loadEnv();
 const app = await buildApp({ logger: true });
@@ -14,20 +16,14 @@ try {
   process.exit(1);
 }
 
-// Graceful shutdown: close notification streams (clients get `event: shutdown`), stop arming
-// timers, and let a running job finish (up to its timeout) before the process exits.
-let shuttingDown = false;
-async function shutdown(signal: string): Promise<void> {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  app.log.info({ signal }, "shutting down");
-  try {
-    await app.close();
-    process.exit(0);
-  } catch (error) {
-    app.log.error(error, "error during shutdown");
-    process.exit(1);
-  }
-}
+// Graceful shutdown (src/lib/shutdown.ts): stop accepting requests, close streams (clients get `event: shutdown`), wait for
+// a running job (up to SCHEDULER_SHUTDOWN_TIMEOUT_MS), close the database pool, all within SHUTDOWN_TIMEOUT_MS.
+const shutdown = createShutdown({
+  close: () => app.close(),
+  disconnect: disconnectPrisma,
+  exit: (code) => process.exit(code),
+  log: { info: (obj, msg) => app.log.info(obj, msg), error: (obj, msg) => app.log.error(obj, msg) },
+  timeoutMs: env.SHUTDOWN_TIMEOUT_MS,
+});
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 process.once("SIGINT", () => void shutdown("SIGINT"));

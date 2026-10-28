@@ -48,6 +48,22 @@ function sameValue(a: unknown, b: unknown): boolean {
   return a === b;
 }
 
+/** PostgreSQL LIKE: % any run, _ any one character, \\x the character x. */
+function likeMatches(actual: string, value: string, kind: "contains" | "startsWith" | "endsWith"): boolean {
+  let source = "";
+  for (let i = 0; i < value.length; i += 1) {
+    const c = value[i]!;
+    if (c === "\\" && i + 1 < value.length) {
+      source += value[i + 1]!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      i += 1;
+    } else if (c === "%") source += ".*";
+    else if (c === "_") source += ".";
+    else source += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  const pattern = kind === "contains" ? source : kind === "startsWith" ? `^${source}` : `${source}$`;
+  return new RegExp(pattern, "s").test(actual);
+}
+
 function matchesField(actual: unknown, cond: unknown, key: string): boolean {
   if (!isPlainObject(cond)) return sameValue(actual, cond);
   const insensitive = cond["mode"] === "insensitive";
@@ -68,13 +84,14 @@ function matchesField(actual: unknown, cond: unknown, key: string): boolean {
     if (not !== null && actual == null) return false;
     if (isPlainObject(not) ? matchesField(actual, not, key) : sameValue(actual, not)) return false;
   }
-  if ("contains" in cond) {
-    if (typeof actual !== "string") return false;
-    if (!String(norm(actual)).includes(String(norm(cond["contains"])))) return false;
-  }
-  if ("startsWith" in cond && !(typeof actual === "string" && String(norm(actual)).startsWith(String(norm(cond["startsWith"]))))) return false;
-  if ("endsWith" in cond && !(typeof actual === "string" && String(norm(actual)).endsWith(String(norm(cond["endsWith"]))))) return false;
+  // contains / startsWith / endsWith are LIKE patterns in Prisma, with PostgreSQL's rules: % and _ are wildcards and a
+  // backslash makes the next character literal (verified against real Postgres in tests/db/public-stock.db.test.ts).
+  if ("contains" in cond && !(typeof actual === "string" && likeMatches(String(norm(actual)), String(norm(cond["contains"])), "contains"))) return false;
+  if ("startsWith" in cond && !(typeof actual === "string" && likeMatches(String(norm(actual)), String(norm(cond["startsWith"])), "startsWith"))) return false;
+  if ("endsWith" in cond && !(typeof actual === "string" && likeMatches(String(norm(actual)), String(norm(cond["endsWith"])), "endsWith"))) return false;
   const num = (v: unknown) => (v instanceof Date ? v.getTime() : (v as number));
+  // Like Postgres: a comparison with NULL is never true, so a row with no value never matches gt / gte / lt / lte.
+  if (("gt" in cond || "gte" in cond || "lt" in cond || "lte" in cond) && (actual === null || actual === undefined)) return false;
   if ("gt" in cond && !(num(actual) > num(cond["gt"]))) return false;
   if ("gte" in cond && !(num(actual) >= num(cond["gte"]))) return false;
   if ("lt" in cond && !(num(actual) < num(cond["lt"]))) return false;

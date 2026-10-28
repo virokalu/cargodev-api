@@ -108,6 +108,7 @@ const CASES: Case[] = [
   { name: "document release", method: "PATCH", url: "/vehicles/sv_own/documents/sd1", body: { visibleToCustomer: true }, roles: ADMIN },
   { name: "photo release", method: "PATCH", url: "/vehicles/sv_own/photos/sp1", body: { visibleToCustomer: true }, roles: ADMIN },
   { name: "photos release (bulk)", method: "PATCH", url: "/vehicles/sv_own/photos", body: { visibleToCustomer: true, photoIds: ["sp1"] }, roles: ADMIN },
+  { name: "release readiness", method: "GET", url: "/vehicles/sv_own/release-readiness", roles: ["ADMINISTRATOR", "MANAGER", "OPERATOR"] },
   { name: "mark arrived", method: "POST", url: "/vehicles/sv_own/mark-arrived", body: {}, roles: ARRIVAL_ROLES },
   { name: "mark delivered", method: "POST", url: "/vehicles/sv_own/mark-delivered", body: {}, roles: ARRIVAL_ROLES },
 ];
@@ -146,6 +147,7 @@ describe("another org's id is 404, never 403, and nothing changes", () => {
     ["PATCH", "/vehicles/sv_b/documents/sd1", "vehicle", { visibleToCustomer: true }],
     ["PATCH", "/vehicles/sv_b/photos/sp1", "vehicle", { visibleToCustomer: true }],
     ["PATCH", "/vehicles/sv_b/photos", "vehicle", { visibleToCustomer: true, photoIds: ["sp1"] }],
+    ["GET", "/vehicles/sv_b/release-readiness", "vehicle"],
     ["POST", "/vehicles/sv_b/mark-arrived", "vehicle", {}],
     ["POST", "/vehicles/sv_b/mark-delivered", "vehicle", {}],
   ];
@@ -346,7 +348,7 @@ describe("link requests", () => {
 
   it("the bodies are strict", async () => {
     expect((await call("POST", "/link-requests/lr1/approve", "MANAGER", { vehicleId: "sv_free", customerId: "cust_a2" })).statusCode).toBe(400);
-    expect((await call("POST", "/link-requests/lr1/reject", "MANAGER", { reason: "because" })).statusCode).toBe(400);
+    expect((await call("POST", "/link-requests/lr1/reject", "MANAGER", { extra: "because" })).statusCode).toBe(400);
   });
 });
 
@@ -420,39 +422,47 @@ describe("releasing a vehicle", () => {
 });
 
 describe("customer-facing details", () => {
-  it("sets the ports, voyage and amount, shows them to the customer once released, clears them with null, and logs before and after", async () => {
-    const res = await call("PATCH", "/vehicles/sv_own/customer-info", "MANAGER", { portOfLoading: " Port L ", portOfDischarge: "Port D", voyageNo: "V9", customerAmount: 12345.678, customerAmountCurrency: "usd" });
-    expect(res.json().data).toEqual({ portOfLoading: "Port L", portOfDischarge: "Port D", voyageNo: "V9", customerAmount: 12345.68, customerAmountCurrency: "USD" });
+  it("sets the ports and voyage, shows them to the customer once released, clears them with null, and logs before and after", async () => {
+    const res = await call("PATCH", "/vehicles/sv_own/customer-info", "MANAGER", { portOfLoading: " Port L ", portOfDischarge: "Port D", voyageNo: "V9" });
+    expect(res.json().data).toEqual({ portOfLoading: "Port L", portOfDischarge: "Port D", voyageNo: "V9" });
     await call("PATCH", "/vehicles/sv_own/customer-visibility", "MANAGER", { customerVisible: true });
     const seen = (await app.inject({ method: "GET", url: "/api/customer/v1/vehicles/sv_own", headers: await bearerFor("cust_a1") })).json().data;
-    expect(seen).toMatchObject({ portOfLoading: "Port L", voyageNo: "V9", amount: { amount: 12345.68, currency: "USD" } });
+    expect(seen).toMatchObject({ portOfLoading: "Port L", voyageNo: "V9" });
 
-    const cleared = await call("PATCH", "/vehicles/sv_own/customer-info", "MANAGER", { customerAmount: null, customerAmountCurrency: null, voyageNo: "" });
-    expect(cleared.json().data).toMatchObject({ customerAmount: null, customerAmountCurrency: null, voyageNo: null, portOfLoading: "Port L" });
+    const cleared = await call("PATCH", "/vehicles/sv_own/customer-info", "MANAGER", { voyageNo: "" });
+    expect(cleared.json().data).toEqual({ portOfLoading: "Port L", portOfDischarge: "Port D", voyageNo: null });
     expect(logs("SET_CUSTOMER_INFO")).toHaveLength(2);
-    expect(logs("SET_CUSTOMER_INFO")[0]!["before"]).toMatchObject({ voyageNo: undefined });
+    expect(Object.values(logs("SET_CUSTOMER_INFO")[0]!["before"] as object).every((v) => v == null)).toBe(true);
   });
 
-  it("the staff vehicle detail shows the same fields", async () => {
-    await call("PATCH", "/vehicles/sv_own/customer-info", "MANAGER", { customerAmount: 500, customerAmountCurrency: "EUR", portOfLoading: "P" });
+  it("the staff vehicle detail shows the ports and voyage, and no customer amount", async () => {
+    await call("PATCH", "/vehicles/sv_own/customer-info", "MANAGER", { portOfLoading: "P" });
     const detail = (await call("GET", "/vehicles/FC601", "VIEWER")).json().data;
-    expect(detail).toMatchObject({ customerVisible: false, portOfLoading: "P", customerAmount: 500, customerAmountCurrency: "EUR", voyageNo: null });
+    expect(detail).toMatchObject({ customerVisible: false, portOfLoading: "P", voyageNo: null });
+    expect(detail).not.toHaveProperty("customerAmount");
+    expect(detail).not.toHaveProperty("customerAmountCurrency");
   });
 
   it.each([
-    ["an amount without a currency", { customerAmount: 5 }],
-    ["a currency without an amount", { customerAmountCurrency: "USD" }],
-    ["an amount with a null currency", { customerAmount: 5, customerAmountCurrency: null }],
-    ["a negative amount", { customerAmount: -1, customerAmountCurrency: "USD" }],
-    ["a text amount", { customerAmount: "5", customerAmountCurrency: "USD" }],
-    ["a bad currency", { customerAmount: 5, customerAmountCurrency: "DOLLARS" }],
+    ["a customer amount", { customerAmount: 5 }],
+    ["a customer amount currency", { customerAmountCurrency: "USD" }],
+    ["an amount with its currency", { customerAmount: 5, customerAmountCurrency: "USD" }],
+    ["a null amount", { customerAmount: null, customerAmountCurrency: null }],
     ["an empty change", {}],
     ["a long port name", { portOfLoading: "p".repeat(101) }],
     ["an internal field", { sellingPrice: 5 }],
     ["an org id", { voyageNo: "x", org_id: ORG_B }],
-  ])("rejects %s", async (_n, body) => {
+  ])("rejects %s as an unknown or empty change, and nothing is logged", async (_n, body) => {
     expect((await call("PATCH", "/vehicles/sv_own/customer-info", "MANAGER", body)).statusCode).toBe(400);
-    expect(logs()).toHaveLength(0);
+    expect(logs("SET_CUSTOMER_INFO")).toHaveLength(0);
+  });
+
+  it("amounts already stored in the unused database columns never reach a customer or a staff response", async () => {
+    Object.assign(row("vehicle", "sv_own"), { customerAmount: 424242, customerAmountCurrency: "XSC", customerVisible: true });
+    const customerSide = await app.inject({ method: "GET", url: "/api/customer/v1/vehicles/sv_own", headers: await bearerFor("cust_a1") });
+    const customerList = await app.inject({ method: "GET", url: "/api/customer/v1/vehicles", headers: await bearerFor("cust_a1") });
+    const staffSide = await call("GET", "/vehicles/FC601", "MANAGER");
+    for (const res of [customerSide, customerList, staffSide]) expect(res.body).not.toMatch(/424242|XSC|customerAmount/);
   });
 });
 
@@ -505,6 +515,39 @@ describe("releasing documents and photos", () => {
     expect((await app.inject({ method: "GET", url: "/api/customer/v1/documents", headers })).json().data.rows).toMatchObject([{ id: "sd1", type: "EC" }]);
     await call("PATCH", "/vehicles/sv_own/photos", "MANAGER", { visibleToCustomer: false, photoIds: ["sp1"] });
     expect((await app.inject({ method: "GET", url: "/api/customer/v1/vehicles/sv_own/photos", headers })).json().data).toEqual([]);
+  });
+});
+
+describe("release readiness (read-only)", () => {
+  const readiness = (role: Role = "OPERATOR", id = "sv_own") => call("GET", `/vehicles/${id}/release-readiness`, role);
+
+  it("gives booleans and counts only, with exactly these keys", async () => {
+    const res = await readiness();
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toEqual({ customerLinked: true, customerVisible: false, photosReleased: 0, photosHidden: 2, documentsReleased: 0, documentsHidden: 1 });
+    expect(Object.keys(res.json().data).sort()).toEqual(["customerLinked", "customerVisible", "documentsHidden", "documentsReleased", "photosHidden", "photosReleased"]);
+    expect(res.body).not.toMatch(/https?:|sp1|sd1|cust_a1|org_test|files\.example/);
+  });
+
+  it("follows the releases, and a vehicle with no customer says so", async () => {
+    await call("PATCH", "/vehicles/sv_own/customer-visibility", "MANAGER", { customerVisible: true });
+    await call("PATCH", "/vehicles/sv_own/photos/sp1", "MANAGER", { visibleToCustomer: true });
+    await call("PATCH", "/vehicles/sv_own/documents/sd1", "MANAGER", { visibleToCustomer: true });
+    expect((await readiness("MANAGER")).json().data).toEqual({ customerLinked: true, customerVisible: true, photosReleased: 1, photosHidden: 1, documentsReleased: 1, documentsHidden: 0 });
+    expect((await readiness("ADMINISTRATOR", "sv_free")).json().data).toMatchObject({ customerLinked: false, customerVisible: false, photosReleased: 0, photosHidden: 1 });
+  });
+
+  it("changes nothing and writes no log", async () => {
+    const before = JSON.stringify([rows("vehicle"), rows("vehiclePhoto"), rows("vehicleDocument")]);
+    await readiness();
+    expect(JSON.stringify([rows("vehicle"), rows("vehiclePhoto"), rows("vehicleDocument")])).toBe(before);
+    expect(logs("SET_CUSTOMER_VISIBILITY")).toHaveLength(0);
+  });
+
+  it("a deleted or unknown vehicle is a 404", async () => {
+    Object.assign(row("vehicle", "sv_free"), { deletedAt: new Date() });
+    expect((await readiness("MANAGER", "sv_free")).statusCode).toBe(404);
+    expect((await readiness("MANAGER", "nope")).statusCode).toBe(404);
   });
 });
 

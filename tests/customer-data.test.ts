@@ -29,12 +29,14 @@ let fake: FakePrisma;
 const SENTINELS = [
   "SENTINEL-REMARK", "SENTINEL-JIBAI", "SENTINEL-DOCSENT", "SENTINEL-HALL", "SENTINEL-SUPPLIER", "SENTINEL-TRANSPORT",
   "SENTINEL-AGENT", "SENTINEL-PACKING", "SENTINEL-PARTNER", "SENTINEL-LC", "SENTINEL-TRACKING", "SENTINEL-ROWCOLOUR",
-  "SENTINEL-INSPECTOR", "SENTINEL-LOT", "SENTINEL-ITEM", "SENTINEL-LOCATION", "98765",
+  "SENTINEL-INSPECTOR", "SENTINEL-LOT", "SENTINEL-ITEM", "SENTINEL-LOCATION", "98765", "424242", "313131", "XSC", "XSD",
 ];
 const FORBIDDEN_KEYS = [
   "vehicleRemark", "jibaishake", "docSentComment", "auctionBillPaid", "auctionHall", "auctionHallId", "supplier", "supplierId", "transport", "transportById",
   "freightAgent", "packingAgent", "sellingPrice", "rowColour", "customerId", "org_id", "orgId", "hasPartnership", "partnerName", "lcNo", "trackingNumber",
   "inspection", "logBook", "extraKey", "paidByCustomer", "deletedAt", "customerVisible", "visibleToCustomer", "uploadedBy", "url", "key",
+  // amounts of any kind: none is ever shown to a customer
+  "customerAmount", "customerAmountCurrency", "amount", "price", "currency", "totalSpent", "totalSpentByCurrency",
 ];
 
 beforeEach(async () => {
@@ -67,9 +69,9 @@ beforeEach(async () => {
   const v = (id: string, serial: string, over: Record<string, unknown>) =>
     fake.seed("vehicle", vehicleRow({ id, org_id: ORG_A, serial, customerId: "cust_a1", customerVisible: true, modelId: "model_a1", ...over }));
 
-  v("cv_own1", "FC501", { ...internal, gradeId: "grade_a1", yom: 2019, chassisNo: "OWN-CHASSIS-1", destination: "Country One", purchaseDate: dayOffset(-30), shipmentStatus: "PENDING", customerAmount: 12000, customerAmountCurrency: "USD", portOfLoading: "Port L", portOfDischarge: "Port D", vesselName: "Vessel V", voyageNo: "V1" });
+  v("cv_own1", "FC501", { ...internal, gradeId: "grade_a1", yom: 2019, chassisNo: "OWN-CHASSIS-1", destination: "Country One", purchaseDate: dayOffset(-30), shipmentStatus: "PENDING", customerAmount: 424242, customerAmountCurrency: "XSC", portOfLoading: "Port L", portOfDischarge: "Port D", vesselName: "Vessel V", voyageNo: "V1" });
   v("cv_own2", "FC502", { modelId: "model_a2", purchaseDate: dayOffset(-10), shipmentStatus: "BOOKING_RECEIVED", etd: dayOffset(12), eta: dayOffset(40), blNo: "BL-502", shippingMethod: "CONTAINER", containerNumber: "CONT-502" });
-  v("cv_own3", "FC503", { purchaseDate: dayOffset(-90), shipmentStatus: "SHIPPED", etd: dayOffset(-60), customerAmount: 3000, customerAmountCurrency: "EUR" });
+  v("cv_own3", "FC503", { purchaseDate: dayOffset(-90), shipmentStatus: "SHIPPED", etd: dayOffset(-60), customerAmount: 313131, customerAmountCurrency: "XSD" });
   v("cv_own4", "FC504", { purchaseDate: null, shipmentStatus: "SHIPPED", etd: dayOffset(-30) });
   v("cv_hidden", "FC505", { customerVisible: false });
   v("cv_fl", "FL506", { serialPrefix: "FL" });
@@ -117,7 +119,7 @@ const get = async (path: string, as = "cust_a1", orgId = ORG_A) =>
 const data = async (path: string, as = "cust_a1", orgId = ORG_A) => (await get(path, as, orgId)).json().data;
 const sorted = (o: object) => Object.keys(o).sort();
 
-const SUMMARY_KEYS = ["amount", "brand", "chassisNo", "coverPhotoId", "destination", "eta", "etd", "grade", "id", "model", "photoCount", "portOfDischarge", "portOfLoading", "purchaseDate", "serial", "status", "vesselName", "year"];
+const SUMMARY_KEYS = ["brand", "chassisNo", "coverPhotoId", "destination", "eta", "etd", "grade", "id", "model", "photoCount", "portOfDischarge", "portOfLoading", "purchaseDate", "serial", "status", "vesselName", "year"];
 const DETAIL_KEYS = [...SUMMARY_KEYS, "blNo", "containerNumber", "shippingMethod", "voyageNo"].sort();
 
 describe("every route needs a customer token", () => {
@@ -157,14 +159,14 @@ describe("GET /vehicles", () => {
     for (const row of rows) expect(sorted(row)).toEqual(SUMMARY_KEYS);
   });
 
-  it("maps the data: names, money, status, cover photo and released photo count", async () => {
+  it("maps the data: names, status, cover photo and released photo count", async () => {
     const { rows } = await data("/vehicles");
     const one = rows.find((r: { id: string }) => r.id === "cv_own1");
     expect(one).toMatchObject({
       serial: "FC501", brand: "Alpha Motors", model: "Zeta One", grade: "Base", year: 2019, chassisNo: "OWN-CHASSIS-1", destination: "Country One",
-      status: "PENDING", amount: { amount: 12000, currency: "USD" }, coverPhotoId: "ph1", photoCount: 2, portOfLoading: "Port L", portOfDischarge: "Port D", vesselName: "Vessel V",
+      status: "PENDING", coverPhotoId: "ph1", photoCount: 2, portOfLoading: "Port L", portOfDischarge: "Port D", vesselName: "Vessel V",
     });
-    expect(rows.find((r: { id: string }) => r.id === "cv_own2")).toMatchObject({ status: "BOOKING_RECEIVED", amount: null, coverPhotoId: null, photoCount: 0 });
+    expect(rows.find((r: { id: string }) => r.id === "cv_own2")).toMatchObject({ status: "BOOKING_RECEIVED", coverPhotoId: null, photoCount: 0 });
     expect(rows.find((r: { id: string }) => r.id === "cv_own3").status).toBe("DELIVERED");
     expect(rows.find((r: { id: string }) => r.id === "cv_own4").status).toBe("ARRIVED");
   });
@@ -201,19 +203,11 @@ describe("GET /vehicles", () => {
   });
 
   describe("parameters are strict", () => {
-    it.each(["orgId=org_x", "customerId=cust_a2", "sort=sellingPrice", "sort=chassisNo", "dir=up", "status=CANCELLED", "status=shipped", "x=1", "limit=5"])("rejects %s with 400", async (q) => {
+    it.each(["orgId=org_x", "customerId=cust_a2", "sort=sellingPrice", "sort=price", "sort=customerAmount", "sort=chassisNo", "dir=up", "status=CANCELLED", "status=shipped", "x=1", "limit=5"])("rejects %s with 400", async (q) => {
       const res = await get(`/vehicles?${q}`);
       expect(res.statusCode).toBe(400);
       expect(res.json().error.code).toBe("VALIDATION");
     });
-  });
-
-  it("sorts by price with vehicles that have no price last, in both directions", async () => {
-    const asc = (await data("/vehicles?sort=price&dir=asc")).rows.map((r: { id: string }) => r.id);
-    const desc = (await data("/vehicles?sort=price&dir=desc")).rows.map((r: { id: string }) => r.id);
-    expect(asc.slice(0, 2)).toEqual(["cv_own3", "cv_own1"]);
-    expect(desc.slice(0, 2)).toEqual(["cv_own1", "cv_own3"]);
-    for (const order of [asc, desc]) expect(order.slice(2).sort()).toEqual(["cv_fl_exported", "cv_own2", "cv_own4"]);
   });
 
   it("filters by brand, ignoring case", async () => {
@@ -315,30 +309,52 @@ describe("documents", () => {
   });
 });
 
+describe("amounts never reach a log", () => {
+  it("with the logger on, sample amounts in the database appear in no log line while every customer route is called", async () => {
+    const { Writable } = await import("node:stream");
+    let logged = "";
+    const stream = new Writable({ write(chunk, _enc, done) { logged += chunk.toString(); done(); } });
+    let consoleOutput = "";
+    for (const method of ["warn", "error", "log", "info"] as const) vi.spyOn(console, method).mockImplementation((...args: unknown[]) => void (consoleOutput += `${args.map(String).join(" ")}\n`));
+    const loud = await buildApp({ rateLimit: false, logger: true, logStream: stream });
+    try {
+      const headers = await bearerFor("cust_a1");
+      for (const path of ["/vehicles", "/vehicles/cv_own1", "/home", "/purchase-history", "/vehicles?sort=price", "/vehicles?sort=customerAmount"]) {
+        await loud.inject({ method: "GET", url: `/api/customer/v1${path}`, headers });
+      }
+    } finally {
+      await loud.close();
+      vi.restoreAllMocks();
+    }
+    expect(logged.length).toBeGreaterThan(0);
+    for (const s of ["424242", "313131", "XSC", "XSD"]) {
+      expect(logged, s).not.toContain(s);
+      expect(consoleOutput, s).not.toContain(s);
+    }
+  });
+});
+
 describe("purchase history", () => {
-  it("counts delivered vehicles, groups money by currency (mixed currencies give no single total) and gives the member-since date", async () => {
+  it("counts delivered vehicles and gives the member-since date, and shows NO total purchase value of any kind", async () => {
     const body = await data("/purchase-history");
-    expect(sorted(body)).toEqual(["customerSince", "deliveredCount", "totalSpent", "totalSpentByCurrency"]);
+    expect(sorted(body)).toEqual(["customerSince", "deliveredCount"]);
     expect(body.deliveredCount).toBe(1);
-    expect(body.totalSpent).toBeNull();
-    expect(body.totalSpentByCurrency).toEqual([{ amount: 3000, currency: "EUR" }, { amount: 12000, currency: "USD" }]);
     expect(typeof body.customerSince).toBe("string");
+    expect(JSON.stringify(body)).not.toMatch(/total|spent|amount|424242|313131|XSC|XSD/i);
   });
 
-  it("with one currency there is a single total", async () => {
+  it("amounts entered on vehicles do not change the answer", async () => {
     Object.assign(fake.rows("vehicle").find((v) => v["id"] === "cv_own3")!, { customerAmountCurrency: "USD" });
-    expect((await data("/purchase-history")).totalSpent).toEqual({ amount: 15000, currency: "USD" });
+    Object.assign(fake.rows("vehicle").find((v) => v["id"] === "cv_other")!, { customerAmount: 424242, customerAmountCurrency: "XSC" });
+    expect(sorted(await data("/purchase-history"))).toEqual(["customerSince", "deliveredCount"]);
   });
 
-  it("without any value entered, the total is null and the list empty", async () => {
-    const body = await data("/purchase-history", "cust_a2");
-    expect(body).toMatchObject({ deliveredCount: 0, totalSpent: null, totalSpentByCurrency: [] });
+  it("a customer with nothing delivered gets a zero count", async () => {
+    expect(await data("/purchase-history", "cust_a2")).toMatchObject({ deliveredCount: 0 });
   });
 
   it("never counts another customer's, an unreleased or a local vehicle", async () => {
-    Object.assign(fake.rows("vehicle").find((v) => v["id"] === "cv_other")!, { customerAmount: 777, customerAmountCurrency: "USD" });
-    Object.assign(fake.rows("vehicle").find((v) => v["id"] === "cv_hidden")!, { customerAmount: 555, customerAmountCurrency: "USD" });
-    expect((await data("/purchase-history")).totalSpentByCurrency).toEqual([{ amount: 3000, currency: "EUR" }, { amount: 12000, currency: "USD" }]);
+    expect((await data("/purchase-history", "cust_a2")).deliveredCount).toBe(0);
   });
 });
 

@@ -10,3 +10,5 @@ process.env["SCHEDULER_ENABLED"] = "false";
 // so even a code path that forgot to use the test client could never reach a real database.
 process.env["DATABASE_URL"] = "postgresql://user:password@invalid.invalid:5432/never_used";
 process.env["R2_PUBLIC_URL"] = "https://files.example.test";
+process.env["OTP_PEPPER"] = "test-only-otp-pepper-value-0123456789abcdef";
+process.env["PUBLIC_STOCK_IMAGE_BASE_URL"] = "https://img.example.test";

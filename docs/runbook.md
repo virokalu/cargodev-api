@@ -2,15 +2,39 @@
 
 Procedures only. Live hostnames, dashboard links and contacts are kept privately, not in this public repo.
 
+## Before go-live: decide where the client address comes from
+
+Rate limiting and the audit trail use the client IP, chosen by `CLIENT_IP_SOURCE` (`socket` by default, `hops`, or `header`; docs/deployment.md). Behind a load balancer `socket` makes every request look like it comes from the balancer and share one rate-limit bucket, so decide the mode and run the self-test below before go-live. The notes under "set the proxy hop count" still apply to `hops`.
+
 ## Before go-live: set the proxy hop count
 
 Rate limiting and the audit trail use the client IP. By default the server trusts no proxy (`TRUST_PROXY_HOPS=0`), so behind a load balancer every request would look like it comes from the balancer and share one rate-limit bucket. Once the hosting setup is chosen, set `TRUST_PROXY_HOPS` to the number of proxies we control in front of the server (usually 1), and check it: send a request with a made-up `X-Forwarded-For` header and confirm the logged IP is the real client, not the made-up value. A value higher than the real hop count lets clients spoof their IP; never use "trust all". This is only safe when the server cannot be reached except through those proxies (firewall the origin), because a direct client could otherwise send its own header.
+
+## Release order
+
+1. **Additive migration first, from the maintainer's laptop**, against the direct (non-pooled) connection: `npm run migrate -- status` (compare the printed project reference with the private notes), read the SQL and the scan result, back up if the database holds real data, then `deploy` only with the maintainer's approval for that run. Additive migrations are safe while the old code is still running.
+2. **Then deploy the code** (the image built from the same commit). Never the other way round: new code that expects a column the database does not have has no safe rollback.
+3. Check `GET /health`, then the smoke tests that apply (docs/launch-checklist-stock.md for stock).
+4. A non-additive ("contract") migration is a separate, explicitly approved release, after the code that needed the old shape is gone.
+
+The API host never holds `MIGRATION_DATABASE_URL` or `DIRECT_URL`. On staging also leave `RESEND_API_KEY` and `EMAIL_FROM` unset.
 
 ## Deploy
 
 1. Merge to `main` through a PR with passing CI.
 2. Deploy from the host's pipeline (details kept privately).
 3. Check `GET /health` returns `{ "data": { "status": "ok" } }`.
+
+## Client address self-test (after every host or setting change)
+
+Goal: prove a client cannot choose its own address. Use a throwaway address and the sign-in route (it is rate limited per address, 10 a minute).
+
+1. From one machine send 12 sign-in requests quickly with different **fake** forwarding headers each time:
+   `curl -s -o /dev/null -w "%{http_code}\n" -X POST "$API/api/v1/auth/login" -H "Content-Type: application/json" -H "X-Forwarded-For: 198.51.100.$i" -H "True-Client-IP: 198.51.100.$i" -d '{}'` for i in 1..12.
+2. **Expected in `socket` and `hops` mode:** requests 11 and 12 are `429` (the fake headers did not give a fresh bucket). In `hops` mode also try one request with a single fake X-Forwarded-For: if you pass through exactly the proxies you counted, the address is the one your outermost proxy saw, not your fake.
+3. **Expected in `header` mode:** send 12 requests with the SAME fake value in the configured header, then one with a different fake value. If the edge overwrites the header, all 13 are counted against your real address (the fake values never matter) and request 11 onward is `429`. **If the different fake value gets through (not 429), the edge is passing client headers: switch back to `socket` at once.**
+4. Look at the log line for these requests: the address shown must be your real one in every mode, never a fake value.
+5. Send one request with the configured header removed: it must still work (socket address used) and a masked warning appears in the log (the header name only, never a value).
 
 ## Run a migration
 
@@ -23,15 +47,64 @@ Migrations are additive-first (ADR 0004) and run only through `npm run migrate -
 5. Run `deploy` only with the maintainer's approval for that run. Coding agents never run `deploy` on their own.
 6. If the tables exist but `_prisma_migrations` is empty or missing, `deploy` stops. The maintainer baselines the history by hand; this tool never runs `migrate resolve`.
 
+## Move to another host
+
+The service is portable on purpose (docs/deployment.md: portability checklist). An afternoon, in this order:
+
+1. Build the image from the current commit (`docker build .`) and run it locally with the environment variable names from docs/deployment.md and fake values, to confirm it starts and `/health` answers.
+2. Create the service on the new host from `docs/render.yaml.example` (or the host's equivalent): one instance, the health check path, a termination grace of at least `SHUTDOWN_TIMEOUT_MS` plus a few seconds, and the variable **names** from the table in docs/deployment.md. Set the values in the host's dashboard from the private notes. Do not set `MIGRATION_DATABASE_URL` or `DIRECT_URL`.
+3. Check the database allows connections from the new host (the provider's network rules), and run `npm run db:latency` from the new host to see the distance.
+4. Decide `CLIENT_IP_SOURCE` for the NEW host's edge and run the self-test above before sending real traffic.
+5. Start with `SCHEDULER_ENABLED=false` on the new service while the old one still runs, to avoid two daily jobs racing (the advisory lock makes it safe, but be tidy).
+6. Test through the new address: sign-in, a customer file through the gateway, a staff upload (the storage CORS rule is on the bucket, not the host), a push, an email on a test account.
+7. Switch DNS (or the app's API address) to the new service. Watch the logs and the uptime monitor.
+8. Set `SCHEDULER_ENABLED=true` on the new service and `false` on the old, then stop the old one once nothing reaches it. Remove its secrets from the old host.
+9. Rotate the secrets that were on the old host if it is not under your control any more.
+
+## Backups and the restore drill
+
+- **Weekly encrypted dump, off-platform.** Once a week a scheduled job (outside the API host and outside the database provider) dumps the database with the provider's own tools, encrypts the file (a passphrase or key kept in the private password manager, not on the machine doing the dumping), and stores it in a different provider's storage. Keep the last several weeks. The database provider's own backups are in addition, never instead.
+- **Restore drill, every quarter and after any major change:** restore the latest dump into a **throwaway** database (never into a live one), start the API against it with fake secrets, and check: the migration history table matches the repository, row counts for the main tables look right, a customer can sign in on a test account, a vehicle opens, `npm run migrate -- status` shows nothing pending. Record the date, the dump's age and how long it took. Delete the throwaway database afterwards.
+- **What a dump does not contain:** the files in object storage (photos, documents, stock images). Those need their own copy plan (versioning or a replicated bucket); see docs/storage-migration.md for the private bucket.
+- A dump contains personal data: encrypt it, restrict who can read it, and delete old ones on the retention schedule (docs/privacy-checklist.md).
+
+## Uptime monitoring
+
+Use an **external** monitor (not on the API host, not on the database provider): request `GET /health` every minute from outside, alert after two failures in a row by email and phone push to at least two people, and also alert when the response is not the expected `{ "data": { "status": "ok" } }`. `/health` does not touch the database, so also run a second, slower check that proves the database path (for example, a customer-facing read on a test account every five minutes). Page on the host's own status as well. After any host change, confirm the monitor still points at the right address.
+
 ## Customer API
 
 - **Forcing an app update:** set `APP_MIN_VERSION` (for example `2.0.0`) and restart. The app checks `GET /api/customer/v1/app/min-version` at start and shows an update screen to older builds. It takes no token, so it also reaches users who are signed out.
-- **Releasing a vehicle to its customer:** vehicles, photos and documents are all private by default. Review with `npm run photos:release-report`, then release in the app (slice 4). A vehicle is shown to its customer only when it is theirs, an export vehicle, released, and not cancelled.
+- **Releasing a vehicle to its customer:** vehicles, photos and documents are all private by default. Review with `npm run photos:release-report`, then release with the staff endpoints (`PATCH /vehicles/:id/customer-visibility`, `/photos`, `/documents/:docId`). A vehicle is shown to its customer only when it is theirs, an export vehicle, released, and not cancelled.
 
 - It is mounted only when `CUSTOMER_JWT_SECRET` is set. To switch it off, unset it and restart; customers lose access immediately (their tokens cannot be verified).
 - Rotating `CUSTOMER_JWT_SECRET` signs every customer out (access tokens stop verifying and the one-time codes in flight stop matching); sessions can start again by logging in. It must never equal `MOBILE_JWT_SECRET`.
 - Email is sent only if both `RESEND_API_KEY` and `EMAIL_FROM` are set. Keep them unset in development.
 - A customer locked out after 5 failed sign-ins waits 15 minutes; staff can clear it by resetting the customer's password through "forgot password".
+
+## Public stock and enquiries
+
+- **Switching it on:** set `PUBLIC_STOCK_ENABLED=true`, `PUBLIC_ALLOWED_ORIGINS` (the website origin), `PUBLIC_STOCK_IMAGE_BASE_URL` and `R2_PUBLIC_STOCK_BUCKET_NAME`, and restart. With it off none of the public routes or the staff stock tools exist.
+- **Adding a listing:** create it (a draft), upload images (presign, upload, register), then publish (an explicit step). "Sold" and "unpublish" take it off the site at once; the site may cache a listing for up to 60 seconds.
+- **Enquiries:** read them in the enquiries inbox and mark them handled. Staff are alerted that one arrived, never what it says.
+- **Spam:** set `TURNSTILE_SECRET` and have the form send `turnstileToken`; the hidden `website` field must stay empty for real visitors.
+
+## Chat
+
+- **Answering customers:** open `GET /chat/conversations` (open conversations first), read, reply, then `POST /chat/conversations/:id/handled`. A new customer message reopens the conversation and alerts the administrators, managers and the customer's agent.
+- **Telling a customer why a link request failed:** reject it with a `reason`; they see it as a chat message from the team. Without a reason they only see that it could not be approved.
+- Administrators and managers see every conversation; an operator sees only the conversations of customers assigned to them (reassigning a customer moves the access at once); viewers see none. A customer deleting their account removes their conversations.
+
+## Customer notifications
+
+- **A customer says they get no alerts:** check their notification settings (event, push and email switches), that the vehicle is released to them, and that they have a registered device. Email needs a verified address and `RESEND_API_KEY` + `EMAIL_FROM` on the server; without them nothing is sent (a masked note is logged).
+- **Rotating `OTP_PEPPER`:** outstanding codes (10 minutes) stop working; customers simply ask for a new one. Never reuse a JWT secret as the pepper (startup refuses).
+
+## Staff tools for customers
+
+- **A customer cannot sign in or has lost access:** `PATCH /customers/:id/login-access` with `{ "loginEnabled": false }` ends every session at once and removes their push tokens; `true` lets them sign in again (they may need "forgot password").
+- **Link requests:** review `GET /link-requests`, then approve (`{ "vehicleId" }` only when the typed serial matches nothing) or reject. Approval links the vehicle but does not release it; release it, its photos and its documents separately.
+- **Vehicles stuck in transit:** the daily job sends an "Arrival not recorded" notification after `ARRIVAL_REMINDER_DAYS` days, then weekly. Mark the vehicle arrived with `POST /vehicles/:id/mark-arrived`; that ends the reminders.
 
 ## Review photos before releasing a vehicle to its customer
 
@@ -42,7 +115,7 @@ New photos are private. `npm run photos:release-report` is read only: it lists e
 - The API reaches R2 at `https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com` with the four `R2_*` credentials. Use an API token limited to the one bucket (object read, write, delete), not an account-wide key.
 - Staff uploads work by a presigned link, so the bucket needs a CORS rule allowing PUT with the `Content-Type` header from the app's origin.
 - Customer photos and documents are streamed by the API, so the API needs outbound access to R2 and the customer app never talks to R2.
-- Public stock images (slice 7) will use a separate public bucket and domain. Do not put private files there.
+- Public stock images use a separate public bucket and domain (`R2_PUBLIC_STOCK_BUCKET_NAME`, `PUBLIC_STOCK_IMAGE_BASE_URL`). Do not put private files there. The bucket needs a CORS rule allowing PUT with `Content-Type` from the staff app's origin, like the private one.
 
 ## Personal data kept in the database: retention
 

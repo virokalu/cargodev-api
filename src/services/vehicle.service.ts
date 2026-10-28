@@ -450,7 +450,7 @@ async function assertNewFileKeys(
 ): Promise<void> {
   const fieldErrors: Record<string, string> = {};
   const check = async (field: string, key: string, kind: FileKind) => {
-    const message = checkNewFileKey(orgId, key, kind) ?? (await verifyUploadedObject(key, kind));
+    const message = checkNewFileKey(orgId, key, kind);
     if (message) fieldErrors[field] = message;
   };
   if (input.auctionSheetKey) await check("auctionSheetKey", input.auctionSheetKey, "AUCTION_SHEET");

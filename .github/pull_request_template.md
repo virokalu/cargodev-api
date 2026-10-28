@@ -14,7 +14,8 @@
 - [ ] Tests added: 401, 403 per disallowed role, 404 for another org's id
 - [ ] No secrets, real hostnames or customer data added
 - [ ] Docs updated if behaviour or the API contract changed
-- [ ] No `prisma migrate` run against a shared database
+- [ ] No database-changing command run against a shared database (only the throwaway test container, via `npm run test:db`)
+- [ ] Anything that depends on real SQL behaviour (NULLs, locks, constraints, concurrency) has a `tests/db` test
 
 ## Notes for the reviewer
 

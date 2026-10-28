@@ -1,4 +1,3 @@
-# Place this file at .github/workflows/ci.yml
 name: CI
 
 on:
@@ -10,23 +9,126 @@ permissions:
   contents: read
 
 jobs:
+  # Required. Typecheck, unit tests, the real-Postgres tests, and a blocking audit of what ships.
   ci:
     name: ci
     runs-on: ubuntu-latest
+    # A throwaway Postgres for tests/db. It exists only for this job and holds only fake data.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: example-ci-throwaway
+          POSTGRES_DB: cargodev_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d cargodev_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       # Dummy values only. Never put real secrets in CI for a public repo.
       NODE_ENV: test
       PORT: "4000"
-      DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci_dummy"
+      DATABASE_URL: "postgresql://user:password@localhost:5432/ci_dummy"
       MOBILE_JWT_SECRET: "ci-dummy-value-not-for-real-use-0123456789"
+      CUSTOMER_JWT_SECRET: "ci-dummy-customer-value-not-real-0123456789"
+      OTP_PEPPER: "ci-dummy-otp-pepper-value-not-real-0123456789"
+      CUSTOMER_FILE_CACHE_SECONDS: "300"
+      STAFF_SIGNED_URL_TTL_SECONDS: "600"
+      STAFF_AUTH_CACHE_SECONDS: "30"
+      RETENTION_DRY_RUN: "true"
+      RETENTION_OTP_DAYS: "30"
+      RETENTION_SESSION_DAYS: "30"
+      RETENTION_ALERT_DAYS: "180"
+      UNVERIFIED_ACCOUNT_DAYS: "14"
+      APP_MIN_VERSION: "1.0.0"
+      ARRIVAL_REMINDER_DAYS: "45"
+      PUBLIC_STOCK_ENABLED: "false"
+      PUBLIC_ALLOWED_ORIGINS: "https://www.example.test"
+      PUBLIC_STOCK_IMAGE_BASE_URL: "https://img.example.test"
       ORG_ID: "org_ci_dummy"
+      TRUST_PROXY_HOPS: "0"
+      CLIENT_IP_SOURCE: "socket"
+      DATABASE_POOL_MAX: "5"
+      SHUTDOWN_TIMEOUT_MS: "30000"
+      SCHEDULER_SHUTDOWN_TIMEOUT_MS: "20000"
+      SSE_MAX_CONNECTIONS: "50"
+      DAILY_JOB_UTC_HOUR: "2"
+      SCHEDULER_ENABLED: "false"
+      # The ONLY database the tests touch. The harness refuses anything but localhost or
+      # this service container, and never reads DATABASE_URL.
+      TEST_DATABASE_URL: "postgresql://postgres:example-ci-throwaway@localhost:5432/cargodev_test"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Vitest 5 needs Node 22.12 or newer.
+          node-version: 24
           cache: npm
       - run: npm ci
+      # Generates the typed Prisma client; typecheck and tests need it. Does not touch a database.
+      - run: npx prisma generate
       - run: npm run typecheck
       - run: npm test
-      - run: npm audit --audit-level=high
+      # Real Postgres: serial concurrency, advisory locks, NULL semantics, vehicle SQL.
+      - run: npm run test:db
+      # Blocking: a high or critical finding in a runtime dependency fails the build.
+      - run: npm audit --omit=dev --audit-level=high
+
+  # Required. Builds the production image and checks what is inside it. Nothing is pushed or deployed.
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t cargodev-api:ci .
+      # The image must carry no .env file of any kind (a local .env must never be baked in).
+      - name: The image contains no .env file
+        run: |
+          # Scan as root so no directory is unreadable, and ignore find's exit status: the image runs as an unprivileged user, and a
+          # find that cannot read a folder exits 1, which under bash -e would stop this step before it printed anything.
+          found=$(docker run --rm --user 0 --entrypoint sh cargodev-api:ci -c 'find / -xdev \( -name ".env" -o -name ".env.*" \) 2>/dev/null; exit 0')
+          if [ -n "$found" ]; then echo "A .env file is in the image:"; echo "$found"; exit 1; fi
+          echo "no .env files in the image"
+      - name: The image runs as a non-root user
+        run: |
+          uid=$(docker run --rm --entrypoint id cargodev-api:ci -u)
+          if [ "$uid" = "0" ]; then echo "the image runs as root"; exit 1; fi
+          echo "runs as uid $uid"
+      - name: No tests, docs or TypeScript sources in the image
+        run: |
+          docker run --rm --entrypoint sh cargodev-api:ci -c 'for p in tests docs src scripts .git; do [ -e "/app/$p" ] && { echo "unexpected /app/$p"; exit 1; }; done; exit 0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # Blocking, like the ci job: a high or critical finding in a runtime dependency fails the build.
+      - run: npm audit --omit=dev --audit-level=high
+
+  # Required. Same scan as the pre-commit hook (scripts/secret-scan.sh), run over
+  # every tracked and untracked-but-not-ignored file, because `git commit --no-verify` skips local hooks.
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git ls-files -co --exclude-standard | sh scripts/secret-scan.sh
+
+  # Report only. Shows the full tree (including dev tools) without blocking merges.
+  # Review it; dev-only findings with no fix go in "Accepted risks" in docs/security-model.md.
+  audit-report:
+    name: audit-report
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm audit

@@ -6,22 +6,38 @@
   "scripts": {
     "test": "vitest run",
     "prepare": "husky",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:db": "vitest run --config vitest.db.config.ts",
+    "migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
+    "backfill:milestones": "tsx --env-file-if-exists=.env scripts/backfill-milestones.ts",
+    "photos:release-report": "tsx --env-file-if-exists=.env scripts/photo-release-report.ts",
+    "test:all": "npm test && npm run test:db",
+    "db:test:up": "sh scripts/test-db.sh up",
+    "db:test:down": "sh scripts/test-db.sh down",
+    "dev": "tsx watch --env-file=.env src/server.ts",
+    "start": "tsx --env-file=.env src/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start:prod": "node dist/server.js",
+    "db:latency": "tsx --env-file-if-exists=.env scripts/db-latency.ts",
+    "r2:audit": "tsx --env-file-if-exists=.env scripts/r2-audit.ts"
   },
   "keywords": [],
   "type": "module",
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1149.0",
+    "@aws-sdk/s3-request-presigner": "3.1149.0",
     "@fastify/cors": "^11.3.1",
     "@fastify/helmet": "^13.2.0",
     "@fastify/rate-limit": "^11.2.1",
-    "@prisma/adapter-pg": "7.8.0",
-    "@prisma/client": "7.8.0",
+    "@prisma/adapter-pg": "7.10.1",
+    "@prisma/client": "7.10.1",
     "bcryptjs": "^3.0.3",
     "expo-server-sdk": "7.2.0",
     "fastify": "^5.12.7",
     "jose": "^6.2.13",
     "pg": "^8.23.1",
     "pino": "^10.4.0",
+    "sharp": "0.35.5",
     "zod": "^4.6.7"
   },
   "devDependencies": {
@@ -29,10 +45,13 @@
     "@types/node": "^26.6.5",
     "@types/supertest": "^7.2.1",
     "husky": "^9.1.7",
-    "prisma": "7.8.0",
+    "prisma": "7.10.1",
     "supertest": "^7.3.1",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
     "vitest": "^5.0.5"
+  },
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0 || >=26.0.0"
   }
 }

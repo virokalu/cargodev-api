@@ -1,0 +1,2 @@
+# Migration files must have the same bytes everywhere (Prisma checksums them).
+prisma/migrations/** text eol=lf

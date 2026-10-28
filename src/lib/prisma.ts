@@ -15,6 +15,7 @@ export function getPrisma(): PrismaClient {
     const adapter = new PrismaPg({
       connectionString: env.DATABASE_URL,
       connectionTimeoutMillis: 10000,
+      max: env.DATABASE_POOL_MAX,
     });
     client = new PrismaClient({
       adapter,
@@ -26,4 +27,11 @@ export function getPrisma(): PrismaClient {
     });
   }
   return client;
+}
+
+/** Closes the connection pool (shutdown). Safe to call when nothing ever connected, and more than once. */
+export async function disconnectPrisma(): Promise<void> {
+  const current = client;
+  client = undefined;
+  if (current) await current.$disconnect();
 }

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { authenticate, currentUser } from "../plugins/auth.js";
+import { canSeeCustomerContact } from "../config/roles.js";
 import { ServiceError } from "../lib/errors.js";
 import { parseInput } from "../lib/parse.js";
 import { success } from "../lib/response.js";
@@ -18,7 +19,9 @@ const CAN_MANAGE_CUSTOMERS = ["ADMINISTRATOR", "MANAGER"] as const;
 export function registerCustomerRoutes(app: FastifyInstance) {
   app.get("/customers", { preHandler: authenticate() }, async (request) => {
     const { q } = parseInput(customerListQuerySchema, request.query);
-    return success(await listCustomers(currentUser(request).orgId, q));
+    const user = currentUser(request);
+    // A VIEWER gets names, country and counts only (no email, phone or address), and cannot search by them.
+    return success(await listCustomers(user.orgId, q, canSeeCustomerContact(user.role)));
   });
 
   app.get("/customers/search", { preHandler: authenticate() }, async (request) => {

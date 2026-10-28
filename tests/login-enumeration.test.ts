@@ -1,5 +1,8 @@
 import bcrypt from "bcryptjs";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi  } from "vitest";
+
+// bcrypt is deliberately slow and the whole suite runs in parallel: allow this file more than the 5 s default (per file, not global).
+vi.setConfig({ testTimeout: 30_000 });
 import { createFakePrisma, type FakePrisma } from "./helpers/fake-prisma.js";
 import { ORG_A, ORG_B } from "./helpers/fixtures.js";
 

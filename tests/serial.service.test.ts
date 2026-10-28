@@ -149,9 +149,5 @@ describe("org isolation", () => {
   });
 });
 
-describe("concurrency", () => {
-  // Needs a real Postgres: the guarantee is the row lock on SerialCounter inside
-  // a transaction. An in-memory fake cannot prove it. Add once a throwaway
-  // Postgres (local or CI container) is wired up for DB tests.
-  it.todo("parallel creates inside separate transactions yield distinct serials");
-});
+// Parallel creates giving distinct serials needs real concurrent connections, so it is not
+// faked here: see tests/db/serial.concurrency.db.test.ts (run with npm run test:db).

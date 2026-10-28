@@ -8,6 +8,7 @@
 
 import { Expo, type ExpoPushMessage } from "expo-server-sdk";
 import { loadEnv } from "../config/env.js";
+import { safeError } from "./redact.js";
 import { removeDeviceTokens } from "../services/device-token.service.js";
 
 let client: Expo | null = null;
@@ -86,13 +87,13 @@ export async function sendExpoPushNotifications(
     } catch (error) {
       // One chunk failing (network blip, Expo outage) must not throw into
       // the caller's fire-and-forget call — log and move on to the rest.
-      console.error("Expo push send failed for a chunk", error);
+      console.error("Expo push send failed for a chunk", safeError(error));
     }
   }
 
   if (deadTokens.length > 0) {
     await removeDeviceTokens(deadTokens).catch((e) =>
-      console.error("Failed to prune dead Expo push tokens", e)
+      console.error("Failed to prune dead Expo push tokens", safeError(e))
     );
   }
 }

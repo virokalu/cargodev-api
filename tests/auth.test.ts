@@ -81,7 +81,12 @@ describe("access tokens", () => {
   const payload = { sub: "staff_a1", orgId: ORG_A, role: "MANAGER" as const, name: "Staff A", email: "staff.a@example.test" };
 
   it("round-trips the claims", async () => {
-    expect(await verifyAccessToken(await signAccessToken(payload))).toEqual(payload);
+    const verified = await verifyAccessToken(await signAccessToken(payload));
+    expect(verified).toEqual({ ...payload, exp: expect.any(Number) });
+    // exp (epoch seconds) is what lets a long-lived stream end when the token does.
+    const secondsLeft = verified.exp! - Math.floor(Date.now() / 1000);
+    expect(secondsLeft).toBeGreaterThan(ACCESS_TOKEN_TTL_SECONDS - 5);
+    expect(secondsLeft).toBeLessThanOrEqual(ACCESS_TOKEN_TTL_SECONDS);
   });
 
   it("rejects a garbage token", async () => {

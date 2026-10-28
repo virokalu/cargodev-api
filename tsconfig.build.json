@@ -1,0 +1,13 @@
+{
+  // The production build: src only, compiled to dist/ for `node dist/server.js` (no tsx in the image).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "noEmit": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["src"]
+}

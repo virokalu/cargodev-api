@@ -3,8 +3,21 @@
 // NOT SQL, constraints or locking: those need a real throwaway Postgres.
 // Fake data only. It throws on any `where` shape it does not understand, so a
 // test can never pass by silently ignoring a filter.
+//
+// Known difference from Postgres: a top-level `NOT: {...}` is plain boolean negation here, but
+// SQL three-valued logic makes `NOT (col = x)` drop NULL rows for a SCALAR condition. The code only
+// uses NOT around relation filters, where Postgres agrees with plain negation (checked in
+// tests/db/null-semantics.db.test.ts). Do not rely on the fake for NOT over nullable scalars.
+
+import { readFileSync } from "node:fs";
+import { Prisma } from "@prisma/client";
 
 type Row = Record<string, unknown>;
+
+/** What Prisma throws when update/delete match no row (including a row of another org, when org_id is in the where). */
+function recordNotFound(operation: string, model: string): Error {
+  return new Prisma.PrismaClientKnownRequestError(`Record to ${operation} not found (${model}).`, { code: "P2025", clientVersion: "fake" });
+}
 type Where = Record<string, unknown>;
 
 const OPERATORS = new Set([
@@ -14,8 +27,53 @@ const OPERATORS = new Set([
 
 interface Relation {
   model: string;
-  /** Field on this row holding the related row's id. */
+  /** To-one: field on this row holding the related row's id. To-many: field on the child row holding THIS row's id. */
   fk: string;
+  /** A to-many relation (e.g. vehicle.photos). Only selectable, not usable in where/orderBy. */
+  many?: boolean;
+}
+
+/** Lets `where` and `orderBy` follow to-one relations (e.g. vehicle.model.brand_id). */
+interface MatchContext {
+  model: string;
+  relations: Record<string, Record<string, Relation>>;
+  lookup: (model: string, id: unknown) => Row | undefined;
+}
+
+/**
+ * Defence in depth, enforced for EVERY unit test: a write (update, updateMany, delete, deleteMany, upsert) on a table that has an
+ * org_id column must carry org_id in its OWN where clause, not only in the read before it. Photos and documents have no org column,
+ * so their writes must be scoped through the vehicle (`vehicle: { org_id }`). The two credential lookups keyed by a secret the
+ * caller must already hold (a refresh-token hash, an Expo push token) are the only exceptions. A write that breaks this throws,
+ * so removing an org_id from a service fails the tests that run it. Which tables have org_id is read from the Prisma schema.
+ */
+const ORG_MODELS: Set<string> = (() => {
+  const schema = readFileSync(new URL("../../prisma/schema.prisma", import.meta.url), "utf8");
+  const out = new Set<string>();
+  for (const m of schema.matchAll(/^model (\w+) \{([\s\S]*?)^\}/gm)) {
+    if (/^\s*org_id\s/m.test(m[2] ?? "")) out.add(m[1]!.charAt(0).toLowerCase() + m[1]!.slice(1));
+  }
+  return out;
+})();
+const VEHICLE_SCOPED_MODELS = new Set(["vehiclePhoto", "vehicleDocument"]);
+const CREDENTIAL_KEYS = ["tokenHash", "expoPushToken"];
+
+function carriesOrgScope(model: string, where: unknown): boolean {
+  if (!isPlainObject(where)) return false;
+  for (const [key, value] of Object.entries(where)) {
+    if (key === "org_id" || key.startsWith("org_id_")) return true;
+    if (key === "vehicle" && VEHICLE_SCOPED_MODELS.has(model) && isPlainObject(value) && "org_id" in value) return true;
+    if (key === "AND" && (Array.isArray(value) ? value : [value]).some((w) => carriesOrgScope(model, w))) return true;
+  }
+  return false;
+}
+
+function assertOrgScopedWrite(model: string, method: string, where: unknown): void {
+  if (!ORG_MODELS.has(model) && !VEHICLE_SCOPED_MODELS.has(model)) return;
+  if (isPlainObject(where) && CREDENTIAL_KEYS.some((k) => k in where)) return;
+  if (!carriesOrgScope(model, where)) {
+    throw new Error(`fake-prisma: ${model}.${method} has no org_id in its own where clause (defence in depth): ${JSON.stringify(where)}`);
+  }
 }
 
 export interface FakePrismaOptions {
@@ -34,6 +92,22 @@ function sameValue(a: unknown, b: unknown): boolean {
   return a === b;
 }
 
+/** PostgreSQL LIKE: % any run, _ any one character, \\x the character x. */
+function likeMatches(actual: string, value: string, kind: "contains" | "startsWith" | "endsWith"): boolean {
+  let source = "";
+  for (let i = 0; i < value.length; i += 1) {
+    const c = value[i]!;
+    if (c === "\\" && i + 1 < value.length) {
+      source += value[i + 1]!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      i += 1;
+    } else if (c === "%") source += ".*";
+    else if (c === "_") source += ".";
+    else source += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  const pattern = kind === "contains" ? source : kind === "startsWith" ? `^${source}` : `${source}$`;
+  return new RegExp(pattern, "s").test(actual);
+}
+
 function matchesField(actual: unknown, cond: unknown, key: string): boolean {
   if (!isPlainObject(cond)) return sameValue(actual, cond);
   const insensitive = cond["mode"] === "insensitive";
@@ -49,15 +123,19 @@ function matchesField(actual: unknown, cond: unknown, key: string): boolean {
   if ("notIn" in cond && (cond["notIn"] as unknown[]).some((v) => sameValue(actual, v))) return false;
   if ("not" in cond) {
     const not = cond["not"];
+    // Like Postgres: `col <> x` is not true when col is NULL, so a scalar "not" EXCLUDES NULL rows
+    // (verified in tests/db/null-semantics.db.test.ts). `{ not: null }` means "has a value".
+    if (not !== null && actual == null) return false;
     if (isPlainObject(not) ? matchesField(actual, not, key) : sameValue(actual, not)) return false;
   }
-  if ("contains" in cond) {
-    if (typeof actual !== "string") return false;
-    if (!String(norm(actual)).includes(String(norm(cond["contains"])))) return false;
-  }
-  if ("startsWith" in cond && !(typeof actual === "string" && String(norm(actual)).startsWith(String(norm(cond["startsWith"]))))) return false;
-  if ("endsWith" in cond && !(typeof actual === "string" && String(norm(actual)).endsWith(String(norm(cond["endsWith"]))))) return false;
+  // contains / startsWith / endsWith are LIKE patterns in Prisma, with PostgreSQL's rules: % and _ are wildcards and a
+  // backslash makes the next character literal (verified against real Postgres in tests/db/public-stock.db.test.ts).
+  if ("contains" in cond && !(typeof actual === "string" && likeMatches(String(norm(actual)), String(norm(cond["contains"])), "contains"))) return false;
+  if ("startsWith" in cond && !(typeof actual === "string" && likeMatches(String(norm(actual)), String(norm(cond["startsWith"])), "startsWith"))) return false;
+  if ("endsWith" in cond && !(typeof actual === "string" && likeMatches(String(norm(actual)), String(norm(cond["endsWith"])), "endsWith"))) return false;
   const num = (v: unknown) => (v instanceof Date ? v.getTime() : (v as number));
+  // Like Postgres: a comparison with NULL is never true, so a row with no value never matches gt / gte / lt / lte.
+  if (("gt" in cond || "gte" in cond || "lt" in cond || "lte" in cond) && (actual === null || actual === undefined)) return false;
   if ("gt" in cond && !(num(actual) > num(cond["gt"]))) return false;
   if ("gte" in cond && !(num(actual) >= num(cond["gte"]))) return false;
   if ("lt" in cond && !(num(actual) < num(cond["lt"]))) return false;
@@ -66,11 +144,12 @@ function matchesField(actual: unknown, cond: unknown, key: string): boolean {
 }
 
 /** Compound unique keys such as { org_id_email: { org_id, email } } are flattened. */
-function flatten(where: Where): Where {
+function flatten(where: Where, isRelation: (key: string) => boolean = () => false): Where {
   const out: Where = {};
   for (const [k, v] of Object.entries(where)) {
     if (
       isPlainObject(v) &&
+      !isRelation(k) &&
       k !== "AND" && k !== "OR" && k !== "NOT" &&
       !Object.keys(v).some((op) => OPERATORS.has(op))
     ) {
@@ -82,19 +161,25 @@ function flatten(where: Where): Where {
   return out;
 }
 
-export function matches(row: Row, whereIn: Where | undefined): boolean {
+export function matches(row: Row, whereIn: Where | undefined, ctx?: MatchContext): boolean {
   if (!whereIn) return true;
-  const where = flatten(whereIn);
+  const relationOf = (key: string) => ctx?.relations[ctx.model]?.[key];
+  const where = flatten(whereIn, (key) => relationOf(key) !== undefined);
   for (const [key, cond] of Object.entries(where)) {
     if (cond === undefined) continue;
     if (key === "AND") {
       const list = Array.isArray(cond) ? cond : [cond];
-      if (!list.every((w) => matches(row, w as Where))) return false;
+      if (!list.every((w) => matches(row, w as Where, ctx))) return false;
     } else if (key === "OR") {
-      if (!(cond as Where[]).some((w) => matches(row, w))) return false;
+      if (!(cond as Where[]).some((w) => matches(row, w, ctx))) return false;
     } else if (key === "NOT") {
       const list = Array.isArray(cond) ? cond : [cond];
-      if (list.some((w) => matches(row, w as Where))) return false;
+      if (list.some((w) => matches(row, w as Where, ctx))) return false;
+    } else if (ctx && relationOf(key) && isPlainObject(cond)) {
+      const rel = relationOf(key)!;
+      const related = ctx.lookup(rel.model, row[rel.fk]);
+      // A missing related row never satisfies a condition on it.
+      if (!related || !matches(related, cond, { ...ctx, model: rel.model })) return false;
     } else if (!matchesField(row[key], cond, key)) {
       return false;
     }
@@ -107,6 +192,25 @@ export interface RecordedCall {
   method: string;
   args: unknown;
 }
+
+/** Object.assign, plus Prisma's { increment } / { decrement } number operations. */
+function applyData(row: Row, data: Row): void {
+  for (const [key, value] of Object.entries(data)) {
+    if (isPlainObject(value) && ("increment" in value || "decrement" in value)) {
+      const current = Number(row[key] ?? 0);
+      row[key] = "increment" in value ? current + Number(value["increment"]) : current - Number(value["decrement"]);
+    } else {
+      row[key] = value;
+    }
+  }
+}
+
+/** Unique indexes the fake enforces for createMany (the real database enforces all of them). */
+const UNIQUE_KEYS: Record<string, string[][]> = {
+  vehicleMilestone: [["vehicleId", "type"]],
+  stockVehicle: [["org_id", "slug"]],
+  notificationPreference: [["userId"]],
+};
 
 export function createFakePrisma(options: FakePrismaOptions = {}) {
   const tables = new Map<string, Row[]>();
@@ -133,6 +237,14 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
       } else if (isPlainObject(sel)) {
         const rel = options.relations?.[model]?.[field];
         if (!rel) throw new Error(`fake-prisma: no relation configured for ${model}.${field}`);
+        if (rel.many) {
+          const children = table(rel.model).filter((r) => r[rel.fk] === row["id"]);
+          // Newest first when the caller asks for createdAt ordering; otherwise insertion order.
+          const order = (sel as Row)["orderBy"] as Row | undefined;
+          const ordered = order?.["createdAt"] === "desc" ? [...children].reverse() : children;
+          out[field] = ordered.map((c) => project(rel.model, c, sel["select"] as Row | undefined));
+          continue;
+        }
         const related = table(rel.model).find((r) => r["id"] === row[rel.fk]);
         out[field] = related ? project(rel.model, related, sel["select"] as Row | undefined) : null;
       }
@@ -140,15 +252,34 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
     return out;
   }
 
-  function sorted(rows: Row[], orderBy: unknown): Row[] {
+  /** Resolves an orderBy entry such as { name: "asc" } or { model: { name: "asc" } } to [value, dir]. */
+  function sortValue(model: string, row: Row, spec: Row): [unknown, "asc" | "desc"] {
+    const [field, dirOrNested] = Object.entries(spec)[0] as [string, unknown];
+    if (typeof dirOrNested === "string") return [row[field], dirOrNested as "asc" | "desc"];
+    // { sort: "asc" | "desc", nulls: "first" | "last" }: the null placement is applied by sorted() below.
+    if (dirOrNested && typeof dirOrNested === "object" && "sort" in (dirOrNested as Row)) return [row[field], (dirOrNested as { sort: "asc" | "desc" }).sort];
+    const rel = options.relations?.[model]?.[field];
+    if (!rel) throw new Error(`fake-prisma: no relation configured for orderBy ${model}.${field}`);
+    const related = table(rel.model).find((r) => r["id"] === row[rel.fk]);
+    return related ? sortValue(rel.model, related, dirOrNested as Row) : [undefined, "asc"];
+  }
+
+  function sorted(model: string, rows: Row[], orderBy: unknown): Row[] {
     const list = Array.isArray(orderBy) ? orderBy : orderBy ? [orderBy] : [];
     if (list.length === 0) return rows;
     return [...rows].sort((a, b) => {
       for (const o of list as Row[]) {
-        const [field, dir] = Object.entries(o)[0] as [string, "asc" | "desc"];
-        const av = a[field] as number | string | Date;
-        const bv = b[field] as number | string | Date;
+        const norm = (v: unknown) => (v instanceof Date ? v.getTime() : v);
+        const [rawA, dir] = sortValue(model, a, o) as [number | string | Date | null | undefined, "asc" | "desc"];
+        const [rawB] = sortValue(model, b, o) as [number | string | Date | null | undefined, "asc" | "desc"];
+        // Dates compare by time (two equal Dates are different objects), so ties fall through to the next sort key.
+        const av = norm(rawA) as number | string | null | undefined;
+        const bv = norm(rawB) as number | string | null | undefined;
         if (av === bv) continue;
+        // Nulls sort last ascending, first descending (PostgreSQL default) unless the order asks for { nulls }.
+        const nulls = (Object.values(o)[0] as { nulls?: "first" | "last" } | undefined)?.nulls;
+        if (av == null) return nulls === "last" ? 1 : nulls === "first" ? -1 : dir === "asc" ? 1 : -1;
+        if (bv == null) return nulls === "last" ? -1 : nulls === "first" ? 1 : dir === "asc" ? -1 : 1;
         const cmp = av > bv ? 1 : -1;
         return dir === "desc" ? -cmp : cmp;
       }
@@ -156,15 +287,28 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
     });
   }
 
+  const ctxFor = (model: string): MatchContext => ({
+    model,
+    relations: options.relations ?? {},
+    lookup: (m, id) => table(m).find((r) => r["id"] === id),
+  });
+
   function modelApi(model: string) {
     const rec = (method: string, args: unknown) => calls.push({ model, method, args });
-    const find = (args: { where?: Where } | undefined) => table(model).filter((r) => matches(r, args?.where));
+    const find = (args: { where?: Where } | undefined) =>
+      table(model).filter((r) => matches(r, args?.where, ctxFor(model)));
 
     return {
       async findFirst(args?: { where?: Where; select?: Row; orderBy?: unknown }) {
         rec("findFirst", args);
-        const row = sorted(find(args), args?.orderBy)[0];
+        const row = sorted(model, find(args), args?.orderBy)[0];
         return row ? project(model, row, args?.select) : null;
+      },
+      async findFirstOrThrow(args?: { where?: Where; select?: Row; orderBy?: unknown }) {
+        rec("findFirstOrThrow", args);
+        const row = sorted(model, find(args), args?.orderBy)[0];
+        if (!row) throw new Error(`No ${model} found`);
+        return project(model, row, args?.select);
       },
       async findUnique(args: { where: Where; select?: Row }) {
         rec("findUnique", args);
@@ -179,7 +323,7 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
       },
       async findMany(args?: { where?: Where; select?: Row; orderBy?: unknown; take?: number; skip?: number; distinct?: string[] }) {
         rec("findMany", args);
-        let rows = sorted(find(args), args?.orderBy);
+        let rows = sorted(model, find(args), args?.orderBy);
         if (args?.distinct) {
           const seen = new Set<string>();
           rows = rows.filter((r) => {
@@ -204,11 +348,28 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
         rec("aggregate", args);
         return {};
       },
-      async create(args: { data: Row; select?: Row }) {
+      async create(args: { data: Row; select?: Row; include?: Row }) {
         rec("create", args);
         const row: Row = { id: `${model}_${++seq}`, createdAt: new Date(), ...args.data };
         table(model).push(row);
+        // `include` returns every column plus the named relations.
+        if (args.include && !args.select) return { ...row, ...project(model, row, args.include) };
         return project(model, row, args.select);
+      },
+      async createMany(args: { data: Row[]; skipDuplicates?: boolean }) {
+        rec("createMany", args);
+        let count = 0;
+        for (const data of args.data) {
+          const keys = UNIQUE_KEYS[model] ?? [];
+          const duplicate = keys.some((fields) => table(model).some((r) => fields.every((f) => r[f] === data[f])));
+          if (duplicate) {
+            if (args.skipDuplicates) continue;
+            throw Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
+          }
+          table(model).push({ id: `${model}_${++seq}`, createdAt: new Date(), ...data });
+          count += 1;
+        }
+        return { count };
       },
       async createManyAndReturn(args: { data: Row[]; select?: Row }) {
         rec("createManyAndReturn", args);
@@ -220,6 +381,7 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
       },
       async upsert(args: { where: Where; create: Row; update: Row; select?: Row }) {
         rec("upsert", args);
+        assertOrgScopedWrite(model, "upsert", args.where);
         const row = find(args)[0];
         if (row) {
           Object.assign(row, args.update);
@@ -231,28 +393,32 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
       },
       async update(args: { where: Where; data: Row; select?: Row }) {
         rec("update", args);
+        assertOrgScopedWrite(model, "update", args.where);
         const row = find(args)[0];
-        if (!row) throw new Error(`Record to update not found (${model}).`);
-        Object.assign(row, args.data);
+        if (!row) throw recordNotFound("update", model);
+        applyData(row, args.data);
         return project(model, row, args.select);
       },
       async updateMany(args: { where?: Where; data: Row }) {
         rec("updateMany", args);
+        assertOrgScopedWrite(model, "updateMany", args.where);
         const rows = find(args);
-        for (const r of rows) Object.assign(r, args.data);
+        for (const r of rows) applyData(r, args.data);
         return { count: rows.length };
       },
       async delete(args: { where: Where }) {
         rec("delete", args);
+        assertOrgScopedWrite(model, "delete", args.where);
         const t = table(model);
-        const i = t.findIndex((r) => matches(r, args.where));
-        if (i < 0) throw new Error(`Record to delete not found (${model}).`);
+        const i = t.findIndex((r) => matches(r, args.where, ctxFor(model)));
+        if (i < 0) throw recordNotFound("delete", model);
         return t.splice(i, 1)[0];
       },
       async deleteMany(args?: { where?: Where }) {
         rec("deleteMany", args);
+        assertOrgScopedWrite(model, "deleteMany", args?.where);
         const t = table(model);
-        const keep = t.filter((r) => !matches(r, args?.where));
+        const keep = t.filter((r) => !matches(r, args?.where, ctxFor(model)));
         const count = t.length - keep.length;
         tables.set(model, keep);
         return { count };
@@ -265,6 +431,10 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
     {
       async $transaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T> {
         return fn(client);
+      },
+      // Row locks (SELECT ... FOR UPDATE) have nothing to do in a single-threaded fake.
+      async $queryRaw() {
+        return [];
       },
     } as Record<string | symbol, unknown>,
     {

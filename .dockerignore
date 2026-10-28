@@ -1,0 +1,51 @@
+# Nothing here may reach the image. The Dockerfile copies only what it names, and this file is a second lock.
+
+# secrets and local settings (every .env* variant; the template .env.example is also excluded: the image needs no file)
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+
+# git, editor, OS
+.git
+.gitignore
+.gitattributes
+.husky
+.github
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# build products and dependencies (rebuilt inside the image)
+node_modules
+dist
+coverage
+*.tsbuildinfo
+
+# tests, docs and notes
+tests
+docs
+*.md
+!package.json
+
+# database dumps and backups, logs, scratch files
+*.sql
+*.dump
+*.bak
+*.backup
+*.log
+*.tmp
+*.tmp.*
+tmp
+private
+known-issues*
+
+# local scripts and configs the runtime does not use
+scripts
+vitest.config.ts
+vitest.db.config.ts
+Dockerfile
+.dockerignore

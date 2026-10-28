@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { authenticate, currentUser } from "../plugins/auth.js";
+import { canSeeCustomerContact } from "../config/roles.js";
 import { parseInput } from "../lib/parse.js";
 import { success } from "../lib/response.js";
 import {
@@ -13,7 +14,9 @@ import { reportTrackQuerySchema } from "../validation/report.schema.js";
 export function registerReportRoutes(app: FastifyInstance) {
   app.get("/reports/by-customer", { preHandler: authenticate() }, async (request) => {
     const { track } = parseInput(reportTrackQuerySchema, request.query);
-    return success(await getCustomerVehicleReport(currentUser(request).orgId, track));
+    const user = currentUser(request);
+    // The customers' email and phone are left out of the report for a VIEWER.
+    return success(await getCustomerVehicleReport(user.orgId, track, canSeeCustomerContact(user.role)));
   });
 
   app.get("/reports/by-auction-hall", { preHandler: authenticate() }, async (request) => {

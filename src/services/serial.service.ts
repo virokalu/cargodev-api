@@ -26,6 +26,20 @@ export interface AssignedSerial {
   serial: string;
 }
 
+/**
+ * lastNumber = max(lastNumber, n), as ONE atomic statement. The conditional WHERE is
+ * re-checked by Postgres after it takes the row lock, so a concurrent create or another
+ * bump can never be overwritten with a lower value. (Reading the counter and then writing
+ * an absolute value lets two concurrent calls move the counter backwards, after which the
+ * next normal create would be handed a serial that already exists.)
+ */
+async function bumpCounterTo(tx: TxClient, orgId: string, prefix: SerialPrefix, n: number): Promise<void> {
+  await tx.serialCounter.updateMany({
+    where: { org_id: orgId, prefix, lastNumber: { lt: n } },
+    data: { lastNumber: n },
+  });
+}
+
 /** Normal entry: atomically increment the counter and assign the next number. */
 export async function assignNextSerial(
   tx: TxClient,
@@ -69,12 +83,7 @@ export async function assignLegacySerial(
     where: { org_id_prefix: { org_id: orgId, prefix } },
   });
 
-  if (manualNumber > counter.lastNumber) {
-    await tx.serialCounter.update({
-      where: { org_id_prefix: { org_id: orgId, prefix } },
-      data: { lastNumber: manualNumber },
-    });
-  }
+  await bumpCounterTo(tx, orgId, prefix, manualNumber);
 
   return { serialNumber: manualNumber, serial };
 }
@@ -115,12 +124,7 @@ export async function correctSerialNumber(
     where: { org_id_prefix: { org_id: orgId, prefix } },
   });
 
-  if (newNumber > counter.lastNumber) {
-    await tx.serialCounter.update({
-      where: { org_id_prefix: { org_id: orgId, prefix } },
-      data: { lastNumber: newNumber },
-    });
-  }
+  await bumpCounterTo(tx, orgId, prefix, newNumber);
 
   return { serialNumber: newNumber, serial };
 }

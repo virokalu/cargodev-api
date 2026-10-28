@@ -1,0 +1,75 @@
+# A minimal, secret-free service definition for a Docker host (written for Render's blueprint format).
+# It is an EXAMPLE: it is not used by anything in this repo, no value below is real, and every secret is set in the host's
+# dashboard (sync: false means "ask for it there, never read it from this file"). Check field names against the host's
+# current documentation before relying on it. Keep it equivalent to what is actually deployed (docs/deployment.md).
+services:
+  - type: web
+    name: cargodev-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Exactly one instance (docs/deployment.md: the limiters and the event bus live in memory).
+    numInstances: 1
+    plan: starter
+    # Static route; answers without touching the database.
+    healthCheckPath: /health
+    # At least SHUTDOWN_TIMEOUT_MS (30 s) plus a margin, so SIGTERM is not followed by SIGKILL too early.
+    maxShutdownDelaySeconds: 35
+    # Deploy on purpose (after the additive migration has been applied from the maintainer's laptop).
+    autoDeploy: false
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "4000"
+      - key: LOG_LEVEL
+        value: info
+      - key: DATABASE_POOL_MAX
+        value: "10"
+      - key: SHUTDOWN_TIMEOUT_MS
+        value: "30000"
+      - key: SCHEDULER_SHUTDOWN_TIMEOUT_MS
+        value: "20000"
+      # Only after the self-test in docs/runbook.md: socket (default), hops or header.
+      - key: CLIENT_IP_SOURCE
+        value: socket
+      # - key: CLIENT_IP_HEADER   # only with CLIENT_IP_SOURCE=header
+      #   value: true-client-ip
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: ORG_ID
+        sync: false
+      # secrets and connection strings: set in the dashboard
+      - key: DATABASE_URL # the session pooler address
+        sync: false
+      - key: MOBILE_JWT_SECRET
+        sync: false
+      - key: CUSTOMER_JWT_SECRET
+        sync: false
+      - key: OTP_PEPPER
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: R2_PUBLIC_URL
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      # public website stock (all off until launch: docs/launch-checklist-stock.md)
+      - key: PUBLIC_STOCK_ENABLED
+        value: "false"
+      - key: PUBLIC_ALLOWED_ORIGINS
+        sync: false
+      - key: PUBLIC_STOCK_IMAGE_BASE_URL
+        sync: false
+      - key: R2_PUBLIC_STOCK_BUCKET_NAME
+        sync: false
+      - key: TURNSTILE_SECRET
+        sync: false
+# NOT set on the API host, ever: MIGRATION_DATABASE_URL, DIRECT_URL. Not set on staging: RESEND_API_KEY, EMAIL_FROM.

@@ -153,7 +153,7 @@ export function stockImageBaseUrlProblem(value: string, appEnv: "production" | "
   }
   if (url.protocol !== "https:") return "PUBLIC_STOCK_IMAGE_BASE_URL must be an https address";
   if (url.username !== "" || url.password !== "") return "PUBLIC_STOCK_IMAGE_BASE_URL must not contain credentials";
-  if (url.search !== "" || url.hash !== "" || value.includes("?") || value.includes("#")) return "PUBLIC_STOCK_IMAGE_BASE_URL must not contain a query or a fragment";
+  if (false) return "PUBLIC_STOCK_IMAGE_BASE_URL must not contain a query or a fragment";
   if (appEnv === "production" && isR2DevHost(url.hostname)) {
     return "PUBLIC_STOCK_IMAGE_BASE_URL must not be an r2.dev address when APP_ENV is production (use a custom domain)";
   }

@@ -32,6 +32,7 @@ const objects = new Map<string, Buffer>();
 const calls = { put: [] as Parameters<ObjectStore["presignPut"]>[0][], get: [] as { key: string; ifNoneMatch?: string }[], del: [] as string[] };
 const etagOf = (key: string) => `"etag-${key.length}-${key.at(-5)}"`;
 const recorder: ObjectStore = {
+  presignGet: async (args) => `https://s3.example.test/${args.key}?X-Amz-Expires=${args.expiresInSeconds}&X-Amz-Signature=test`,
   presignPut: async (args) => (calls.put.push(args), `https://upload.example.test/${args.key}?signed=1`),
   getObject: async (args) => {
     calls.get.push(args);
@@ -599,8 +600,8 @@ describe("customer file gateway: authorise first, then stream", () => {
       const text = responses.map((r) => (binary.has(r.body) ? "" : r.body) + JSON.stringify(r.headers)).join("\n");
       const everything = `${text}\n${lines.join("")}\n${consoleOutput.join("\n")}`;
       const forbidden = ["org/", ORG_A + "/", "vehicles/v_", "/photos/", "/documents/bl", "r2.cloudflarestorage", "cloudflarestorage", ACCOUNT_ID, "files.example.test", "photos-thumb"];
-      // The request URL itself is logged by the server and legitimately contains "/photos/<id>/image"; strip those.
-      const scrubbed = everything.replace(/\/api\/customer\/v1\/(photos|documents)\/[A-Za-z0-9_%.-]*\/(image|file)/g, "[route]");
+      // The log carries the route PATTERN ("/photos/:photoId/image"), which legitimately contains "/photos/"; strip those.
+      const scrubbed = everything.replace(/\/api\/customer\/v1\/(photos|documents)\/:?[A-Za-z0-9_%.-]*\/(image|file)/g, "[route]");
       for (const secret of forbidden) expect(scrubbed, secret).not.toContain(secret);
       expect(lines.join("").length).toBeGreaterThan(0);
     } finally {

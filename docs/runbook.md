@@ -4,7 +4,7 @@ Procedures only. Live hostnames, dashboard links and contacts are kept privately
 
 ## Before go-live: decide where the client address comes from
 
-Rate limiting and the audit trail use the client IP, chosen by `CLIENT_IP_SOURCE` (`socket` by default, `hops`, or `header`; docs/deployment.md). Behind a load balancer `socket` makes every request look like it comes from the balancer and share one rate-limit bucket, so decide the mode and run the self-test below before go-live. The notes under "set the proxy hop count" still apply to `hops`.
+Rate limiting and the audit trail use the client IP, chosen by `CLIENT_IP_SOURCE` (`hops`, `header` or `socket`; REQUIRED in production, docs/deployment.md; in socket mode a masked warning appears in the log if forwarding headers are seen). Behind a load balancer `socket` makes every request look like it comes from the balancer and share one rate-limit bucket, so decide the mode and run the self-test below before go-live. The notes under "set the proxy hop count" still apply to `hops`.
 
 ## Before go-live: set the proxy hop count
 

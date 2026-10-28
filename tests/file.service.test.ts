@@ -8,10 +8,10 @@ vi.mock("../src/lib/prisma.js", () => ({
   getPrisma: () => (state.fake as FakePrisma).client,
 }));
 vi.mock("../src/config/env.js", () => ({
-  loadEnv: () => ({ R2_PUBLIC_URL: state.base }),
+  loadEnv: () => ({ R2_PUBLIC_URL: state.base, STAFF_SIGNED_URL_TTL_SECONDS: 600 }),
 }));
 
-import { setObjectDeleter } from "../src/lib/object-storage.js";
+import { setObjectDeleter, setObjectStore, type ObjectStore } from "../src/lib/object-storage.js";
 import {
   addVehicleDocument,
   addVehiclePhoto,
@@ -29,6 +29,16 @@ const photoUrl = (org = ORG_A, vehicle = VEH, name = "a.jpg") => `${BASE}/org/${
 const docUrl = (name = "d.pdf") => `${BASE}/org/${ORG_A}/vehicles/${VEH}/documents/${name}`;
 const sheetUrl = (name = "s.jpg") => `${BASE}/org/${ORG_A}/vehicles/${VEH}/auction-sheet/${name}`;
 
+// Staff get short-lived signed links, never the stored address; the store here only signs (it holds no objects).
+const SIGNED = (key: string) => `https://s3.example.test/${key}?X-Amz-Expires=600&X-Amz-Signature=test`;
+const signingStore: ObjectStore = {
+  presignGet: async (args) => SIGNED(args.key),
+  presignPut: async () => "https://upload.example.test/x",
+  getObject: async () => ({ kind: "missing" }),
+  putObject: async () => undefined,
+  deleteKey: async (key) => void deleted.push(key),
+};
+
 let fake: FakePrisma;
 let deleted: string[];
 
@@ -37,6 +47,7 @@ beforeEach(() => {
   state.fake = fake;
   fake.seed("user", { id: "user_a_manager", org_id: ORG_A, userType: "STAFF", role: "MANAGER", loginEnabled: false, name: "Test Manager A" }, { id: "someone", org_id: ORG_A, userType: "STAFF", role: "MANAGER", loginEnabled: false, name: "Someone" }, { id: "mgr_actor", org_id: ORG_A, userType: "STAFF", role: "MANAGER", loginEnabled: true, name: "Actor" });
   state.base = BASE;
+  setObjectStore(signingStore);
   deleted = [];
   setObjectDeleter(async (key) => {
     deleted.push(key);
@@ -44,6 +55,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllGlobals();
+  setObjectStore(null);
   setObjectDeleter(async () => undefined);
 });
 
@@ -108,7 +120,10 @@ describe("new file URLs must be this org's own upload for this vehicle", () => {
 describe("photos", () => {
   it("adds a photo with an ActivityLog row, scoped to the caller's org", async () => {
     const photo = await addVehiclePhoto(actor(), VEH, { url: photoUrl() });
-    expect(photo).toMatchObject({ url: photoUrl(), uploaderName: expect.any(String) });
+    // the response carries a short-lived signed link, never the stored address
+    expect(photo).toMatchObject({ url: SIGNED(`org/${ORG_A}/vehicles/${VEH}/photos/a.jpg`), expiresAt: expect.any(String), uploaderName: expect.any(String) });
+    expect(photo.url).not.toContain(BASE);
+    expect(fake.rows("vehiclePhoto")[0]!["url"]).toBe(photoUrl()); // the database still holds the stored address
     expect(fake.rows("vehiclePhoto")).toHaveLength(1);
     expect(fake.rows("activityLog")).toMatchObject([{ org_id: ORG_A, action: "ADD_VEHICLE_PHOTO" }]);
   });
@@ -118,7 +133,9 @@ describe("photos", () => {
     await deleteVehiclePhoto(actor(), VEH, photo.id);
     expect(fake.rows("vehiclePhoto")).toHaveLength(0);
     expect(fake.rows("activityLog").map((r) => r["action"])).toContain("DELETE_VEHICLE_PHOTO");
-    expect(deleted).toEqual([`org/${ORG_A}/vehicles/${VEH}/photos/a.jpg`]);
+    // the photo and its small version, both inside the org's folder
+    expect(deleted[0]).toBe(`org/${ORG_A}/vehicles/${VEH}/photos/a.jpg`);
+    expect(deleted.every((key) => key.startsWith(`org/${ORG_A}/`))).toBe(true);
   });
 
   it("a photo id from another vehicle is NOT_FOUND", async () => {
@@ -180,7 +197,7 @@ describe("auction sheet", () => {
   it("sets the sheet, logs before/after, and removes the replaced object", async () => {
     await setAuctionSheet(actor(), VEH, { url: sheetUrl("one.jpg") });
     const second = await setAuctionSheet(actor(), VEH, { url: sheetUrl("two.jpg") });
-    expect(second).toEqual({ auctionSheetUrl: sheetUrl("two.jpg") });
+    expect(second).toEqual({ auctionSheetUrl: SIGNED(`org/${ORG_A}/vehicles/${VEH}/auction-sheet/two.jpg`), auctionSheetExpiresAt: expect.any(String) });
     expect(deleted).toEqual([`org/${ORG_A}/vehicles/${VEH}/auction-sheet/one.jpg`]);
     expect(fake.rows("activityLog")).toHaveLength(2);
   });
@@ -205,7 +222,9 @@ describe("getVehiclePdfImages: the server-side fetch", () => {
     vi.stubGlobal("fetch", fetchMock);
     const result = await getVehiclePdfImages(ORG_A, VEH);
     expect(result.photoDataUrls).toEqual([`data:image/png;base64,${Buffer.from("abc").toString("base64")}`]);
-    expect(fetchMock).toHaveBeenCalledWith(photoUrl(), expect.objectContaining({ redirect: "error", signal: expect.anything() }));
+    // the server fetches the storage API with a signed link, not the public address
+    expect(fetchMock).toHaveBeenCalledWith(SIGNED(`org/${ORG_A}/vehicles/${VEH}/photos/a.jpg`), expect.objectContaining({ redirect: "error", signal: expect.anything() }));
+    expect(fetchMock).not.toHaveBeenCalledWith(photoUrl(), expect.anything());
   });
 
   it("NEVER fetches a stored URL outside this org's folder (SSRF / cross-org)", async () => {
@@ -244,7 +263,7 @@ describe("getVehiclePdfImages: the server-side fetch", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        if (url.endsWith("bad.jpg")) throw new TypeError("redirect mode is set to error");
+        if (url.includes("/bad.jpg?")) throw new TypeError("redirect mode is set to error");
         return image();
       })
     );

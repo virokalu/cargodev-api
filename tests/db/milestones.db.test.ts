@@ -28,6 +28,7 @@ const day = (offset: number) => {
 
 const gets: string[] = [];
 const store: ObjectStore = {
+  presignGet: async (args) => `https://s3.example.test/${args.key}?X-Amz-Expires=${args.expiresInSeconds}&X-Amz-Signature=test`,
   presignPut: async () => "https://upload.example.test/x",
   getObject: async ({ key }) => (gets.push(key), { kind: "found", body: Readable.from([Buffer.from("bytes")]), contentLength: 5, etag: '"e"' }),
   putObject: async () => undefined,

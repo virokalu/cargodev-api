@@ -86,6 +86,11 @@ If you see "The database test harness refused to run", read the message: it says
 - `tests/db/customer-auth.db.test.ts` and `customer-auth.concurrency.db.test.ts`: the SQL and the parallel guarantees (the concurrency file needs a real Postgres).
 - The email queue is replaced by a recorder in tests so the plain code can be read back. Tests never have `RESEND_API_KEY`.
 
+## Private-ready bucket tests
+
+- `tests/staff-signed-urls.test.ts`: the TTL setting and its limits; `signStaffFileUrl` (the TTL, the pinned type, and a long list of refusals: another org, a prefix of the org id, a different host (including the same length), a look-alike scheme, credentials, a traversal, a query, an encoded slash, svg and html, no store, no public base, a signing failure); the staff file endpoints (401, every role, 404 for another org, exact key sets, the expiry parameter, `unavailable` rows with only a masked count in the log); the signed responses of add photo, add document and set auction sheet; the PDF fetch using the signed link and skipping other orgs' addresses; signed-link secrets never in real log or console output; and `r2:audit` (counts only, read-only).
+- Mutation checks run on this feature: 16 breakages (host and org-prefix checks in the shared key function, the key source, the TTL, the type allowlist, the three redaction patterns, returning the stored address, logging addresses, fetching the public address), each caught; the host check needed same-length host and scheme cases added.
+
 ## Deployment tests
 
 - `tests/deployment.test.ts`: the settings and their refusals (pool size, shutdown deadlines, client address source and header name), graceful shutdown (order, a second signal, a failing close, the deadline cutting off a hang, a real app sending `event: shutdown`), the pool size reaching the driver, the client address modes (socket ignores every forwarding header; hops; header mode with validation, fallback, one masked warning a minute, and rate-limit keys that follow the header), the database latency script with a fake client, and the container files (pinned tag, non-root, exec-form CMD, health check, `--ignore-scripts`, no `.env` copied, `.dockerignore`, the CI image job).
@@ -150,3 +155,4 @@ If `migrate dev` cannot create its shadow database, do not loosen permissions: u
 - Do not build secret-looking fixtures as string literals (`password: "..."`): the secret scan has no allow-list. Build them at runtime or use an obviously fake value containing `example`.
 - Anything that depends on real SQL behaviour (NULLs, locks, constraints, concurrency) gets a test in `tests/db`.
 - Fix a bug by first writing the test that reproduces it.
+- `tests/startup-and-logging.test.ts`: production refuses to start without `CLIENT_IP_SOURCE`, the socket-mode forwarding-header warning (once a minute, header names only), what a real request log line may contain (no query string, raw URL, parameter values or addresses), and the image library being optional (simulated `sharp` import failure).

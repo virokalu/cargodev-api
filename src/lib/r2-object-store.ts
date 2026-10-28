@@ -56,6 +56,13 @@ export class R2ObjectStore implements ObjectStore {
     });
   }
 
+  async presignGet(args: { key: string; contentType: string; expiresInSeconds: number }): Promise<string> {
+    // The storage API host (path style), signed. The response type is pinned to the allowlisted type of the key and the
+    // object is marked private, whatever metadata it was uploaded with.
+    const command = new GetObjectCommand({ Bucket: this.bucket, Key: args.key, ResponseContentType: args.contentType, ResponseCacheControl: "private, no-store" });
+    return getSignedUrl(this.client, command, { expiresIn: args.expiresInSeconds });
+  }
+
   async getObject(args: { key: string; ifNoneMatch?: string }): Promise<StoredObject> {
     try {
       const response = await this.client.send(

@@ -96,6 +96,7 @@ describe("thumbnails next to stored photos", () => {
   const puts: string[] = [];
   const deletes: string[] = [];
   const store: ObjectStore = {
+    presignGet: async (args) => `https://s3.example.test/${args.key}?X-Amz-Expires=${args.expiresInSeconds}&X-Amz-Signature=test`,
     presignPut: async () => "https://upload.example.test/x",
     getObject: async ({ key }) => {
       const found = objects.get(key);
@@ -140,7 +141,9 @@ describe("thumbnails next to stored photos", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     objects.set(KEY, { body: Buffer.from("<svg onload=alert(1)/>") });
     const photo = await addVehiclePhoto(actor(), "v_fc_pending", { url: `${BASE}/${KEY}` });
-    expect(photo.url).toBe(`${BASE}/${KEY}`);
+    // staff get a signed link in the response; the stored address in the row is unchanged
+    expect(photo.url).toBe(`https://s3.example.test/${KEY}?X-Amz-Expires=600&X-Amz-Signature=test`);
+    expect(fake.rows("vehiclePhoto")[0]!.url).toBe(`${BASE}/${KEY}`);
     expect(fake.rows("vehiclePhoto")).toHaveLength(1);
     expect(puts).toEqual([]);
     const logged = log.mock.calls.flat().map((x) => JSON.stringify(x)).join(" ");

@@ -178,14 +178,16 @@ File bytes never pass through this API; the database stores URLs. A URL is accep
 
 | Method | Path | Roles | Notes |
 |---|---|---|---|
-| GET | /api/v1/vehicles/:serial/files | any staff | Auction sheet, photos, documents |
+| GET | /api/v1/vehicles/:serial/files | any staff | `{ auctionSheetUrl, auctionSheetExpiresAt, auctionSheetUnavailable?, photos: [{ id, url, expiresAt, unavailable?, uploaderName, createdAt }], documents: [{ id, url, expiresAt, unavailable?, name, documentType, uploaderName, createdAt }] }`. Every `url` is a **short-lived signed link** (see the note below), not the stored address |
 | GET | /api/v1/vehicles/:serial/pdf-images | any staff | Auction sheet and photos as data URLs for the PDF export. The server re-checks each stored URL, refuses redirects, caps size (15 MB) and time (10 s), and returns images only; a failed image is skipped |
-| POST | /api/v1/vehicles/:id/photos | ADMINISTRATOR, MANAGER, OPERATOR | `{ url }`, 201 |
+| POST | /api/v1/vehicles/:id/photos | ADMINISTRATOR, MANAGER, OPERATOR | `{ url }` (the stored form from the upload), 201 with `{ id, url, expiresAt, uploaderName, createdAt }` where `url` is a signed link |
 | POST | /api/v1/vehicles/:id/photos-added | ADMINISTRATOR, MANAGER, OPERATOR | `{ count }`. One notification for a batch of photos |
-| POST | /api/v1/vehicles/:id/documents | ADMINISTRATOR, MANAGER, OPERATOR | `{ url, name, documentType }`, 201 |
-| PUT | /api/v1/vehicles/:id/auction-sheet | ADMINISTRATOR, MANAGER, OPERATOR | `{ url }`. Replaces the sheet |
+| POST | /api/v1/vehicles/:id/documents | ADMINISTRATOR, MANAGER, OPERATOR | `{ url, name, documentType }`, 201 with the document and a signed `url` and `expiresAt` |
+| PUT | /api/v1/vehicles/:id/auction-sheet | ADMINISTRATOR, MANAGER, OPERATOR | `{ url }`. Replaces the sheet; answers `{ auctionSheetUrl (signed), auctionSheetExpiresAt }` |
 | DELETE | /api/v1/vehicles/:id/photos/:photoId | ADMINISTRATOR, MANAGER | |
 | DELETE | /api/v1/vehicles/:id/documents/:docId | ADMINISTRATOR, MANAGER | |
+
+**File `url` values are short-lived. Clients must not store them.** On every staff file endpoint the `url` field holds a signed link on the storage API host that stops working at `expiresAt` (`STAFF_SIGNED_URL_TTL_SECONDS`, 60 to 900 seconds, default 600). Use it to display or download now; keep the file's `id` and ask the API again later (never cache, bookmark, share or save the link). The link is derived from the stored address only if that address is on the configured public base AND inside the caller's own org folder; any other row has `url: null` and `unavailable: true`. A new file is still registered with the stored form of its address (the `publicUrl` the upload step returned), which is an identifier, not a working link. Customers never receive a link or an address (they use the id-based file endpoints). The answers stay `Cache-Control: no-store`.
 
 Deleting removes the database row and then the stored object (best effort: a storage failure never blocks the delete, and only objects inside the caller's own org folder are ever removed). Without the object-storage SDK installed the object is left in place.
 

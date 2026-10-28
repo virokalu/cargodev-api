@@ -36,6 +36,7 @@ jobs:
       CUSTOMER_JWT_SECRET: "ci-dummy-customer-value-not-real-0123456789"
       OTP_PEPPER: "ci-dummy-otp-pepper-value-not-real-0123456789"
       CUSTOMER_FILE_CACHE_SECONDS: "300"
+      STAFF_SIGNED_URL_TTL_SECONDS: "600"
       APP_MIN_VERSION: "1.0.0"
       ARRIVAL_REMINDER_DAYS: "45"
       PUBLIC_STOCK_ENABLED: "false"

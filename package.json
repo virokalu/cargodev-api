@@ -18,7 +18,8 @@
     "start": "tsx --env-file=.env src/server.ts",
     "build": "tsc -p tsconfig.build.json",
     "start:prod": "node dist/server.js",
-    "db:latency": "tsx --env-file-if-exists=.env scripts/db-latency.ts"
+    "db:latency": "tsx --env-file-if-exists=.env scripts/db-latency.ts",
+    "r2:audit": "tsx --env-file-if-exists=.env scripts/r2-audit.ts"
   },
   "keywords": [],
   "type": "module",
@@ -36,6 +37,7 @@
     "jose": "^6.2.13",
     "pg": "^8.23.1",
     "pino": "^10.4.0",
+    "rclone": "1.4.0",
     "sharp": "0.35.5",
     "zod": "^4.6.7"
   },

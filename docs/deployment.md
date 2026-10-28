@@ -91,6 +91,12 @@ socket address is used and a masked warning is logged (the header name only, at 
 runbook after every host or setting change. Behind a load balancer with `socket`, every request shares the balancer's address and one
 rate-limit bucket: set the mode before go-live.
 
+**Production refuses to start without `CLIENT_IP_SOURCE`** (any of the three values is accepted; the choice must be deliberate). In `socket` mode, if requests arrive carrying `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `True-Client-IP`, `CF-Connecting-IP` or `X-Client-IP`, the API logs one warning a minute naming the header names (never a value or an address): that usually means a proxy is in front and the mode should be `hops` or `header`.
+
+## Request logs
+
+A request log line carries the method, the route PATTERN (for example `/api/v1/vehicles/:serial/files`; `(no matching route)` for an unknown URL), the status, the duration and the request id. It never carries the raw URL, the query string, a path parameter, a header or the client address, so search text, serials and tokens in a URL cannot reach a log. Authorization and cookie headers and token, hash and signed-URL parameters are redacted wherever they could still appear.
+
 ## Portability checklist
 
 The service must be movable to another host in an afternoon. It is, as long as these stay true:

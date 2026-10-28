@@ -46,3 +46,28 @@ export function registerClientIpHeader(app: FastifyInstance, options: ClientIpOp
     done();
   });
 }
+
+/** Headers a proxy or edge adds to carry the client address. Seeing one in socket mode means the mode is probably wrong. */
+export const FORWARDING_HEADERS = ["x-forwarded-for", "forwarded", "x-real-ip", "true-client-ip", "cf-connecting-ip", "x-client-ip"] as const;
+
+/**
+ * Socket mode ignores every forwarding header (they cannot be spoofed). But if requests carry them, the API is probably behind a
+ * proxy and every visitor now shares the proxy's address and one rate-limit bucket. So: one masked warning a minute, naming the
+ * header NAMES seen (never a value, never an address).
+ */
+export function registerForwardingHeaderWarning(app: FastifyInstance, options: { warn?: (message: string) => void; now?: () => number } = {}): void {
+  const warn = options.warn ?? ((message: string) => app.log.warn(message));
+  const now = options.now ?? Date.now;
+  let lastWarning = -Infinity;
+
+  app.addHook("onRequest", (request: FastifyRequest, _reply, done) => {
+    if (now() - lastWarning >= WARN_EVERY_MS) {
+      const seen = FORWARDING_HEADERS.filter((name) => request.headers[name] !== undefined);
+      if (seen.length > 0) {
+        lastWarning = now();
+        warn(`forwarding header(s) ${seen.join(", ")} seen while CLIENT_IP_SOURCE is socket: if this API is behind a proxy, set CLIENT_IP_SOURCE (hops or header) or every visitor shares one rate-limit bucket (values are never logged; at most once a minute)`);
+      }
+    }
+    done();
+  });
+}

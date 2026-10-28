@@ -65,6 +65,9 @@ const baseSchema = z.object({
   CUSTOMER_FILE_CACHE_SECONDS: z.coerce.number().int().min(0).max(86400).default(300),
   // Days after a vehicle's SHIPPED milestone before staff are reminded that no arrival has been recorded (then weekly).
   ARRIVAL_REMINDER_DAYS: z.coerce.number().int().min(1).max(365).default(45),
+  // How long a link the API gives STAFF for viewing a stored file stays valid, in seconds (60 to 900, default 600). The
+  // links are signed, point at the storage API (not a public address) and are never stored: a client asks again.
+  STAFF_SIGNED_URL_TTL_SECONDS: z.coerce.number().int().min(60).max(900).default(600),
   // The oldest customer app build the API still serves (GET /api/customer/v1/app/min-version). Raise it to force an update.
   APP_MIN_VERSION: z.string().regex(/^\d+\.\d+\.\d+$/, "APP_MIN_VERSION must look like 1.2.3").default("1.0.0"),
   // Optional. Only raises Expo push rate limits; push works without it.
@@ -120,6 +123,11 @@ const envSchema = baseSchema.superRefine((env, ctx) => {
     for (const name of R2_CREDENTIALS) {
       if (env[name] === undefined) ctx.addIssue({ code: "custom", path: [name], message: `${name} is required when any R2 credential is set` });
     }
+  }
+  // No silent default in production: behind a load balancer the default (socket) makes every visitor share one rate-limit
+  // bucket, and a wrong "trust" guess lets clients pick their own address. The operator must choose, on purpose.
+  if (env.NODE_ENV === "production" && env.CLIENT_IP_SOURCE === undefined) {
+    ctx.addIssue({ code: "custom", path: ["CLIENT_IP_SOURCE"], message: "CLIENT_IP_SOURCE must be set explicitly in production (socket, hops or header)" });
   }
   if (env.CLIENT_IP_SOURCE === "header" && env.CLIENT_IP_HEADER === undefined) {
     ctx.addIssue({ code: "custom", path: ["CLIENT_IP_HEADER"], message: "CLIENT_IP_HEADER is required when CLIENT_IP_SOURCE is header" });

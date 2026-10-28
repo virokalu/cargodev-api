@@ -9,6 +9,8 @@ const FORBIDDEN_IP_HEADERS = new Set(["authorization", "cookie", "set-cookie", "
 
 const baseSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  // Which deployment this is: it decides how strict some checks are (the public stock image address, email safety). Logged at start-up.
+  APP_ENV: z.enum(["production", "staging", "development"], { error: "APP_ENV must be production, staging or development" }).default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
@@ -131,6 +133,33 @@ const baseSchema = z.object({
   ORG_ID: z.string().min(1, "ORG_ID is required"),
 });
 
+/** True for r2.dev and any of its subdomains (the throwaway public address Cloudflare gives a bucket). */
+export function isR2DevHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  return host === "r2.dev" || host.endsWith(".r2.dev");
+}
+
+/**
+ * Why PUBLIC_STOCK_IMAGE_BASE_URL is not acceptable, or null. Always: an https address with no credentials, query or fragment.
+ * In production: not an r2.dev host (that address is for trying things out; production needs a custom domain). The message
+ * never contains the value.
+ */
+export function stockImageBaseUrlProblem(value: string, appEnv: "production" | "staging" | "development"): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return "PUBLIC_STOCK_IMAGE_BASE_URL must be a valid address";
+  }
+  if (url.protocol !== "https:") return "PUBLIC_STOCK_IMAGE_BASE_URL must be an https address";
+  if (url.username !== "" || url.password !== "") return "PUBLIC_STOCK_IMAGE_BASE_URL must not contain credentials";
+  if (url.search !== "" || url.hash !== "" || value.includes("?") || value.includes("#")) return "PUBLIC_STOCK_IMAGE_BASE_URL must not contain a query or a fragment";
+  if (appEnv === "production" && isR2DevHost(url.hostname)) {
+    return "PUBLIC_STOCK_IMAGE_BASE_URL must not be an r2.dev address when APP_ENV is production (use a custom domain)";
+  }
+  return null;
+}
+
 const R2_CREDENTIALS = ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME"] as const;
 
 const envSchema = baseSchema.superRefine((env, ctx) => {
@@ -156,6 +185,10 @@ const envSchema = baseSchema.superRefine((env, ctx) => {
   }
   if (env.PUBLIC_ALLOWED_ORIGINS.split(",").some((origin) => origin.trim() === "*")) {
     ctx.addIssue({ code: "custom", path: ["PUBLIC_ALLOWED_ORIGINS"], message: "PUBLIC_ALLOWED_ORIGINS must list origins, never *" });
+  }
+  if (env.PUBLIC_STOCK_IMAGE_BASE_URL !== undefined) {
+    const problem = stockImageBaseUrlProblem(env.PUBLIC_STOCK_IMAGE_BASE_URL, env.APP_ENV);
+    if (problem) ctx.addIssue({ code: "custom", path: ["PUBLIC_STOCK_IMAGE_BASE_URL"], message: problem });
   }
   if (env.R2_PUBLIC_STOCK_BUCKET_NAME !== undefined && env.R2_ACCOUNT_ID === undefined) {
     ctx.addIssue({ code: "custom", path: ["R2_PUBLIC_STOCK_BUCKET_NAME"], message: "R2_PUBLIC_STOCK_BUCKET_NAME needs the R2 credentials" });
@@ -190,7 +223,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const parsed = envSchema.safeParse(present);
   if (!parsed.success) {
     const names = [...new Set(parsed.error.issues.map((issue) => issue.path.join(".")))];
-    throw new Error(`Invalid environment variables: ${names.join(", ")}. See docs/env.md.`);
+    // Our own checks (code "custom") carry fixed messages that never contain a value; they say what to fix.
+    const hints = [...new Set(parsed.error.issues.filter((issue) => issue.code === "custom").map((issue) => issue.message))];
+    throw new Error(`Invalid environment variables: ${names.join(", ")}. See docs/env.md.${hints.length ? ` ${hints.join("; ")}.` : ""}`);
   }
   cached = parsed.data;
   return cached;

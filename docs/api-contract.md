@@ -215,6 +215,7 @@ Runs the daily job now, taking the same lock as the scheduled run. Idempotent: c
 ### Customer API (`/api/customer/v1`)
 
 A separate zone (ADR 0005). Mounted only when `CUSTOMER_JWT_SECRET` is set. Same envelope and `no-store` as the staff API.
+**The full app-facing contract (every field, error, limit, the stream and push) is [customer-app-integration.md](customer-app-integration.md); it is guarded by `tests/customer-app-contract.test.ts`.** The tables below are a summary.
 Auth: `Authorization: Bearer <customer accessToken>` (15 minutes, audience `customer`). A staff token is 401 here; a customer token is 401 on `/api/v1`.
 Request bodies are strict: an unknown field is a 400.
 
@@ -274,6 +275,8 @@ Errors: 400 `VALIDATION` for bad input and for any wrong or expired code or cred
 Rate limits (per IP / per email or customer, from `src/config/customer-rate-limits.ts`; file gateway: 300/min per IP, 120/min per customer): register 5/min, 3/hour; verify-email 10/min, 10/10 min; resend-verification 5/min, 3/10 min; login 10/min, 20/15 min; refresh 30/min; logout 30/min; forgot-password 5/min, 3/hour; reset-password 10/min, 10/10 min; delete-account 5/min, 5/hour; me 60/min. Per-email limits count unknown addresses too.
 
 ### Public website API (Phase 2, slice 7)
+
+**The exact contract for the website developer, with full examples, limits, errors and headers, is [website-integration.md](website-integration.md)** (checked against the code by `tests/website-contract.test.ts`). The summary below is for staff-side readers; if they disagree, fix them together.
 
 Everything here exists only when `PUBLIC_STOCK_ENABLED=true` (otherwise 404, for the public routes and the staff stock tools alike). **No authentication**: a token, cookie or org in the request is ignored; the org is the server's default org. **CORS:** `PUBLIC_ALLOWED_ORIGINS` (the website origins), GET / POST / OPTIONS, header `Content-Type` only, no credentials, never `*`; the app origins (`CORS_ALLOWED_ORIGINS`) have no access to these routes and the website origin has none to the rest of the API. Query strings are strict (an unknown parameter is a 400).
 

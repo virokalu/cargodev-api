@@ -83,6 +83,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Every file the Dockerfile copies must be in the commit (a host that builds from git, like Render, sees only the commit).
+      # Read-only: it only lists git's tree. Fails before the build, with the list of missing paths.
+      - name: Every file the image build copies is in the commit
+        run: sh scripts/check-build-inputs.sh
       - name: Build the image
         run: docker build -t cargodev-api:ci .
       # The image must carry no .env file of any kind (a local .env must never be baked in).

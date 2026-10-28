@@ -9,6 +9,7 @@
 
 import type { Prisma } from "@prisma/client";
 import { getPrisma } from "../lib/prisma.js";
+import { redactStorageReferences } from "../lib/storage-redaction.js";
 
 type TxClient = Prisma.TransactionClient;
 
@@ -127,8 +128,10 @@ export async function listActivityLog(
       action: row.action,
       entity: row.entity,
       entityId: row.entityId,
-      before: row.before,
-      after: row.after,
+      // Storage references are removed when the row is READ (rows written before the log stopped keeping file addresses too);
+      // what is stored is not changed.
+      before: redactStorageReferences(row.before),
+      after: redactStorageReferences(row.after),
       createdAt: row.createdAt,
     })),
     total,

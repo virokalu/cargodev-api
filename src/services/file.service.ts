@@ -17,10 +17,11 @@ import { getPrisma } from "../lib/prisma.js";
 import { ServiceError } from "../lib/errors.js";
 import type { SessionUser } from "../lib/session-user.js";
 import { safeError } from "../lib/redact.js";
-import { checkNewFileUrl, deleteObject, keyFromOwnedUrlForOrg, signStaffFileUrl, type FileKind } from "../lib/object-storage.js";
+import { checkNewFileKey, deleteObject, keyFromOwnedUrlForOrg, signStaffFileUrl, storedUrlForKey, verifyUploadedObject, type FileKind } from "../lib/object-storage.js";
 import { DOCUMENT_TYPE_META } from "../lib/constants/document-type.js";
 import { parseInput } from "../lib/parse.js";
-import { documentBodySchema, fileUrlBodySchema, photosAddedBodySchema } from "../validation/file.schema.js";
+import { documentBodySchema, fileKeyBodySchema, photosAddedBodySchema } from "../validation/file.schema.js";
+import { fileReference } from "../lib/file-reference.js";
 import * as activityLog from "./activity-log.service.js";
 import * as notificationService from "./notification.service.js";
 import { createPhotoThumbnail, deletePhotoThumbnail } from "./photo-thumbnail.service.js";
@@ -36,10 +37,15 @@ export async function getOwnedVehicle(orgId: string, vehicleId: string) {
 
 const INVALID = "Please fix the highlighted fields.";
 
-/** A new file URL must be this org's own upload for this vehicle and kind. */
-function assertNewFileUrl(orgId: string, vehicleId: string, kind: FileKind, url: string): void {
-  const message = checkNewFileUrl(orgId, url, kind, vehicleId);
-  if (message) throw new ServiceError("VALIDATION", message, { url: message });
+/**
+ * A new file is registered by its KEY: it must be this org's own upload for this vehicle and kind (folder, characters, type),
+ * the object must really exist within the size limit, and the value that gets stored is built here from the key.
+ */
+async function storedUrlForNewFile(orgId: string, vehicleId: string, kind: FileKind, key: string): Promise<string> {
+  const message = checkNewFileKey(orgId, key, kind, vehicleId) ?? (await verifyUploadedObject(key, kind));
+  const url = storedUrlForKey(key);
+  if (message || !url) throw new ServiceError("VALIDATION", message ?? "File storage is not configured.", { key: message ?? "File storage is not configured." });
+  return url;
 }
 
 /** Best effort cleanup of a replaced/deleted file. Only objects inside THIS org's folder are ever touched. */
@@ -242,9 +248,9 @@ export async function setAuctionSheet(
   vehicleId: string,
   rawInput: unknown
 ): Promise<{ auctionSheetUrl: string | null; auctionSheetExpiresAt: string | null; auctionSheetUnavailable?: true }> {
-  const { url } = parseInput(fileUrlBodySchema, rawInput, INVALID);
+  const { key } = parseInput(fileKeyBodySchema, rawInput, INVALID);
   const vehicle = await getOwnedVehicle(actor.orgId, vehicleId);
-  assertNewFileUrl(actor.orgId, vehicleId, "AUCTION_SHEET", url);
+  const url = await storedUrlForNewFile(actor.orgId, vehicleId, "AUCTION_SHEET", key);
 
   const result = await getPrisma().$transaction(async (tx) => {
     // The write carries org_id itself (not only getOwnedVehicle above).
@@ -258,8 +264,9 @@ export async function setAuctionSheet(
       action: "SET_AUCTION_SHEET",
       entity: "Vehicle",
       entityId: vehicleId,
-      before: { auctionSheetUrl: vehicle.auctionSheetUrl },
-      after: { auctionSheetUrl: url },
+      // The file's id, kind and name: never the stored address.
+      before: vehicle.auctionSheetUrl ? fileReference("AUCTION_SHEET", vehicleId, vehicle.auctionSheetUrl) : null,
+      after: fileReference("AUCTION_SHEET", vehicleId, url),
     });
     return updated;
   });
@@ -280,9 +287,9 @@ export async function addVehiclePhoto(
   vehicleId: string,
   rawInput: unknown
 ): Promise<VehiclePhotoListItem> {
-  const { url } = parseInput(fileUrlBodySchema, rawInput, INVALID);
+  const { key } = parseInput(fileKeyBodySchema, rawInput, INVALID);
   await getOwnedVehicle(actor.orgId, vehicleId);
-  assertNewFileUrl(actor.orgId, vehicleId, "VEHICLE_PHOTO", url);
+  const url = await storedUrlForNewFile(actor.orgId, vehicleId, "VEHICLE_PHOTO", key);
 
   const photo = await getPrisma().$transaction(async (tx) => {
     const created = await tx.vehiclePhoto.create({
@@ -295,7 +302,7 @@ export async function addVehiclePhoto(
       action: "ADD_VEHICLE_PHOTO",
       entity: "VehiclePhoto",
       entityId: created.id,
-      after: { url },
+      after: fileReference("VEHICLE_PHOTO", created.id, url),
     });
     return created;
   });
@@ -349,7 +356,7 @@ export async function deleteVehiclePhoto(actor: SessionUser, vehicleId: string, 
       action: "DELETE_VEHICLE_PHOTO",
       entity: "VehiclePhoto",
       entityId: photoId,
-      before: { url: photo.url },
+      before: fileReference("VEHICLE_PHOTO", photoId, photo.url),
     });
   });
 
@@ -362,9 +369,9 @@ export async function addVehicleDocument(
   vehicleId: string,
   rawInput: unknown
 ): Promise<VehicleDocumentListItem> {
-  const { url, name, documentType } = parseInput(documentBodySchema, rawInput, INVALID);
+  const { key, name, documentType } = parseInput(documentBodySchema, rawInput, INVALID);
   const vehicle = await getOwnedVehicle(actor.orgId, vehicleId);
-  assertNewFileUrl(actor.orgId, vehicleId, "VEHICLE_DOCUMENT", url);
+  const url = await storedUrlForNewFile(actor.orgId, vehicleId, "VEHICLE_DOCUMENT", key);
 
   const { document, notification } = await getPrisma().$transaction(async (tx) => {
     const created = await tx.vehicleDocument.create({
@@ -377,7 +384,7 @@ export async function addVehicleDocument(
       action: "ADD_VEHICLE_DOCUMENT",
       entity: "VehicleDocument",
       entityId: created.id,
-      after: { url, name, documentType },
+      after: { ...fileReference("VEHICLE_DOCUMENT", created.id, url), name, documentType },
     });
 
     const recipientUserIds = await notificationService.listNotifiableStaffIds(tx, actor.orgId, actor.id);
@@ -423,7 +430,7 @@ export async function deleteVehicleDocument(actor: SessionUser, vehicleId: strin
       action: "DELETE_VEHICLE_DOCUMENT",
       entity: "VehicleDocument",
       entityId: documentId,
-      before: { url: document.url, name: document.name },
+      before: { ...fileReference("VEHICLE_DOCUMENT", documentId, document.url), name: document.name },
     });
   });
 

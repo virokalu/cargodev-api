@@ -75,6 +75,20 @@ release order). The running service must not be able to run them.
   database pool, exit 0. If anything hangs the process exits 1 at the deadline. Set the host's termination grace period to at least
   `SHUTDOWN_TIMEOUT_MS` plus a few seconds (for example 35 s), otherwise the host's SIGKILL arrives first.
 
+## Build inputs: every file the image copies must be in the commit
+
+A host that builds from git (Render, CI) sees only the **commit**, not your disk. A Dockerfile, `tsconfig.build.json` or `prisma/` folder that exists locally but was never committed makes the host fail with `failed to read dockerfile: open Dockerfile: no such file or directory` or `COPY failed: file not found`.
+
+`sh scripts/check-build-inputs.sh [commit]` (read-only; default `HEAD`) reads the Dockerfile and `.dockerignore` **as committed** and fails, listing every problem, if:
+
+- `Dockerfile` is not at the repo root with exactly that name in the commit (a wrong capital letter or a subfolder is reported with what it found);
+- a `COPY`/`ADD` source (other than `--from=<stage>` copies) has no file in the commit;
+- every file of a source is left out of the build context by `.dockerignore` (Docker rules: patterns are relative to the root, `*` does not cross `/`, the last match wins, `!` puts a file back).
+
+It runs in CI before the image is built (the `image` job), and `tests/check-build-inputs.test.ts` proves it on throwaway repositories. To check what a host built, pass its commit: `sh scripts/check-build-inputs.sh fed2350`.
+
+If the host says it cannot find the Dockerfile: (1) run the script with the commit hash from the host's log; (2) if it fails, that commit is missing files, so deploy a newer commit (the host builds the commit it names, not your branch tip); (3) if it passes, check the service settings: branch, **Root Directory empty**, **Dockerfile Path `./Dockerfile`**, and that auto-deploy builds the latest commit. Setting the host to deploy only after CI checks pass keeps a broken commit from ever reaching it.
+
 ## Client address (rate limits and logs)
 
 `CLIENT_IP_SOURCE` decides where `request.ip` comes from:

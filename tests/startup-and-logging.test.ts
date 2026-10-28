@@ -117,6 +117,10 @@ describe("socket mode warns, once a minute, when forwarding headers are seen", (
     expect([...FORWARDING_HEADERS].sort()).toEqual(["cf-connecting-ip", "forwarded", "true-client-ip", "x-client-ip", "x-forwarded-for", "x-real-ip"]);
   });
 
+  it("watches exactly the headers a proxy or edge is known to use", () => {
+    expect([...FORWARDING_HEADERS].sort()).toEqual(["cf-connecting-ip", "forwarded", "true-client-ip", "x-client-ip", "x-forwarded-for", "x-real-ip"]);
+  });
+
   it.each(FORWARDING_HEADERS)("notices %s", async (header) => {
     const a = await build("socket");
     await hit(a, { [header]: "198.51.100.1" });

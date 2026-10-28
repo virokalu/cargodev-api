@@ -3,6 +3,8 @@ import { ACCESS_TOKEN_TTL_SECONDS } from "../lib/mobile-jwt.js";
 import { openSseStream } from "../lib/sse-route.js";
 import type { SseHub } from "../lib/sse-hub.js";
 import { authenticate, currentUser } from "../plugins/auth.js";
+import { tokenClaimsAreTrusted } from "../lib/staff-auth-seam.js";
+import { getFreshStaffAuth } from "../services/staff-auth-state.service.js";
 import { parseInput } from "../lib/parse.js";
 import { success } from "../lib/response.js";
 import {
@@ -22,6 +24,8 @@ import { notificationListQuerySchema } from "../validation/notification.schema.j
 const DEVICE_TOKEN_RATE_LIMIT = { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } };
 export interface NotificationRouteDeps {
   sseHub: SseHub;
+  /** Tests only. */
+  recheckMs?: number;
 }
 
 // Reconnect storms are the main way a stream endpoint gets abused.
@@ -41,6 +45,9 @@ export function registerNotificationRoutes(app: FastifyInstance, deps: Notificat
       orgId: user.orgId,
       // Never outlive the token that opened the stream.
       expiresAt: request.tokenExpiresAt ?? Date.now() + ACCESS_TOKEN_TTL_SECONDS * 1000,
+      // Every minute, straight from the database (no cache): a user disabled while connected loses the stream.
+      ...(deps.recheckMs !== undefined ? { recheckMs: deps.recheckMs } : {}),
+      recheck: async () => tokenClaimsAreTrusted() || (await getFreshStaffAuth(user.id, user.orgId, { bypassCache: true })) !== null,
     });
   });
 

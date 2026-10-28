@@ -35,7 +35,7 @@ export async function consumeOtp(orgId: string, userId: string, purpose: OtpPurp
 
   // Spend an attempt first, atomically. Zero rows means the 5 attempts are gone (or it was just used).
   const spent = await prisma.otpCode.updateMany({
-    where: { id: live.id, usedAt: null, attempts: { lt: OTP_MAX_ATTEMPTS } },
+    where: { id: live.id, org_id: orgId, usedAt: null, attempts: { lt: OTP_MAX_ATTEMPTS } },
     data: { attempts: { increment: 1 } },
   });
   if (spent.count === 0) return false;
@@ -43,7 +43,7 @@ export async function consumeOtp(orgId: string, userId: string, purpose: OtpPurp
   if (!otpMatches(live.codeHash, orgId, userId, purpose, code)) return false;
 
   // Single use: only one of several parallel correct submissions can claim it.
-  const claimed = await prisma.otpCode.updateMany({ where: { id: live.id, usedAt: null }, data: { usedAt: new Date() } });
+  const claimed = await prisma.otpCode.updateMany({ where: { id: live.id, org_id: orgId, usedAt: null }, data: { usedAt: new Date() } });
   return claimed.count === 1;
 }
 

@@ -495,6 +495,13 @@ async function mapCorrectionConflict<T>(track: SerialPrefix, newNumber: number, 
 
 type TxClient = Prisma.TransactionClient;
 
+/** A vehicle write that carries org_id in its own where clause (not only in the read before it). Zero rows is a 404 and rolls
+ * the surrounding transaction back, so another org's id changes nothing. */
+async function writeVehicle(tx: TxClient, orgId: string, id: string, data: Prisma.VehicleUncheckedUpdateManyInput): Promise<void> {
+  const written = await tx.vehicle.updateMany({ where: { id, org_id: orgId }, data });
+  if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
+}
+
 /** No notification of any kind (event-driven or cron) fires for a vehicle
  * whose row colour status is a cancel status — a fallen-through deal doesn't
  * need staff chasing payment/transport/LC for it anymore. Checked against
@@ -1003,9 +1010,7 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
     if (!existing) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
     const { nextStatus, statusTransition, purchaseDateChanged, auctionBillNewlyPaid } = decide(existing);
 
-    const result = await tx.vehicle.update({
-      where: { id },
-      data: {
+    await writeVehicle(tx, user.orgId, id, {
         auctionItemNo: input.auctionItemNo,
         chassisNo: input.chassisNo,
         modelId: input.modelId,
@@ -1058,8 +1063,9 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
         sellingPriceCurrency: input.sellingPrice !== null ? (input.sellingPriceCurrency ?? "JPY") : null,
 
         shipmentStatus: nextStatus,
-      },
     });
+    const result = await tx.vehicle.findFirst({ where: { id, org_id: user.orgId } });
+    if (!result) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
 
     let bookingReceivedNotification: notificationService.EmitParams | null = null;
     let revertedToPendingNotification: notificationService.EmitParams | null = null;
@@ -1192,7 +1198,9 @@ export async function deleteVehicle(orgId: string, actorId: string, id: string):
   const existing = await assertVehicleInOrg(orgId, id);
 
   await getPrisma().$transaction(async (tx) => {
-    const deleted = await tx.vehicle.update({ where: { id }, data: { deletedAt: new Date() } });
+    await writeVehicle(tx, orgId, id, { deletedAt: new Date() });
+    const deleted = await tx.vehicle.findFirst({ where: { id, org_id: orgId } });
+    if (!deleted) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
     await activityLog.record(tx, {
       orgId,
       actorId,
@@ -1223,7 +1231,7 @@ export async function updateVehicleRowColourStatus(
   }
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.vehicle.update({ where: { id }, data: { rowColourStatusId } });
+    await writeVehicle(tx, orgId, id, { rowColourStatusId });
     await activityLog.record(tx, {
       orgId,
       actorId,
@@ -1250,7 +1258,7 @@ export async function updateVehicleAuctionBillPaid(
   const auctionBillNewlyPaid = auctionBillPaid === true && existing.auctionBillPaid !== true;
 
   const notification = await getPrisma().$transaction(async (tx) => {
-    await tx.vehicle.update({ where: { id }, data: { auctionBillPaid } });
+    await writeVehicle(tx, orgId, id, { auctionBillPaid });
     await activityLog.record(tx, {
       orgId,
       actorId,
@@ -1311,10 +1319,7 @@ export async function convertVehicleToExport(
   }
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.vehicle.update({
-      where: { id },
-      data: { convertedToExport: true, convertedToExportAt: new Date(), destination },
-    });
+    await writeVehicle(tx, orgId, id, { convertedToExport: true, convertedToExportAt: new Date(), destination });
     await tx.statusHistory.create({
       data: {
         vehicleId: id,
@@ -1358,10 +1363,7 @@ export async function revertVehicleToLocal(orgId: string, actorId: string, id: s
   }
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.vehicle.update({
-      where: { id },
-      data: { convertedToExport: false },
-    });
+    await writeVehicle(tx, orgId, id, { convertedToExport: false });
     await activityLog.record(tx, {
       orgId,
       actorId,
@@ -1394,10 +1396,7 @@ export async function convertVehicleToLocal(orgId: string, actorId: string, id: 
   }
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.vehicle.update({
-      where: { id },
-      data: { convertedToLocal: true, convertedToLocalAt: new Date() },
-    });
+    await writeVehicle(tx, orgId, id, { convertedToLocal: true, convertedToLocalAt: new Date() });
     await activityLog.record(tx, {
       orgId,
       actorId,
@@ -1427,10 +1426,7 @@ export async function revertVehicleToExport(orgId: string, actorId: string, id: 
   }
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.vehicle.update({
-      where: { id },
-      data: { convertedToLocal: false },
-    });
+    await writeVehicle(tx, orgId, id, { convertedToLocal: false });
     await activityLog.record(tx, {
       orgId,
       actorId,
@@ -1473,10 +1469,7 @@ export async function correctVehicleSerialNumber(
   return mapCorrectionConflict(existing.serialPrefix, newNumber, () => getPrisma().$transaction(async (tx) => {
     const { serial } = await correctSerialNumber(tx, orgId, existing.serialPrefix, newNumber, id);
 
-    await tx.vehicle.update({
-      where: { id },
-      data: { serialNumber: newNumber, serial },
-    });
+    await writeVehicle(tx, orgId, id, { serialNumber: newNumber, serial });
 
     await activityLog.record(tx, {
       orgId,

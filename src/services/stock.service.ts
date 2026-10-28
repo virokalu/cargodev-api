@@ -348,7 +348,11 @@ export async function updateStock(actor: SessionUser, id: string, rawBody: unkno
     const before = await loadOwned(tx, actor.orgId, id);
     // The API says `price`; the column is the historical `priceFob`. The price is stored as a Decimal (whole rupees).
     const data = Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined).map(([k, v]) => [k === "price" ? "priceFob" : k, v]));
-    const updated = await tx.stockVehicle.update({ where: { id: before.id }, data, select: STAFF_SELECT });
+    // The write carries org_id itself (not only loadOwned above).
+    const written = await tx.stockVehicle.updateMany({ where: { id: before.id, org_id: actor.orgId }, data });
+    if (written.count !== 1) throw notFound();
+    const updated = await tx.stockVehicle.findFirst({ where: { id: before.id, org_id: actor.orgId }, select: STAFF_SELECT });
+    if (!updated) throw notFound();
     await activityLog.record(tx, {
       orgId: actor.orgId,
       actorId: actor.id,
@@ -493,7 +497,8 @@ export async function updateStockImage(actor: SessionUser, id: string, imageId: 
     const image = await tx.stockImage.findFirst({ where: { id: imageId, org_id: actor.orgId, stockVehicleId: stock.id }, select: { id: true, altText: true, sortOrder: true } });
     if (!image) throw imageNotFound();
     const data = Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined));
-    await tx.stockImage.update({ where: { id: image.id }, data });
+    const written = await tx.stockImage.updateMany({ where: { id: image.id, org_id: actor.orgId, stockVehicleId: stock.id }, data });
+    if (written.count !== 1) throw imageNotFound();
     await activityLog.record(tx, { orgId: actor.orgId, actorId: actor.id, action: "UPDATE_STOCK_IMAGE", entity: "StockImage", entityId: image.id, before: pick(image, Object.keys(data)), after: data });
     return withImages(tx, actor.orgId, stock);
   });

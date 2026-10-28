@@ -81,7 +81,10 @@ export async function updateMe(customer: { id: string; orgId: string }, rawBody:
 
     // Only the keys the client sent (zod leaves the others out), never an explicit undefined.
     const data = Object.fromEntries(Object.entries(changes).filter(([, value]) => value !== undefined));
-    const row = await tx.user.update({ where: { id: customer.id }, data, select: meSelect });
+    const written = await tx.user.updateMany({ where: { id: customer.id, org_id: customer.orgId, userType: "CUSTOMER" }, data });
+    if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Account not found.");
+    const row = await tx.user.findFirst({ where: { id: customer.id, org_id: customer.orgId, userType: "CUSTOMER" }, select: meSelect });
+    if (!row) throw new ServiceError("NOT_FOUND", "Account not found.");
     // Field names only: the log is read by staff and holds no personal values.
     await activityLog.record(tx, {
       orgId: customer.orgId,

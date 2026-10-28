@@ -247,7 +247,11 @@ export async function setAuctionSheet(
   assertNewFileUrl(actor.orgId, vehicleId, "AUCTION_SHEET", url);
 
   const result = await getPrisma().$transaction(async (tx) => {
-    const updated = await tx.vehicle.update({ where: { id: vehicleId }, data: { auctionSheetUrl: url } });
+    // The write carries org_id itself (not only getOwnedVehicle above).
+    const written = await tx.vehicle.updateMany({ where: { id: vehicleId, org_id: actor.orgId }, data: { auctionSheetUrl: url } });
+    if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
+    const updated = await tx.vehicle.findFirst({ where: { id: vehicleId, org_id: actor.orgId } });
+    if (!updated) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
     await activityLog.record(tx, {
       orgId: actor.orgId,
       actorId: actor.id,
@@ -336,7 +340,9 @@ export async function deleteVehiclePhoto(actor: SessionUser, vehicleId: string, 
   }
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.vehiclePhoto.delete({ where: { id: photoId } });
+    // Photos have no org column: the write is scoped through the vehicle, which carries org_id.
+    const removed = await tx.vehiclePhoto.deleteMany({ where: { id: photoId, vehicleId, vehicle: { org_id: actor.orgId } } });
+    if (removed.count !== 1) throw new ServiceError("NOT_FOUND", "Photo not found.");
     await activityLog.record(tx, {
       orgId: actor.orgId,
       actorId: actor.id,
@@ -409,7 +415,8 @@ export async function deleteVehicleDocument(actor: SessionUser, vehicleId: strin
   }
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.vehicleDocument.delete({ where: { id: documentId } });
+    const removed = await tx.vehicleDocument.deleteMany({ where: { id: documentId, vehicleId, vehicle: { org_id: actor.orgId } } });
+    if (removed.count !== 1) throw new ServiceError("NOT_FOUND", "Document not found.");
     await activityLog.record(tx, {
       orgId: actor.orgId,
       actorId: actor.id,

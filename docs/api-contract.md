@@ -27,7 +27,7 @@ Error: `{ "error": { "code": "...", "message": "...", "fieldErrors": { "field": 
 - Dates are ISO 8601 strings. Decimals are plain numbers.
 - A resource in another org returns 404, never 403.
 - `orgId` always comes from the verified token. Any `orgId` in a request is ignored.
-- Auth: `Authorization: Bearer <accessToken>` (HS256 JWT, 20 minutes).
+- Auth: `Authorization: Bearer <accessToken>` (HS256 JWT, 20 minutes). The token proves who signed in; it does not decide what they may do. On every staff request the API reads the user from the database (through a short in-process cache, `STAFF_AUTH_CACHE_SECONDS`, default 30): a user who is deactivated, removed or not staff of the token's org gets `401 UNAUTHENTICATED`, and the role used for the route's role list is the DATABASE role, not the token's `role` claim. A role change or deactivation made through this API applies on the next request. An open notification stream is re-checked every 60 seconds and ends with `event: closed` (`reason: unauthorized`) when the user is no longer allowed.
 - Roles: `ADMINISTRATOR | MANAGER | OPERATOR | VIEWER`.
 - Create endpoints return 201. Malformed JSON returns 400 `VALIDATION`.
 - New passwords are 12 to 72 bytes (bcrypt ignores anything longer). Login accepts any length so older passwords keep working.
@@ -53,9 +53,9 @@ Logout is idempotent. If `expoPushToken` is sent, that device token is removed, 
 
 | Method | Path | Roles | Status |
 |---|---|---|---|
-| GET | /api/v1/customers?q= | any staff | done |
-| GET | /api/v1/customers/search?q= | any staff | done |
-| GET | /api/v1/customers/:id | any staff | done |
+| GET | /api/v1/customers?q= | any staff | done. **VIEWER gets rows without `email`, `phone` and `address` (the keys are absent) and `q` matches the name only**; every other role gets the full row and may search by email and phone |
+| GET | /api/v1/customers/search?q= | any staff | done. `{ id, name }` only, for every role |
+| GET | /api/v1/customers/:id | any staff | done. `{ id, name }` only, for every role |
 | POST | /api/v1/customers | ADMINISTRATOR, MANAGER | done |
 | PATCH | /api/v1/customers/:id | ADMINISTRATOR, MANAGER | done |
 
@@ -78,7 +78,7 @@ Logout is idempotent. If `expoPushToken` is sent, that device token is removed, 
 |---|---|---|---|
 | GET | /api/v1/dashboard/stats | any staff | done |
 | GET | /api/v1/dashboard/trends | any staff | done |
-| GET | /api/v1/reports/by-customer?track=FC\|FL | any staff | done |
+| GET | /api/v1/reports/by-customer?track=FC\|FL | any staff | done. Each customer group carries `email` and `phone`, **except for a VIEWER (the keys are absent)** |
 | GET | /api/v1/reports/by-auction-hall?track=FC\|FL | any staff | done |
 | GET | /api/v1/reports/by-destination?track=FC\|FL | any staff | done |
 | GET | /api/v1/reports/by-freight-agent | any staff | done |

@@ -11,3 +11,7 @@ delete process.env["EMAIL_FROM"];
 process.env["CUSTOMER_JWT_SECRET"] = "test-only-customer-value-0123456789abcdef";
 process.env["OTP_PEPPER"] = "test-only-otp-pepper-value-0123456789abcdef";
 process.env["PUBLIC_STOCK_IMAGE_BASE_URL"] = "https://img.example.test";
+// Most unit tests mint staff tokens for users that exist only in the token. They take the token's claims; the tests that prove the
+// database check (staff-auth-freshness, route inventory, tests/db) switch this off. The seam works only when NODE_ENV is "test".
+import { setTrustTokenClaimsForTests } from "../src/lib/staff-auth-seam.js";
+setTrustTokenClaimsForTests(true);

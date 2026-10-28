@@ -483,8 +483,8 @@ interface RenameSpec<Row extends { org_id: string }, T extends { id: string }> {
   before?: (current: Row) => unknown;
 }
 
-/** `update({ where: { id } })` alone cannot filter by org_id (id is already the
- * unique key), so ownership is verified explicitly before anything is written. */
+/** Ownership is verified before anything is written, AND each update's own where carries org_id (extended unique where), so a
+ * row of another org can never be changed even if the read above were wrong. */
 async function renameRow<Row extends { org_id: string; name: string }, T extends { id: string }>(
   spec: RenameSpec<Row, T>
 ): Promise<T> {
@@ -494,19 +494,25 @@ async function renameRow<Row extends { org_id: string; name: string }, T extends
     throw new ServiceError("CONFLICT", spec.conflictMessage);
   }
 
-  return getPrisma().$transaction(async (tx) => {
-    const updated = await spec.update(tx);
-    await activityLog.record(tx, {
-      orgId: spec.actor.orgId,
-      actorId: spec.actor.id,
-      action: `RENAME_${snakeCase(spec.entity)}`,
-      entity: spec.entity,
-      entityId: updated.id,
-      before: spec.before ? spec.before(current) : { name: current.name },
-      after: snapshot(updated),
+  try {
+    return await getPrisma().$transaction(async (tx) => {
+      const updated = await spec.update(tx);
+      await activityLog.record(tx, {
+        orgId: spec.actor.orgId,
+        actorId: spec.actor.id,
+        action: `RENAME_${snakeCase(spec.entity)}`,
+        entity: spec.entity,
+        entityId: updated.id,
+        before: spec.before ? spec.before(current) : { name: current.name },
+        after: snapshot(updated),
+      });
+      return updated;
     });
-    return updated;
-  });
+  } catch (error) {
+    // The update's own where carries org_id: no row of THIS org matched, so nothing was written.
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") throw new ServiceError("NOT_FOUND", spec.notFoundMessage);
+    throw error;
+  }
 }
 
 // ── Brand ──
@@ -538,7 +544,7 @@ export async function renameBrand(actor: SessionUser, id: string, newName: strin
         where: { org_id: actor.orgId, name: { equals: trimmed, mode: "insensitive" }, id: { not: id } },
         select: { id: true },
       })) !== null,
-    update: (db) => db.brand.update({ where: { id }, data: { name: trimmed }, select: LOOKUP_SELECT }),
+    update: (db) => db.brand.update({ where: { id, org_id: actor.orgId }, data: { name: trimmed }, select: LOOKUP_SELECT }),
   });
 }
 
@@ -571,7 +577,7 @@ export async function renameAuctionHall(actor: SessionUser, id: string, newName:
         where: { org_id: actor.orgId, name: { equals: trimmed, mode: "insensitive" }, id: { not: id } },
         select: { id: true },
       })) !== null,
-    update: (db) => db.auctionHall.update({ where: { id }, data: { name: trimmed }, select: LOOKUP_SELECT }),
+    update: (db) => db.auctionHall.update({ where: { id, org_id: actor.orgId }, data: { name: trimmed }, select: LOOKUP_SELECT }),
   });
 }
 
@@ -604,7 +610,7 @@ export async function renameSupplier(actor: SessionUser, id: string, newName: st
         where: { org_id: actor.orgId, name: { equals: trimmed, mode: "insensitive" }, id: { not: id } },
         select: { id: true },
       })) !== null,
-    update: (db) => db.supplier.update({ where: { id }, data: { name: trimmed }, select: LOOKUP_SELECT }),
+    update: (db) => db.supplier.update({ where: { id, org_id: actor.orgId }, data: { name: trimmed }, select: LOOKUP_SELECT }),
   });
 }
 
@@ -637,7 +643,7 @@ export async function renameTransportCompany(actor: SessionUser, id: string, new
         where: { org_id: actor.orgId, name: { equals: trimmed, mode: "insensitive" }, id: { not: id } },
         select: { id: true },
       })) !== null,
-    update: (db) => db.transportCompany.update({ where: { id }, data: { name: trimmed }, select: LOOKUP_SELECT }),
+    update: (db) => db.transportCompany.update({ where: { id, org_id: actor.orgId }, data: { name: trimmed }, select: LOOKUP_SELECT }),
   });
 }
 
@@ -670,7 +676,7 @@ export async function renameInspectionCompany(actor: SessionUser, id: string, ne
         where: { org_id: actor.orgId, name: { equals: trimmed, mode: "insensitive" }, id: { not: id } },
         select: { id: true },
       })) !== null,
-    update: (db) => db.inspectionCompany.update({ where: { id }, data: { name: trimmed }, select: LOOKUP_SELECT }),
+    update: (db) => db.inspectionCompany.update({ where: { id, org_id: actor.orgId }, data: { name: trimmed }, select: LOOKUP_SELECT }),
   });
 }
 
@@ -703,7 +709,7 @@ export async function renameInspectionBy(actor: SessionUser, id: string, newName
         where: { org_id: actor.orgId, name: { equals: trimmed, mode: "insensitive" }, id: { not: id } },
         select: { id: true },
       })) !== null,
-    update: (db) => db.inspectionBy.update({ where: { id }, data: { name: trimmed }, select: LOOKUP_SELECT }),
+    update: (db) => db.inspectionBy.update({ where: { id, org_id: actor.orgId }, data: { name: trimmed }, select: LOOKUP_SELECT }),
   });
 }
 
@@ -736,7 +742,7 @@ export async function renamePackingAgent(actor: SessionUser, id: string, newName
         where: { org_id: actor.orgId, name: { equals: trimmed, mode: "insensitive" }, id: { not: id } },
         select: { id: true },
       })) !== null,
-    update: (db) => db.packingAgent.update({ where: { id }, data: { name: trimmed }, select: LOOKUP_SELECT }),
+    update: (db) => db.packingAgent.update({ where: { id, org_id: actor.orgId }, data: { name: trimmed }, select: LOOKUP_SELECT }),
   });
 }
 
@@ -769,7 +775,7 @@ export async function renameVehicleLocation(actor: SessionUser, id: string, newN
         where: { org_id: actor.orgId, name: { equals: trimmed, mode: "insensitive" }, id: { not: id } },
         select: { id: true },
       })) !== null,
-    update: (db) => db.vehicleLocation.update({ where: { id }, data: { name: trimmed }, select: LOOKUP_SELECT }),
+    update: (db) => db.vehicleLocation.update({ where: { id, org_id: actor.orgId }, data: { name: trimmed }, select: LOOKUP_SELECT }),
   });
 }
 
@@ -812,7 +818,7 @@ export async function renameModel(actor: SessionUser, id: string, newName: strin
         },
         select: { id: true },
       })) !== null,
-    update: (db) => db.vehicleModelRef.update({ where: { id }, data: { name: trimmed }, select: LOOKUP_SELECT }),
+    update: (db) => db.vehicleModelRef.update({ where: { id, org_id: actor.orgId }, data: { name: trimmed }, select: LOOKUP_SELECT }),
   });
 }
 
@@ -857,7 +863,7 @@ export async function renameGrade(actor: SessionUser, id: string, newName: strin
         },
         select: { id: true },
       })) !== null,
-    update: (db) => db.grade.update({ where: { id }, data: { name: trimmed }, select: LOOKUP_SELECT }),
+    update: (db) => db.grade.update({ where: { id, org_id: actor.orgId }, data: { name: trimmed }, select: LOOKUP_SELECT }),
   });
 }
 
@@ -913,7 +919,7 @@ export async function updateFreightAgent(
       })) !== null,
     update: (db) =>
       db.freightAgent.update({
-        where: { id },
+        where: { id, org_id: actor.orgId },
         data: { name: trimmed, offersRoro, offersContainer },
         select: FREIGHT_AGENT_SELECT,
       }),

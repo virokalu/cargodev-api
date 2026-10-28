@@ -73,6 +73,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { method: "GET", path: "/api/customer/v1/conversations/:id/messages", kind: "customer" },
   { method: "POST", path: "/api/customer/v1/conversations/:id/messages", kind: "customer" },
   // STAFF (/api/v1): a staff token, roles from each route's authenticate() list
+  // Contact details (email, phone, address) are left out for a VIEWER: in the list, in its search, and in the by-customer report
+  // (tests/viewer-privacy.test.ts). Search and detail carry only { id, name } for every role.
   { method: "GET", path: "/api/v1/customers", kind: "staff", roles: ANY },
   { method: "GET", path: "/api/v1/customers/search", kind: "staff", roles: ANY },
   { method: "GET", path: "/api/v1/customers/:id", kind: "staff", roles: ANY },

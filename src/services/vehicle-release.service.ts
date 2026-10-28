@@ -74,11 +74,11 @@ export async function setVehicleCustomerInfo(actor: SessionUser, vehicleId: stri
   const data = Object.fromEntries(Object.entries(changes).filter(([, value]) => value !== undefined));
 
   return getPrisma().$transaction(async (tx) => {
-    const updated = await tx.vehicle.update({
-      where: { id: vehicle.id },
-      data,
-      select: { portOfLoading: true, portOfDischarge: true, voyageNo: true },
-    });
+    // The write carries org_id itself (not only getOwnedVehicle above).
+    const written = await tx.vehicle.updateMany({ where: { id: vehicle.id, org_id: actor.orgId }, data });
+    if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
+    const updated = await tx.vehicle.findFirst({ where: { id: vehicle.id, org_id: actor.orgId }, select: { portOfLoading: true, portOfDischarge: true, voyageNo: true } });
+    if (!updated) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
     const dto: CustomerInfo = {
       portOfLoading: updated.portOfLoading,
       portOfDischarge: updated.portOfDischarge,
@@ -119,14 +119,17 @@ export async function setDocumentRelease(
     const document = await tx.vehicleDocument.findFirst({ where: { id: documentId, vehicleId: vehicle.id }, select: { id: true, documentType: true, visibleToCustomer: true } });
     if (!document) throw documentNotFound();
 
-    const updated = await tx.vehicleDocument.update({
-      where: { id: document.id },
+    // Documents have no org column: the write is scoped through the vehicle, which carries org_id.
+    const written = await tx.vehicleDocument.updateMany({
+      where: { id: document.id, vehicleId: vehicle.id, vehicle: { org_id: actor.orgId } },
       data: {
         ...(changes.documentType !== undefined ? { documentType: changes.documentType } : {}),
         ...(changes.visibleToCustomer !== undefined ? { visibleToCustomer: changes.visibleToCustomer } : {}),
       },
-      select: { id: true, documentType: true, visibleToCustomer: true },
     });
+    if (written.count !== 1) throw documentNotFound();
+    const updated = await tx.vehicleDocument.findFirst({ where: { id: document.id, vehicleId: vehicle.id, vehicle: { org_id: actor.orgId } }, select: { id: true, documentType: true, visibleToCustomer: true } });
+    if (!updated) throw documentNotFound();
     await activityLog.record(tx, {
       orgId: actor.orgId,
       actorId: actor.id,
@@ -162,7 +165,8 @@ export async function setPhotoRelease(actor: SessionUser, vehicleId: string, pho
   const result = await getPrisma().$transaction(async (tx) => {
     const photo = await tx.vehiclePhoto.findFirst({ where: { id: photoId, vehicleId: vehicle.id }, select: { id: true, visibleToCustomer: true } });
     if (!photo) throw photoNotFound();
-    await tx.vehiclePhoto.update({ where: { id: photo.id }, data: { visibleToCustomer } });
+    const written = await tx.vehiclePhoto.updateMany({ where: { id: photo.id, vehicleId: vehicle.id, vehicle: { org_id: actor.orgId } }, data: { visibleToCustomer } });
+    if (written.count !== 1) throw photoNotFound();
     await activityLog.record(tx, {
       orgId: actor.orgId,
       actorId: actor.id,
@@ -202,7 +206,8 @@ export async function setPhotosRelease(actor: SessionUser, vehicleId: string, ra
     const found = await tx.vehiclePhoto.findMany({ where: { vehicleId: vehicle.id, id: { in: ids } }, select: { id: true, visibleToCustomer: true } });
     if (found.length !== ids.length) throw photoNotFound();
 
-    const result = await tx.vehiclePhoto.updateMany({ where: { vehicleId: vehicle.id, id: { in: ids } }, data: { visibleToCustomer } });
+    const result = await tx.vehiclePhoto.updateMany({ where: { vehicleId: vehicle.id, vehicle: { org_id: actor.orgId }, id: { in: ids } }, data: { visibleToCustomer } });
+    if (result.count !== ids.length) throw photoNotFound();
     await activityLog.record(tx, {
       orgId: actor.orgId,
       actorId: actor.id,

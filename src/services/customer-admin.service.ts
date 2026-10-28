@@ -29,7 +29,8 @@ export async function setCustomerLoginAccess(actor: SessionUser, customerId: str
       throw new ServiceError("VALIDATION", message, { loginEnabled: message });
     }
 
-    await tx.user.update({ where: { id: customer.id }, data: { loginEnabled } });
+    const written = await tx.user.updateMany({ where: { id: customer.id, org_id: actor.orgId, userType: "CUSTOMER" }, data: { loginEnabled } });
+    if (written.count !== 1) throw NOT_FOUND();
     if (!loginEnabled) {
       // Switching sign-in off ends every session at once and stops push notifications to their phones.
       await revokeAllCustomerSessions(tx, actor.orgId, customer.id);
@@ -65,7 +66,8 @@ export async function setCustomerAgent(actor: SessionUser, customerId: string, r
       if (!agent) throw new ServiceError("VALIDATION", "Select an active staff member.", { agentId: "Select an active staff member." });
     }
 
-    await tx.user.update({ where: { id: customer.id }, data: { assignedAgentId: agentId } });
+    const written = await tx.user.updateMany({ where: { id: customer.id, org_id: actor.orgId, userType: "CUSTOMER" }, data: { assignedAgentId: agentId } });
+    if (written.count !== 1) throw NOT_FOUND();
     await activityLog.record(tx, {
       orgId: actor.orgId,
       actorId: actor.id,

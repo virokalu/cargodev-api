@@ -50,15 +50,15 @@ describe("searchCustomers / listCustomers", () => {
     expect(await searchCustomers(ORG_A, "beta")).toEqual([]);
   });
   it("list returns only this org's customers, ordered by name", async () => {
-    const rows = await listCustomers(ORG_A);
+    const rows = await listCustomers(ORG_A, undefined, true);
     expect(rows.map((r) => r.name)).toEqual(["Alpha Buyer", "Another Buyer"]);
   });
   it("list filters by query across name and email", async () => {
-    const rows = await listCustomers(ORG_A, "x@example");
+    const rows = await listCustomers(ORG_A, "x@example", true);
     expect(rows.map((r) => r.id)).toEqual(["cust_a2"]);
   });
   it("includes org_id in every query", async () => {
-    await listCustomers(ORG_A);
+    await listCustomers(ORG_A, undefined, true);
     await searchCustomers(ORG_A, "a");
     expect(fake.calls.filter((c) => c.model === "user").every((c) => mentionsOrg(c.args, ORG_A))).toBe(true);
   });

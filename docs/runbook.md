@@ -4,6 +4,8 @@ Procedures only. Live hostnames, dashboard links and contacts are kept privately
 
 ## Before go-live: decide where the client address comes from
 
+The daily job also runs retention (docs/architecture.md), **in dry run until you set `RETENTION_DRY_RUN=false`**: first read the daily `retention DRY RUN … would remove: …` line in the log for a few days, and only when the counts are what you expect switch it on. Rollback is setting it back to `true` (data already removed stays removed). To see what it removed, look for `RETENTION_CLEANUP` rows in the activity log (counts only); a run that removed nothing writes no row. To keep data longer or shorter, change `RETENTION_*_DAYS` / `UNVERIFIED_ACCOUNT_DAYS` and restart; the next daily run applies the new value. An org with no administrator account is skipped (`retentionSkippedOrgs` in the job result).
+
 Rate limiting and the audit trail use the client IP, chosen by `CLIENT_IP_SOURCE` (`hops`, `header` or `socket`; REQUIRED in production, docs/deployment.md; in socket mode a masked warning appears in the log if forwarding headers are seen). Behind a load balancer `socket` makes every request look like it comes from the balancer and share one rate-limit bucket, so decide the mode and run the self-test below before go-live. The notes under "set the proxy hop count" still apply to `hops`.
 
 ## Before go-live: set the proxy hop count

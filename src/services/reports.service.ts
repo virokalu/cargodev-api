@@ -51,8 +51,9 @@ interface ReportGroupStats {
 export interface CustomerReportGroup extends ReportGroupStats {
   customerId: string;
   customerName: string;
-  email: string | null;
-  phone: string | null;
+  /** Absent (the key is not there) for a role that may not see contact details. */
+  email?: string | null;
+  phone?: string | null;
   country: string | null;
 }
 
@@ -174,7 +175,8 @@ function trackWhere(track: ReportTrack): Prisma.VehicleWhereInput {
 
 export async function getCustomerVehicleReport(
   orgId: string,
-  track: ReportTrack
+  track: ReportTrack,
+  contact = false
 ): Promise<CustomerVehicleReportData> {
   const vehicles = await getPrisma().vehicle.findMany({
     where: { org_id: orgId, deletedAt: null, ...trackWhere(track), customerId: { not: null } },
@@ -193,8 +195,7 @@ export async function getCustomerVehicleReport(
       group = {
         customerId: v.customer.id,
         customerName: v.customer.name,
-        email: v.customer.email,
-        phone: v.customer.phone,
+        ...(contact ? { email: v.customer.email, phone: v.customer.phone } : {}),
         country: v.customer.country,
         vehicles: [],
         statusCounts: emptyStatusCounts(),

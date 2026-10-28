@@ -67,6 +67,22 @@ const baseSchema = z.object({
   ARRIVAL_REMINDER_DAYS: z.coerce.number().int().min(1).max(365).default(45),
   // How long a link the API gives STAFF for viewing a stored file stays valid, in seconds (60 to 900, default 600). The
   // links are signed, point at the storage API (not a public address) and are never stored: a client asks again.
+  // Retention (the daily job). Days after which expired one-time codes, expired or revoked sessions (customer and staff), READ
+  // customer alerts, and never-verified self-registered customers (with nothing linked to them) are removed. Chats and
+  // enquiries are not touched: their retention is an open business question (docs/privacy-checklist.md).
+  // Dry run is the DEFAULT, in every environment: the job only counts what it WOULD remove and logs the counts. Set this to
+  // false, on purpose, to let it delete. Must be exactly "true" or "false".
+  RETENTION_DRY_RUN: z
+    .enum(["true", "false"], { error: "RETENTION_DRY_RUN must be true or false" })
+    .default("true")
+    .transform((value) => value === "true"),
+  RETENTION_OTP_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
+  RETENTION_SESSION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
+  RETENTION_ALERT_DAYS: z.coerce.number().int().min(1).max(3650).default(180),
+  UNVERIFIED_ACCOUNT_DAYS: z.coerce.number().int().min(1).max(3650).default(14),
+  // How long (seconds) the API remembers that a staff user is still active and which role they hold, before it reads the
+  // database again. Changes made in this process apply at once; another instance sees them within this time. 0 turns it off.
+  STAFF_AUTH_CACHE_SECONDS: z.coerce.number().int().min(0).max(300).default(30),
   STAFF_SIGNED_URL_TTL_SECONDS: z.coerce.number().int().min(60).max(900).default(600),
   // The oldest customer app build the API still serves (GET /api/customer/v1/app/min-version). Raise it to force an update.
   APP_MIN_VERSION: z.string().regex(/^\d+\.\d+\.\d+$/, "APP_MIN_VERSION must look like 1.2.3").default("1.0.0"),

@@ -65,6 +65,8 @@ export interface BuildAppOptions {
   clientIp?: { source: "socket" | "hops" | "header"; header?: string };
   /** Receives the masked warning when the client address header is missing or invalid (tests). */
   onClientIpWarning?: (message: string) => void;
+  /** Tests only: how often an open staff stream re-checks its user against the database (default 60 000 ms). */
+  sseRecheckMs?: number;
   /** Overrides PUBLIC_STOCK_ENABLED (the public website API and the staff stock tools). */
   publicStockEnabled?: boolean;
   /** Overrides PUBLIC_ALLOWED_ORIGINS. */
@@ -240,7 +242,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       registerReportRoutes(api);
       registerActivityLogRoutes(api);
       registerLookupRoutes(api);
-      registerNotificationRoutes(api, { sseHub });
+      registerNotificationRoutes(api, { sseHub, ...(options.sseRecheckMs !== undefined ? { recheckMs: options.sseRecheckMs } : {}) });
       registerAdminJobRoutes(api, { scheduler });
       registerVehicleRoutes(api);
       registerMilestoneRoutes(api);

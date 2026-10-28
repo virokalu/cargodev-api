@@ -9,7 +9,15 @@
 // uses NOT around relation filters, where Postgres agrees with plain negation (checked in
 // tests/db/null-semantics.db.test.ts). Do not rely on the fake for NOT over nullable scalars.
 
+import { readFileSync } from "node:fs";
+import { Prisma } from "@prisma/client";
+
 type Row = Record<string, unknown>;
+
+/** What Prisma throws when update/delete match no row (including a row of another org, when org_id is in the where). */
+function recordNotFound(operation: string, model: string): Error {
+  return new Prisma.PrismaClientKnownRequestError(`Record to ${operation} not found (${model}).`, { code: "P2025", clientVersion: "fake" });
+}
 type Where = Record<string, unknown>;
 
 const OPERATORS = new Set([
@@ -30,6 +38,42 @@ interface MatchContext {
   model: string;
   relations: Record<string, Record<string, Relation>>;
   lookup: (model: string, id: unknown) => Row | undefined;
+}
+
+/**
+ * Defence in depth, enforced for EVERY unit test: a write (update, updateMany, delete, deleteMany, upsert) on a table that has an
+ * org_id column must carry org_id in its OWN where clause, not only in the read before it. Photos and documents have no org column,
+ * so their writes must be scoped through the vehicle (`vehicle: { org_id }`). The two credential lookups keyed by a secret the
+ * caller must already hold (a refresh-token hash, an Expo push token) are the only exceptions. A write that breaks this throws,
+ * so removing an org_id from a service fails the tests that run it. Which tables have org_id is read from the Prisma schema.
+ */
+const ORG_MODELS: Set<string> = (() => {
+  const schema = readFileSync(new URL("../../prisma/schema.prisma", import.meta.url), "utf8");
+  const out = new Set<string>();
+  for (const m of schema.matchAll(/^model (\w+) \{([\s\S]*?)^\}/gm)) {
+    if (/^\s*org_id\s/m.test(m[2] ?? "")) out.add(m[1]!.charAt(0).toLowerCase() + m[1]!.slice(1));
+  }
+  return out;
+})();
+const VEHICLE_SCOPED_MODELS = new Set(["vehiclePhoto", "vehicleDocument"]);
+const CREDENTIAL_KEYS = ["tokenHash", "expoPushToken"];
+
+function carriesOrgScope(model: string, where: unknown): boolean {
+  if (!isPlainObject(where)) return false;
+  for (const [key, value] of Object.entries(where)) {
+    if (key === "org_id" || key.startsWith("org_id_")) return true;
+    if (key === "vehicle" && VEHICLE_SCOPED_MODELS.has(model) && isPlainObject(value) && "org_id" in value) return true;
+    if (key === "AND" && (Array.isArray(value) ? value : [value]).some((w) => carriesOrgScope(model, w))) return true;
+  }
+  return false;
+}
+
+function assertOrgScopedWrite(model: string, method: string, where: unknown): void {
+  if (!ORG_MODELS.has(model) && !VEHICLE_SCOPED_MODELS.has(model)) return;
+  if (isPlainObject(where) && CREDENTIAL_KEYS.some((k) => k in where)) return;
+  if (!carriesOrgScope(model, where)) {
+    throw new Error(`fake-prisma: ${model}.${method} has no org_id in its own where clause (defence in depth): ${JSON.stringify(where)}`);
+  }
 }
 
 export interface FakePrismaOptions {
@@ -337,6 +381,7 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
       },
       async upsert(args: { where: Where; create: Row; update: Row; select?: Row }) {
         rec("upsert", args);
+        assertOrgScopedWrite(model, "upsert", args.where);
         const row = find(args)[0];
         if (row) {
           Object.assign(row, args.update);
@@ -348,28 +393,32 @@ export function createFakePrisma(options: FakePrismaOptions = {}) {
       },
       async update(args: { where: Where; data: Row; select?: Row }) {
         rec("update", args);
+        assertOrgScopedWrite(model, "update", args.where);
         const row = find(args)[0];
-        if (!row) throw new Error(`Record to update not found (${model}).`);
+        if (!row) throw recordNotFound("update", model);
         applyData(row, args.data);
         return project(model, row, args.select);
       },
       async updateMany(args: { where?: Where; data: Row }) {
         rec("updateMany", args);
+        assertOrgScopedWrite(model, "updateMany", args.where);
         const rows = find(args);
         for (const r of rows) applyData(r, args.data);
         return { count: rows.length };
       },
       async delete(args: { where: Where }) {
         rec("delete", args);
+        assertOrgScopedWrite(model, "delete", args.where);
         const t = table(model);
-        const i = t.findIndex((r) => matches(r, args.where));
-        if (i < 0) throw new Error(`Record to delete not found (${model}).`);
+        const i = t.findIndex((r) => matches(r, args.where, ctxFor(model)));
+        if (i < 0) throw recordNotFound("delete", model);
         return t.splice(i, 1)[0];
       },
       async deleteMany(args?: { where?: Where }) {
         rec("deleteMany", args);
+        assertOrgScopedWrite(model, "deleteMany", args?.where);
         const t = table(model);
-        const keep = t.filter((r) => !matches(r, args?.where));
+        const keep = t.filter((r) => !matches(r, args?.where, ctxFor(model)));
         const count = t.length - keep.length;
         tables.set(model, keep);
         return { count };

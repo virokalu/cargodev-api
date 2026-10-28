@@ -42,7 +42,7 @@ const INVALID = "Please fix the highlighted fields.";
  * the object must really exist within the size limit, and the value that gets stored is built here from the key.
  */
 async function storedUrlForNewFile(orgId: string, vehicleId: string, kind: FileKind, key: string): Promise<string> {
-  const message = checkNewFileKey(orgId, key, kind, vehicleId) ?? (await verifyUploadedObject(key, kind));
+  const message = await verifyUploadedObject(key, kind);
   const url = storedUrlForKey(key);
   if (message || !url) throw new ServiceError("VALIDATION", message ?? "File storage is not configured.", { key: message ?? "File storage is not configured." });
   return url;

@@ -137,7 +137,38 @@ describe("every COPY source must be in the commit", () => {
   });
 });
 
+describe("only the names count, and only in the commit", () => {
+  it("a file that merely ends with a source's name does not count, nor does the same name in another folder", () => {
+    const files = { ...without("tsconfig.json", "package-lock.json"), "old-tsconfig.json": "{}", "docs/package-lock.json": "{}", "xpackage-lock.json": "{}" };
+    const { code, out } = check(repo(files));
+    expect(code).toBe(1);
+    expect(out).toContain("tsconfig.json: no file");
+    expect(out).toContain("package-lock.json: no file");
+  });
+
+  it("the Dockerfile is read AS COMMITTED: a COPY that exists only in the committed file is checked even if the file on disk was edited", () => {
+    const dir = repo({ ...COMPLETE, Dockerfile: `${DOCKERFILE}COPY extra.txt ./\n` });
+    writeFileSync(path.join(dir, "Dockerfile"), DOCKERFILE); // edited on disk after the commit
+    const { code, out } = check(dir);
+    expect(code).toBe(1);
+    expect(out).toContain("extra.txt: no file");
+  });
+
+  it("and a COPY added to the Dockerfile on disk but not committed is not held against the commit", () => {
+    const dir = repo(COMPLETE);
+    writeFileSync(path.join(dir, "Dockerfile"), `${DOCKERFILE}COPY extra.txt ./\n`);
+    expect(check(dir).code).toBe(0);
+  });
+});
+
 describe(".dockerignore must not leave out what the build copies", () => {
+  it("a root-level pattern (*.ts) does not reach into a folder: * does not cross a slash, as in Docker", () => {
+    const files = { ...without("src/server.ts"), "src/deep/only.ts": "export {};", ".dockerignore": `${DOCKERIGNORE}*.ts\n` };
+    expect(check(repo(files)).code).toBe(0);
+    // ...but ** does
+    expect(check(repo({ ...files, ".dockerignore": `${DOCKERIGNORE}**/*.ts\n` })).code).toBe(1);
+  });
+
   it("fails for every way of excluding a source outright (plain name, leading slash and trailing slash, exact file)", () => {
     const { code, out } = check(repo({ ...COMPLETE, ".dockerignore": `${DOCKERIGNORE}prisma\n/src/\ntsconfig.build.json\n` }));
     expect(code).toBe(1);

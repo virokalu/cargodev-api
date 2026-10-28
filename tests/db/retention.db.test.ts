@@ -231,7 +231,7 @@ describe("batches, idempotence and the summary row", () => {
     const rows = await summaryRows();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ actorId: "admin_a", entity: "Retention", entityId: ORG_A });
-    expect(rows[0]?.after).toEqual({ otpCodes: 2, customerSessions: 1, refreshTokens: 0, readAlerts: 0, unverifiedAccounts: 0, automated: true });
+    expect(rows[0]?.after).toEqual({ otpCodes: 2, customerSessions: 1, refreshTokens: 0, readAlerts: 0, unverifiedAccounts: 0, system: true, job: "retention" });
     expect(JSON.stringify(rows[0])).not.toMatch(/example\.test|cust_a|Buyer/);
   });
 

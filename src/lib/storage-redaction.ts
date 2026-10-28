@@ -56,7 +56,12 @@ function isStorageAddress(address: string, r: Rules): boolean {
 }
 
 function redactText(text: string, r: Rules): string {
-  let out = text.replace(ADDRESS, (address) => (isStorageAddress(address, r) ? ADDRESS_REMOVED : address));
+  // Punctuation that ends a sentence is not part of the address: it is kept.
+  let out = text.replace(ADDRESS, (address) => {
+    const trailing = /[.,;:!?]+$/.exec(address)?.[0] ?? "";
+    const core = trailing ? address.slice(0, -trailing.length) : address;
+    return isStorageAddress(core, r) ? ADDRESS_REMOVED + trailing : address;
+  });
   out = out.replace(OBJECT_KEY, KEY_REMOVED);
   if (r.names) out = out.replace(r.names, NAME_REMOVED);
   return out;

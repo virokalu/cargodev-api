@@ -3,7 +3,7 @@
 // The store here only signs and records; no real bucket is ever contacted. Fake data only.
 
 import { readFileSync } from "node:fs";
-import { Writable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FakePrisma } from "./helpers/fake-prisma.js";
@@ -37,6 +37,7 @@ const signedLinkFor = (key: string, ttl: number) =>
   `https://acct.r2.example.test/bucket/${key}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=${SECRET_PARTS.credential}&X-Amz-Expires=${ttl}&X-Amz-Security-Token=${SECRET_PARTS.session}&X-Amz-Signature=${SECRET_PARTS.signature}`;
 let presignGetFails = false;
 let deleteFails = false;
+const uploadedKeys = new Set<string>();
 const store: ObjectStore = {
   presignGet: async (args) => {
     signed.push(args);
@@ -44,7 +45,9 @@ const store: ObjectStore = {
     return signedLinkFor(args.key, args.expiresInSeconds);
   },
   presignPut: async () => "https://upload.example.test/x",
-  getObject: async () => ({ kind: "missing" }),
+  // Registering a file checks that its object exists; only the keys listed here have been "uploaded".
+  getObject: async ({ key }) =>
+    uploadedKeys.has(key) ? { kind: "found", body: Readable.from([Buffer.from("x")]), contentLength: 10, etag: null } : { kind: "missing" },
   putObject: async () => undefined,
   deleteKey: async (key) => {
     if (deleteFails) throw new Error(`delete failed for ${signedLinkFor(key, 600)}`);
@@ -257,18 +260,19 @@ describe("responses that return a file after a change carry a signed link too", 
   it("adding a photo, a document, and setting the auction sheet return signed links and never the stored address", async () => {
     const headers = await staffHeaders("MANAGER");
     const photoKey = KEY("new.jpg");
-    const photo = await app.inject({ method: "POST", url: "/api/v1/vehicles/v_fc_pending/photos", headers, payload: { url: URL_OF(photoKey) } });
+    for (const key of [photoKey, KEY("new.pdf", "documents"), KEY("new-sheet.jpg", "auction-sheet")]) uploadedKeys.add(key);
+    const photo = await app.inject({ method: "POST", url: "/api/v1/vehicles/v_fc_pending/photos", headers, payload: { key: photoKey } });
     expect(photo.statusCode).toBe(201);
     expect(photo.json().data).toMatchObject({ url: signedLinkFor(photoKey, 600), expiresAt: expect.any(String) });
     expect(photo.body).not.toContain(BASE);
 
     const documentKey = KEY("new.pdf", "documents");
-    const doc = await app.inject({ method: "POST", url: "/api/v1/vehicles/v_fc_pending/documents", headers, payload: { url: URL_OF(documentKey), name: "new.pdf", documentType: "OTHER" } });
+    const doc = await app.inject({ method: "POST", url: "/api/v1/vehicles/v_fc_pending/documents", headers, payload: { key: documentKey, name: "new.pdf", documentType: "OTHER" } });
     expect(doc.statusCode).toBe(201);
     expect(doc.json().data.url).toBe(signedLinkFor(documentKey, 600));
 
     const sheetKey = KEY("new-sheet.jpg", "auction-sheet");
-    const sheet = await app.inject({ method: "PUT", url: "/api/v1/vehicles/v_fc_pending/auction-sheet", headers, payload: { url: URL_OF(sheetKey) } });
+    const sheet = await app.inject({ method: "PUT", url: "/api/v1/vehicles/v_fc_pending/auction-sheet", headers, payload: { key: sheetKey } });
     expect(sheet.json().data).toEqual({ auctionSheetUrl: signedLinkFor(sheetKey, 600), auctionSheetExpiresAt: expect.any(String) });
     expect(fake.rows("vehicle").find((v) => v["id"] === "v_fc_pending")!["auctionSheetUrl"]).toBe(URL_OF(sheetKey)); // stored form is unchanged
   });

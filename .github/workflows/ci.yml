@@ -30,6 +30,7 @@ jobs:
     env:
       # Dummy values only. Never put real secrets in CI for a public repo.
       NODE_ENV: test
+      APP_ENV: development
       PORT: "4000"
       DATABASE_URL: "postgresql://user:password@localhost:5432/ci_dummy"
       MOBILE_JWT_SECRET: "ci-dummy-value-not-for-real-use-0123456789"

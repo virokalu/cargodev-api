@@ -93,22 +93,37 @@ describe("createVehicle", () => {
     });
   });
 
-  describe("staged file URLs must be this org's uploads", () => {
+  describe("staged file KEYS must be this org's uploads", () => {
     it.each([
-      ["an internal address", { photoUrls: ["http://169.254.169.254/x.jpg"] }],
-      ["another org's staging area", { photoUrls: [`https://files.example.test/org/${ORG_B}/uploads/staging/a.jpg`] }],
-      ["an auction sheet elsewhere", { auctionSheetUrl: "https://evil.test/a.jpg" }],
-      ["a document elsewhere", { documents: [{ url: "https://evil.test/a.pdf", name: "n", documentType: "OTHER" }] }],
-    ])("rejects %s", async (_n, over) => {
-      await expect(createVehicle(actor(), { ...base, ...over })).rejects.toMatchObject({ code: "VALIDATION" });
+      ["an internal address", { photoKeys: ["http://169.254.169.254/x.jpg"] }, "photoKeys.0"],
+      ["another org's staging area", { photoKeys: [`org/${ORG_B}/uploads/staging/a.jpg`] }, "photoKeys.0"],
+      ["an auction sheet elsewhere", { auctionSheetKey: "evil/a.jpg" }, "auctionSheetKey"],
+      ["a document elsewhere", { documents: [{ key: "evil/a.pdf", name: "n", documentType: "OTHER" }] }, "documents.0.key"],
+      ["a whole address instead of a key", { photoKeys: ["https://files.example.test/org/org_test_a/uploads/staging/a.jpg"] }, "photoKeys.0"],
+      ["a pdf as a photo", { photoKeys: [`org/${ORG_A}/uploads/staging/a.pdf`] }, "photoKeys.0"],
+    ])("rejects %s", async (_n, over, field) => {
+      await expect(createVehicle(actor(), { ...base, ...over })).rejects.toMatchObject({ code: "VALIDATION", fieldErrors: { [field]: expect.any(String) } });
+      expect(fake.rows("vehiclePhoto")).toHaveLength(0);
+      expect(actions()).toEqual([]);
+    });
+
+    it("the old address fields are no longer accepted (unknown fields are ignored: nothing is attached)", async () => {
+      const stagingUrl = `https://files.example.test/org/${ORG_A}/uploads/staging/a.jpg`;
+      await createVehicle(actor(), { ...base, photoUrls: [stagingUrl], auctionSheetUrl: stagingUrl });
       expect(fake.rows("vehiclePhoto")).toHaveLength(0);
     });
 
-    it("accepts this org's staging uploads and attaches them with ActivityLog rows", async () => {
-      const url = `https://files.example.test/org/${ORG_A}/uploads/staging/a.jpg`;
-      await createVehicle(actor(), { ...base, photoUrls: [url] });
-      expect(fake.rows("vehiclePhoto")).toMatchObject([{ url }]);
+    it("accepts this org's staging uploads, builds the stored address from the key, and logs ids, kinds and names only", async () => {
+      const key = `org/${ORG_A}/uploads/staging/0f8fad5b-d9cb-469f-a165-70867728950e-front.jpg`;
+      const sheet = `org/${ORG_A}/uploads/staging/s.png`;
+      await createVehicle(actor(), { ...base, photoKeys: [key], auctionSheetKey: sheet });
+      expect(fake.rows("vehiclePhoto")).toMatchObject([{ url: `https://files.example.test/${key}` }]);
       expect(actions()).toEqual(["ADD_VEHICLE_PHOTO", "CREATE_VEHICLE"]);
+      const [photoLog, vehicleLog] = fake.rows("activityLog");
+      expect(photoLog?.["after"]).toEqual({ fileId: fake.rows("vehiclePhoto")[0]!["id"], kind: "VEHICLE_PHOTO", fileName: "front.jpg" });
+      expect(vehicleLog?.["after"]).toMatchObject({ auctionSheet: { kind: "AUCTION_SHEET", fileName: "s.png" } });
+      expect(vehicleLog?.["after"]).not.toHaveProperty("auctionSheetUrl");
+      expect(JSON.stringify(fake.rows("activityLog"))).not.toMatch(/files\.example|org\/|https?:/);
     });
   });
 

@@ -32,7 +32,6 @@ const objects = new Map<string, Buffer>();
 const calls = { put: [] as Parameters<ObjectStore["presignPut"]>[0][], get: [] as { key: string; ifNoneMatch?: string }[], del: [] as string[] };
 const etagOf = (key: string) => `"etag-${key.length}-${key.at(-5)}"`;
 const recorder: ObjectStore = {
-  presignGet: async (args) => `https://s3.example.test/${args.key}?X-Amz-Expires=${args.expiresInSeconds}&X-Amz-Signature=test`,
   presignPut: async (args) => (calls.put.push(args), `https://upload.example.test/${args.key}?signed=1`),
   getObject: async (args) => {
     calls.get.push(args);
@@ -91,10 +90,12 @@ describe("POST /uploads/presign", () => {
   it("signs for 300 seconds, pins the exact size and type, and keeps the key inside the vehicle's folder for that kind", async () => {
     const res = await presign("MANAGER", photoRequest);
     const data = res.json().data;
-    expect(Object.keys(data).sort()).toEqual(["expiresInSeconds", "headers", "key", "publicUrl", "uploadUrl"]);
+    // No public address: the client gets a signed PUT link and the key to send back when it registers the file.
+    expect(Object.keys(data).sort()).toEqual(["expiresInSeconds", "headers", "key", "uploadUrl"]);
     expect(data.expiresInSeconds).toBe(300);
     expect(data.key).toMatch(new RegExp(`^org/${ORG_A}/vehicles/v_fc_pending/photos/[0-9a-f-]{36}-front-view\\.jpg$`));
-    expect(data.publicUrl).toBe(`${BASE}/${data.key}`);
+    expect(res.body).not.toContain(BASE);
+    expect(JSON.stringify(data)).not.toMatch(/publicUrl|r2\.dev/);
     expect(data.headers).toEqual({ "Content-Type": "image/jpeg" });
     expect(calls.put).toEqual([{ key: data.key, contentType: "image/jpeg", contentLength: 1_000_000, expiresInSeconds: 300 }]);
   });

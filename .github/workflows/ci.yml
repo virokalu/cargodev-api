@@ -30,13 +30,17 @@ jobs:
     env:
       # Dummy values only. Never put real secrets in CI for a public repo.
       NODE_ENV: test
+      APP_ENV: development
       PORT: "4000"
       DATABASE_URL: "postgresql://user:password@localhost:5432/ci_dummy"
       MOBILE_JWT_SECRET: "ci-dummy-value-not-for-real-use-0123456789"
       CUSTOMER_JWT_SECRET: "ci-dummy-customer-value-not-real-0123456789"
       OTP_PEPPER: "ci-dummy-otp-pepper-value-not-real-0123456789"
       CUSTOMER_FILE_CACHE_SECONDS: "300"
-      STAFF_SIGNED_URL_TTL_SECONDS: "600"
+      FILE_LINK_SECRET: "ci-dummy-file-link-secret-not-real-0123456789"
+      FILE_LINK_BASE_URL: "https://api.example.test"
+      FILE_LINK_TTL_SECONDS: "300"
+      FILE_LINK_MAX_TTL_SECONDS: "900"
       STAFF_AUTH_CACHE_SECONDS: "30"
       RETENTION_DRY_RUN: "true"
       RETENTION_OTP_DAYS: "30"
@@ -83,6 +87,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Every file the Dockerfile copies must be in the commit (a host that builds from git, like Render, sees only the commit).
+      # Read-only: it only lists git's tree. Fails before the build, with the list of missing paths.
+      - name: Every file the image build copies is in the commit
+        run: sh scripts/check-build-inputs.sh
       - name: Build the image
         run: docker build -t cargodev-api:ci .
       # The image must carry no .env file of any kind (a local .env must never be baked in).

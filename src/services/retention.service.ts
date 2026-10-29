@@ -80,7 +80,8 @@ export async function runRetention(orgId: string, now: Date = new Date()): Promi
         action: "RETENTION_CLEANUP",
         entity: "Retention",
         entityId: orgId,
-        after: { ...counts, automated: true },
+        // No system user exists to be the actor (see docs/deferred/nullable-activity-actor.md), so the row says who really did it.
+        after: { ...counts, system: true, job: "retention" },
       });
     }
     return { ...counts, skipped: 0, dryRun };

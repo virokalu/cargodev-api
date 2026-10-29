@@ -15,3 +15,6 @@ process.env["PUBLIC_STOCK_IMAGE_BASE_URL"] = "https://img.example.test";
 // database check (staff-auth-freshness, route inventory, tests/db) switch this off. The seam works only when NODE_ENV is "test".
 import { setTrustTokenClaimsForTests } from "../src/lib/staff-auth-seam.js";
 setTrustTokenClaimsForTests(true);
+// Own-domain file links (ADR 0007): fake values, only for tests.
+process.env["FILE_LINK_SECRET"] = "test-only-file-link-secret-value-0123456789abcdef";
+process.env["FILE_LINK_BASE_URL"] = "https://api.example.test";

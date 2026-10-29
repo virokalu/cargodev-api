@@ -17,6 +17,7 @@
 
 import { loadEnv } from "../config/env.js";
 import { ServiceError } from "./errors.js";
+import { UPLOAD_LIMITS } from "../validation/upload.schema.js";
 
 export type FileKind = "AUCTION_SHEET" | "VEHICLE_PHOTO" | "VEHICLE_DOCUMENT";
 
@@ -91,17 +92,16 @@ export function checkNewFileUrl(orgId: string, url: string, kind: FileKind, vehi
 import type { Readable } from "node:stream";
 
 export type StoredObject =
-  | { kind: "found"; body: Readable; contentLength: number | null; etag: string | null }
+  | { kind: "found"; body: Readable; contentLength: number | null; etag: string | null; contentRange?: string | null }
   | { kind: "notModified"; etag: string | null }
+  | { kind: "rangeNotSatisfiable" }
   | { kind: "missing" };
 
 export interface ObjectStore {
   /** A URL a staff client can PUT one object to. Signs the exact content length and type, nothing more. */
   presignPut(args: { key: string; contentType: string; contentLength: number; expiresInSeconds: number }): Promise<string>;
-  /** A short-lived URL a STAFF client can GET one object from (the storage API host, signed). The response type is pinned. */
-  presignGet(args: { key: string; contentType: string; expiresInSeconds: number }): Promise<string>;
-  /** Reads one object. With `ifNoneMatch`, answers notModified when the ETag still matches (no body is read). */
-  getObject(args: { key: string; ifNoneMatch?: string }): Promise<StoredObject>;
+  /** Reads one object. With `ifNoneMatch`, answers notModified when the ETag still matches (no body is read). With `range` ("bytes=0-99"), one part. */
+  getObject(args: { key: string; ifNoneMatch?: string; range?: string }): Promise<StoredObject>;
   /** Writes one object (server side: thumbnails). */
   putObject(args: { key: string; body: Buffer; contentType: string }): Promise<void>;
   deleteKey(key: string): Promise<void>;
@@ -191,46 +191,63 @@ export function thumbKeyFor(key: string): string | null {
   return null;
 }
 
+/**
+ * What a staff client gets to upload one file: a signed PUT link and the KEY to send back when it registers the file. There is no
+ * public address in it. (The PUT link is staff-only, valid 300 s, for one key; it necessarily contains the storage host and the
+ * account id: an accepted exposure, see docs/security-model.md.)
+ */
 export interface PresignedUpload {
   uploadUrl: string;
   key: string;
-  publicUrl: string;
   expiresInSeconds: number;
 }
 
 /** Signs one upload. The key must already be inside an allowed prefix (the caller builds it with buildObjectKey). */
 export async function presignUpload(args: { key: string; contentType: AllowedContentType; contentLength: number }): Promise<PresignedUpload> {
-  const base = publicBaseUrl();
-  if (!base) throw new ServiceError("VALIDATION", "File storage is not configured.");
+  if (!publicBaseUrl()) throw new ServiceError("VALIDATION", "File storage is not configured.");
   const uploadUrl = await requireStore().presignPut({ ...args, expiresInSeconds: UPLOAD_URL_TTL_SECONDS });
-  return { uploadUrl, key: args.key, publicUrl: `${base}/${args.key}`, expiresInSeconds: UPLOAD_URL_TTL_SECONDS };
+  return { uploadUrl, key: args.key, expiresInSeconds: UPLOAD_URL_TTL_SECONDS };
 }
 
-export interface SignedStaffFileUrl {
-  /** A signed GET link on the storage API host. Valid until `expiresAt`. Never stored, never logged. */
-  url: string;
-  expiresAt: string;
+/** The value stored in the database for a registered file: built HERE from the key, never taken from a client. */
+export function storedUrlForKey(key: string): string | null {
+  const base = publicBaseUrl();
+  return base ? `${base}/${key}` : null;
+}
+
+const EXTENSIONS_FOR_KIND: Record<FileKind, readonly string[]> = {
+  AUCTION_SHEET: UPLOAD_LIMITS.AUCTION_SHEET.mimeTypes.map((m) => EXTENSION_FOR_TYPE[m as AllowedContentType]),
+  VEHICLE_PHOTO: UPLOAD_LIMITS.VEHICLE_PHOTO.mimeTypes.map((m) => EXTENSION_FOR_TYPE[m as AllowedContentType]),
+  VEHICLE_DOCUMENT: UPLOAD_LIMITS.VEHICLE_DOCUMENT.mimeTypes.map((m) => EXTENSION_FOR_TYPE[m as AllowedContentType]),
+};
+
+/**
+ * Why a KEY sent to register a new file is not acceptable, or null. The key must be inside this org's staging folder (no vehicle
+ * yet) or this vehicle's folder for that kind, made only of the characters keys are made of (no traversal), and its extension
+ * must be one this kind allows (uploads force the extension from the signed type). Fails closed when storage is not configured.
+ */
+export function checkNewFileKey(orgId: string, key: unknown, kind: FileKind, vehicleId?: string): string | null {
+  const base = publicBaseUrl();
+  if (!base) return "File storage is not configured.";
+  if (typeof key !== "string" || key === "") return "This file was not uploaded for your organisation.";
+  const extension = key.split(".").at(-1)?.toLowerCase() ?? "";
+  if (!key.includes(".") || !EXTENSIONS_FOR_KIND[kind].includes(extension)) return "This file type is not allowed.";
+  return checkNewFileUrl(orgId, `${base}/${key}`, kind, vehicleId);
 }
 
 /**
- * A short-lived link a STAFF member can open to see a stored file. The key comes from the SAME validated function the
- * customer gateway uses (keyFromOwnedUrlForOrg): the stored address must start with the configured public base AND the key
- * must start with `org/<orgId>/` of the verified token. Anything else (another org, another host, a traversal, a type that is
- * not on the allowlist, no store configured, a signing failure) is null: the caller reports the row as unavailable.
+ * The object must really be there and within the size limit for its kind (the signed upload pinned both, but a key can be sent
+ * without ever uploading, or the object replaced). Skipped only when no store is configured (nothing to check against).
  */
-export async function signStaffFileUrl(orgId: string, storedUrl: string | null | undefined, nowMs: number = Date.now()): Promise<SignedStaffFileUrl | null> {
-  if (!storedUrl) return null;
-  const key = keyFromOwnedUrlForOrg(orgId, storedUrl);
-  if (!key || !store) return null;
-  const contentType = contentTypeForKey(key);
-  if (!contentType) return null;
-  const expiresInSeconds = loadEnv().STAFF_SIGNED_URL_TTL_SECONDS;
-  try {
-    const url = await store.presignGet({ key, contentType, expiresInSeconds });
-    return { url, expiresAt: new Date(nowMs + expiresInSeconds * 1000).toISOString() };
-  } catch {
-    return null; // the library's message could contain the address: it is dropped, not logged
+export async function verifyUploadedObject(key: string, kind: FileKind): Promise<string | null> {
+  if (!store) return null;
+  const found = await store.getObject({ key });
+  if (found.kind === "missing") return "This file has not been uploaded.";
+  if (found.kind === "found") {
+    found.body.destroy(); // only the size is needed
+    if (found.contentLength !== null && found.contentLength > UPLOAD_LIMITS[kind].maxBytes) return `This file is larger than ${UPLOAD_LIMITS[kind].maxBytes / 1024 / 1024} MB.`;
   }
+  return null;
 }
 
 /** Best effort. Used only while no store is installed: it records that an object was left behind. */

@@ -38,6 +38,18 @@ Goal: prove a client cannot choose its own address. Use a throwaway address and 
 4. Look at the log line for these requests: the address shown must be your real one in every mode, never a fake value.
 5. Send one request with the configured header removed: it must still work (socket address used) and a masked warning appears in the log (the header name only, never a value).
 
+## Smoke test (after every deploy)
+
+`scripts/smoke-test.ps1` (PowerShell 7 or Windows PowerShell) checks a running API from outside: `/health`, the security and cache headers, 401/404 behaviour, staff login, a staff token refused by the customer zone, one 403 per role, that the notification stream opens, and that bad logins end in 429.
+
+```
+$env:SMOKE_ADMIN_EMAIL = "..."; $env:SMOKE_ADMIN_PASSWORD = "..."      # test accounts only
+# optional: SMOKE_MANAGER_*, SMOKE_OPERATOR_*, SMOKE_VIEWER_*, SMOKE_CUSTOMER_EMAIL / SMOKE_CUSTOMER_PASSWORD
+./scripts/smoke-test.ps1 -BaseUrl https://your-api.example.test
+```
+
+It prints PASS, FAIL or SKIP per check and nothing else (never a token, a password or a signed address) and exits 1 on any FAIL. A check whose account variables are missing is SKIPPED, not passed. It changes no data. The last check makes bad logins until the server answers 429, so login from that address is blocked for about a minute afterwards: run it last.
+
 ## Run a migration
 
 Migrations are additive-first (ADR 0004) and run only through `npm run migrate -- <command>`. The tool does not know which environment a database is, so you do:
@@ -73,6 +85,17 @@ The service is portable on purpose (docs/deployment.md: portability checklist). 
 ## Uptime monitoring
 
 Use an **external** monitor (not on the API host, not on the database provider): request `GET /health` every minute from outside, alert after two failures in a row by email and phone push to at least two people, and also alert when the response is not the expected `{ "data": { "status": "ok" } }`. `/health` does not touch the database, so also run a second, slower check that proves the database path (for example, a customer-facing read on a test account every five minutes). Page on the host's own status as well. After any host change, confirm the monitor still points at the right address.
+
+## Rotating FILE_LINK_SECRET (the own-domain file links)
+
+Links live at most 15 minutes, so a rotation needs a short overlap and never signs anyone out:
+
+1. Generate a new secret (at least 32 random bytes, different from every other secret).
+2. Set `FILE_LINK_SECRET_PREVIOUS` to the **current** value and `FILE_LINK_SECRET` to the **new** one, then redeploy (or restart). New links are signed with the new secret; links already issued still open because the previous secret is accepted.
+3. Wait at least `FILE_LINK_MAX_TTL_SECONDS` (15 minutes by default) so every old link has expired.
+4. Remove `FILE_LINK_SECRET_PREVIOUS` and redeploy. Old links now fail (the same 404).
+
+If the secret may have leaked, skip the overlap: set the new `FILE_LINK_SECRET` and leave `FILE_LINK_SECRET_PREVIOUS` unset. Every link in circulation stops at once; clients just ask the API for fresh ones. Links also stop on their own when a person is deactivated or a file is un-released, with no rotation.
 
 ## Customer API
 

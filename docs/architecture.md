@@ -81,7 +81,7 @@ mutation (service)
 
 ## Staff file links (private-ready bucket)
 
-`lib/object-storage.ts` has the one store seam (`presignPut`, `presignGet`, `getObject`, `putObject`, `deleteKey`). `signStaffFileUrl` maps a stored address to a key with `keyFromOwnedUrlForOrg` (the same function the customer gateway uses) and asks the store for a short-lived GET link; `file.service.ts` puts that link in the `url` field of the staff file responses and fetches it for the PDF export. The stored addresses in the database are unchanged. `scripts/r2-audit.ts` (`npm run r2:audit`) is the read-only counter used before the bucket is closed.
+`lib/object-storage.ts` has the one store seam (`presignPut` for uploads, `getObject` with an optional range, `putObject`, `deleteKey`); there is no presigned GET. Staff and customer file links are on this API's own domain (ADR 0007): `lib/file-link.ts` builds and checks the signed text, `services/file-link.service.ts` issues links (`issueFileLink`, only after an endpoint's own authorization) and opens them (`openFileLink`: signature, expiry, then the database for the person and the file, then the store), and `routes/file-links.ts` serves `GET /f/v1/:kind/:id/:variant` with one identical 404 for every failure. `file.service.ts` puts the link in the `url` field of the staff file responses and reads PDF-export images straight through the store. The stored addresses in the database are unchanged. `scripts/r2-audit.ts` (`npm run r2:audit`) is the read-only counter used before the bucket is closed.
 
 ## Running it (deployment shape)
 

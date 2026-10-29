@@ -56,10 +56,10 @@ const WRITES: [string, string, unknown, Role[]][] = [
   ["POST", `/vehicles/${OTHER_ORG_VEHICLE}/convert-to-local`, undefined, A_MANAGE],
   ["POST", `/vehicles/${OTHER_ORG_VEHICLE}/revert-to-export`, undefined, A_MANAGE],
   ["PATCH", `/vehicles/${OTHER_ORG_VEHICLE}/serial`, { serialNumber: 5000 }, ["ADMINISTRATOR"]],
-  ["POST", `/vehicles/${OTHER_ORG_VEHICLE}/photos`, { url: "https://files.example.test/x.jpg" }, A_QUICK],
+  ["POST", `/vehicles/${OTHER_ORG_VEHICLE}/photos`, { key: "org/x/vehicles/v/photos/x.jpg" }, A_QUICK],
   ["POST", `/vehicles/${OTHER_ORG_VEHICLE}/photos-added`, { count: 1 }, A_QUICK],
-  ["POST", `/vehicles/${OTHER_ORG_VEHICLE}/documents`, { url: "https://files.example.test/x.pdf", name: "x", documentType: "OTHER" }, A_QUICK],
-  ["PUT", `/vehicles/${OTHER_ORG_VEHICLE}/auction-sheet`, { url: "https://files.example.test/x.jpg" }, A_QUICK],
+  ["POST", `/vehicles/${OTHER_ORG_VEHICLE}/documents`, { key: "org/x/vehicles/v/documents/x.pdf", name: "x", documentType: "OTHER" }, A_QUICK],
+  ["PUT", `/vehicles/${OTHER_ORG_VEHICLE}/auction-sheet`, { key: "org/x/vehicles/v/photos/x.jpg" }, A_QUICK],
   ["DELETE", `/vehicles/${OTHER_ORG_VEHICLE}/photos/p1`, undefined, A_MANAGE],
   ["DELETE", `/vehicles/${OTHER_ORG_VEHICLE}/documents/d1`, undefined, A_MANAGE],
 ];
@@ -118,7 +118,7 @@ describe("body validation is a 400 in the envelope", () => {
     ["PATCH", "/vehicles/v_fc_pending/serial", { serialNumber: 1.5 }],
     ["PATCH", "/vehicles/v_fc_pending/serial", { serialNumber: "7" }],
     ["POST", "/vehicles/v_fc_pending/photos-added", { count: 0 }],
-    ["POST", "/vehicles/v_fc_pending/documents", { url: "x", name: "n", documentType: "NOPE" }],
+    ["POST", "/vehicles/v_fc_pending/documents", { key: "x", name: "n", documentType: "NOPE" }],
   ])("%s %s %j", async (method, url, body) => {
     const res = await call(method, url, "ADMINISTRATOR", body);
     expect(res.statusCode).toBe(400);

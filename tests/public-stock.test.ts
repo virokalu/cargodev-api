@@ -716,7 +716,6 @@ describe("staff stock: management", () => {
     const store = () => {
       const calls: { presign: unknown[]; deleted: string[] } = { presign: [], deleted: [] };
       const impl: ObjectStore = {
-        presignGet: async (args) => `https://s3.example.test/${args.key}?X-Amz-Expires=${args.expiresInSeconds}&X-Amz-Signature=test`,
         presignPut: async (args) => (calls.presign.push(args), `https://upload.example.test/${args.key}?sig=1`),
         getObject: async () => ({ kind: "missing" }),
         putObject: async () => undefined,

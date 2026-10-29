@@ -26,6 +26,8 @@ const BASE_ENV = {
   DATABASE_URL: "postgresql://user:password@example.test:5432/dbname",
   MOBILE_JWT_SECRET: "mobile-secret-value-0123456789abcdefXX",
   ORG_ID: "org_x",
+  FILE_LINK_SECRET: "link-secret-value-for-tests-0123456789abcdef",
+  FILE_LINK_BASE_URL: "https://api.example.test",
 };
 const loadEnvFresh = async (extra: Record<string, string>) => {
   vi.resetModules();
@@ -111,6 +113,10 @@ describe("socket mode warns, once a minute, when forwarding headers are seen", (
     vi.setSystemTime(new Date(Date.now() + 2_000));
     await hit(a, { "x-forwarded-for": "198.51.100.1" });
     expect(warnings).toHaveLength(2);
+  });
+
+  it("watches exactly the headers a proxy or edge is known to use", () => {
+    expect([...FORWARDING_HEADERS].sort()).toEqual(["cf-connecting-ip", "forwarded", "true-client-ip", "x-client-ip", "x-forwarded-for", "x-real-ip"]);
   });
 
   it("watches exactly the headers a proxy or edge is known to use", () => {
@@ -236,7 +242,6 @@ describe("the image library is optional", () => {
   const puts: string[] = [];
   const gets: string[] = [];
   const store: ObjectStore = {
-    presignGet: async (args) => `https://s3.example.test/${args.key}`,
     presignPut: async () => "https://upload.example.test/x",
     getObject: async ({ key }) => {
       gets.push(key);

@@ -26,7 +26,7 @@ This file is the contract. If a change breaks a rule here, change the rule in a 
 ## Response contract
 
 - Success: `{ "data": ... }`. Error: `{ "error": { "code", "message", "fieldErrors?" } }`.
-- Every response sends `Cache-Control: no-store`, with two deliberate exceptions: the customer file endpoints (`private, max-age=<CUSTOMER_FILE_CACHE_SECONDS>`) and the successful read endpoints under `/api/public` (`public, max-age=60`; the enquiry POST and every error stay `no-store`). `/api/public` has its own CORS allow-list (`PUBLIC_ALLOWED_ORIGINS`, never `*`) and exists only when `PUBLIC_STOCK_ENABLED=true`.
+- Every response sends `Cache-Control: no-store`, with three deliberate exceptions: the customer file endpoints (`private, max-age=<CUSTOMER_FILE_CACHE_SECONDS>`), the successful read endpoints under `/api/public` (`public, max-age=60`; the enquiry POST and every error stay `no-store`), and the successful answers of the signed file links `GET /f/v1/...` (`private, max-age=<the link's remaining life, at most 300>`; every failure is one identical `no-store` 404). `/api/public` has its own CORS allow-list (`PUBLIC_ALLOWED_ORIGINS`, never `*`) and exists only when `PUBLIC_STOCK_ENABLED=true`.
 - Never leak internal error messages. Unexpected errors log server side and return `INTERNAL`.
 
 ## Security rules

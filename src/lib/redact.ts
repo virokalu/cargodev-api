@@ -15,7 +15,11 @@ const PATTERNS: RegExp[] = [
 
 // Signed-URL secrets. A presigned link is a bearer credential for its lifetime: the signature, the credential scope and a
 // session token are each removed wherever a URL ends up in text (an error message, a stack, a log line).
-const SIGNED_URL_PATTERNS: RegExp[] = [/X-Amz-(?:Signature|Credential|Security-Token)=[^&\s"'<>`]*/gi];
+const SIGNED_URL_PATTERNS: RegExp[] = [
+  /X-Amz-(?:Signature|Credential|Security-Token)=[^&\s"'<>`]*/gi,
+  // The own-domain file links (ADR 0007): the signature is a ticket until it expires.
+  /(?<=[?&])sig=[A-Za-z0-9_-]+/g,
+];
 
 // Object storage details a customer must never see, even inside an error message from the storage library.
 const STORAGE_PATTERNS: RegExp[] = [

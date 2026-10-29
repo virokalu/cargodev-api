@@ -82,7 +82,7 @@ Logout is idempotent. If `expoPushToken` is sent, that device token is removed, 
 | GET | /api/v1/reports/by-auction-hall?track=FC\|FL | any staff | done |
 | GET | /api/v1/reports/by-destination?track=FC\|FL | any staff | done |
 | GET | /api/v1/reports/by-freight-agent | any staff | done |
-| GET | /api/v1/activity-log | ADMINISTRATOR | done |
+| GET | /api/v1/activity-log | ADMINISTRATOR | done. New entries about files hold the file's id, kind and name only (never an address). **Anything returned is redacted at read time**: a stored file address, any storage host, an object key, a bucket name or the account id becomes `[file address removed]`, `[file key removed]` or `[storage name removed]`, including in rows written before; the stored history is not changed |
 | GET | /api/v1/activity-log/filters | ADMINISTRATOR | done |
 
 ### Lookups
@@ -168,26 +168,32 @@ Automation records BOOKING_RECEIVED (when a vehicle enters that status) and SHIP
 
 | Method | Path | Roles | Body | Success |
 |---|---|---|---|---|
-| POST | /api/v1/uploads/presign | ADMINISTRATOR, MANAGER, OPERATOR | `{ vehicleId?, kind: AUCTION_SHEET \| VEHICLE_PHOTO \| VEHICLE_DOCUMENT, fileName, contentType, fileSize }` | 200 `{ uploadUrl, key, publicUrl, expiresInSeconds: 300, headers: { "Content-Type" } }` |
+| POST | /api/v1/uploads/presign | ADMINISTRATOR, MANAGER, OPERATOR | `{ vehicleId?, kind: AUCTION_SHEET \| VEHICLE_PHOTO \| VEHICLE_DOCUMENT, fileName, contentType, fileSize }` | 200 `{ uploadUrl, key, expiresInSeconds: 300, headers: { "Content-Type" } }` |
 
 The vehicle must be the caller's org's (otherwise 404, and nothing is signed). The server builds the key (the client never chooses it): `org/<orgId>/vehicles/<vehicleId>/{photos|documents|auction-sheet}/<uuid>-<safe name>.<ext>`, or `org/<orgId>/uploads/staging/...` when there is no vehicle yet. The extension always comes from the signed content type, never from the file name. The link is signed for the exact size and type, valid 5 minutes. **Only these content types, matched exactly:** photos and auction sheets `image/jpeg`, `image/png`, `image/webp` (up to 10 MB); documents `application/pdf` (up to 20 MB). Anything else (svg, html, gif, "image/jpeg; charset=...", other casing) is a 400. Send the file with a PUT to `uploadUrl` using exactly the returned headers, then pass `publicUrl` to the add-photo / add-document / auction-sheet endpoints. 400 `File storage is not configured.` when storage is off.
 
 ### Vehicle files
 
-File bytes never pass through this API; the database stores URLs. A URL is accepted only if it is under `R2_PUBLIC_URL` and inside the caller's own org folder: `org/<orgId>/uploads/staging/` when creating a vehicle, or `org/<orgId>/vehicles/<vehicleId>/{photos|documents|auction-sheet}/` for an existing one. Anything else is 400 with `fieldErrors.url`. When `R2_PUBLIC_URL` is not set, every file URL is refused.
+File bytes never pass through this API. **A file is registered by its `key`** (the `key` the upload presign returned): there is no public address in the presign answer, and a client never sends one. The key must be inside the caller's own org folder: `org/<orgId>/uploads/staging/` when creating a vehicle, or `org/<orgId>/vehicles/<vehicleId>/{photos|documents|auction-sheet}/` for an existing one. and its extension must be one the kind allows (images `jpg`, `png`, `webp`; documents `pdf`). The object must really exist in storage and be within the size limit (10 MB images, 20 MB documents). Anything else is 400 with `fieldErrors.key` (`fieldErrors.photoKeys.N`, `documents.N.key` or `auctionSheetKey` when creating a vehicle). The stored address is built on the server from the key. When `R2_PUBLIC_URL` is not set, every key is refused. Creating a vehicle takes `auctionSheetKey`, `photoKeys: string[]` and `documents: [{ key, name, documentType }]` instead of the old address fields (the old fields are ignored).
+
+**The signed upload link (`uploadUrl`) necessarily contains the storage host and the account id.** It is staff-only, valid 300 seconds, and good for one key, one type and one size. This is an accepted exposure (docs/security-model.md); the link is never logged.
 
 | Method | Path | Roles | Notes |
 |---|---|---|---|
 | GET | /api/v1/vehicles/:serial/files | any staff | `{ auctionSheetUrl, auctionSheetExpiresAt, auctionSheetUnavailable?, photos: [{ id, url, expiresAt, unavailable?, uploaderName, createdAt }], documents: [{ id, url, expiresAt, unavailable?, name, documentType, uploaderName, createdAt }] }`. Every `url` is a **short-lived signed link** (see the note below), not the stored address |
 | GET | /api/v1/vehicles/:serial/pdf-images | any staff | Auction sheet and photos as data URLs for the PDF export. The server re-checks each stored URL, refuses redirects, caps size (15 MB) and time (10 s), and returns images only; a failed image is skipped |
-| POST | /api/v1/vehicles/:id/photos | ADMINISTRATOR, MANAGER, OPERATOR | `{ url }` (the stored form from the upload), 201 with `{ id, url, expiresAt, uploaderName, createdAt }` where `url` is a signed link |
+| POST | /api/v1/vehicles/:id/photos | ADMINISTRATOR, MANAGER, OPERATOR | `{ key }` (the `key` the upload presign returned), 201 with `{ id, url, expiresAt, uploaderName, createdAt }` where `url` is a signed link |
 | POST | /api/v1/vehicles/:id/photos-added | ADMINISTRATOR, MANAGER, OPERATOR | `{ count }`. One notification for a batch of photos |
-| POST | /api/v1/vehicles/:id/documents | ADMINISTRATOR, MANAGER, OPERATOR | `{ url, name, documentType }`, 201 with the document and a signed `url` and `expiresAt` |
-| PUT | /api/v1/vehicles/:id/auction-sheet | ADMINISTRATOR, MANAGER, OPERATOR | `{ url }`. Replaces the sheet; answers `{ auctionSheetUrl (signed), auctionSheetExpiresAt }` |
+| POST | /api/v1/vehicles/:id/documents | ADMINISTRATOR, MANAGER, OPERATOR | `{ key, name, documentType }`, 201 with the document and a signed `url` and `expiresAt` |
+| PUT | /api/v1/vehicles/:id/auction-sheet | ADMINISTRATOR, MANAGER, OPERATOR | `{ key }`. Replaces the sheet; answers `{ auctionSheetUrl (signed), auctionSheetExpiresAt }` |
 | DELETE | /api/v1/vehicles/:id/photos/:photoId | ADMINISTRATOR, MANAGER | |
 | DELETE | /api/v1/vehicles/:id/documents/:docId | ADMINISTRATOR, MANAGER | |
 
-**File `url` values are short-lived. Clients must not store them.** On every staff file endpoint the `url` field holds a signed link on the storage API host that stops working at `expiresAt` (`STAFF_SIGNED_URL_TTL_SECONDS`, 60 to 900 seconds, default 600). Use it to display or download now; keep the file's `id` and ask the API again later (never cache, bookmark, share or save the link). The link is derived from the stored address only if that address is on the configured public base AND inside the caller's own org folder; any other row has `url: null` and `unavailable: true`. A new file is still registered with the stored form of its address (the `publicUrl` the upload step returned), which is an identifier, not a working link. Customers never receive a link or an address (they use the id-based file endpoints). The answers stay `Cache-Control: no-store`.
+**File `url` values are short-lived links on this API's own domain. Clients must not store them.** On every staff file endpoint the `url` field holds a link of the form `<FILE_LINK_BASE_URL>/f/v1/<kind>/<id>/<variant>?o=&u=&a=&exp=&sig=` (kind `photo`, `document` or `auction-sheet`; the id is the database id; no storage host, bucket, account id or object key appears in it) that stops working at `expiresAt` (`FILE_LINK_TTL_SECONDS`, 30 to 900 seconds, default 300). Use it to display or download now; keep the file's `id` and ask the API again later (never cache, bookmark, share or save the link). The link is made for the signed-in user and for that file only; every fetch asks the database again, so a deactivated user, an un-released file or a deleted vehicle stops working at once. A row whose stored address cannot be mapped to a file this org may read, or any file when links are not configured, has `url: null` and `unavailable: true`. A new file is registered with the `key` the upload step returned; the stored address is built on the server from it and is an identifier, not a working link. Customers keep using the id-based file endpoints with their Bearer token. The list and change answers stay `Cache-Control: no-store`.
+
+### Opening a file link: `GET /f/v1/:kind/:id/:variant`
+
+No Bearer token: the signed link is the ticket. `variant` is `thumb` (the small version of a photo when there is one, otherwise the full image) or `full`. **Every failure is the same `404 { "error": { "code": "NOT_FOUND", "message": "File not found." } }`** (a bad or tampered link, an expired one, a person who is no longer allowed, a file that is gone or hidden): the answer never says why. Success: the bytes with `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Content-Security-Policy: default-src 'none'; sandbox`, `Cache-Control: private, max-age=<seconds the link still lives, at most 300>`, an `ETag` (send `If-None-Match` for a `304`), `Content-Disposition: inline` for images and `attachment; filename=...` for documents. PDFs also answer one `Range: bytes=a-b` with `206` and `Content-Range` (`Accept-Ranges: bytes`); several or malformed ranges get the whole file; a range past the end is `416`. Limited per IP (240 a minute); over the limit is the standard `429`. The link works from an `<img>`, an `<a>` or a PDF viewer; a browser app that calls it with `fetch` from another origin needs that origin allowed (docs/deployment.md).
 
 Deleting removes the database row and then the stored object (best effort: a storage failure never blocks the delete, and only objects inside the caller's own org folder are ever removed). Without the object-storage SDK installed the object is left in place.
 
@@ -215,6 +221,7 @@ Runs the daily job now, taking the same lock as the scheduled run. Idempotent: c
 ### Customer API (`/api/customer/v1`)
 
 A separate zone (ADR 0005). Mounted only when `CUSTOMER_JWT_SECRET` is set. Same envelope and `no-store` as the staff API.
+**The full app-facing contract (every field, error, limit, the stream and push) is [customer-app-integration.md](customer-app-integration.md); it is guarded by `tests/customer-app-contract.test.ts`.** The tables below are a summary.
 Auth: `Authorization: Bearer <customer accessToken>` (15 minutes, audience `customer`). A staff token is 401 here; a customer token is 401 on `/api/v1`.
 Request bodies are strict: an unknown field is a 400.
 
@@ -274,6 +281,8 @@ Errors: 400 `VALIDATION` for bad input and for any wrong or expired code or cred
 Rate limits (per IP / per email or customer, from `src/config/customer-rate-limits.ts`; file gateway: 300/min per IP, 120/min per customer): register 5/min, 3/hour; verify-email 10/min, 10/10 min; resend-verification 5/min, 3/10 min; login 10/min, 20/15 min; refresh 30/min; logout 30/min; forgot-password 5/min, 3/hour; reset-password 10/min, 10/10 min; delete-account 5/min, 5/hour; me 60/min. Per-email limits count unknown addresses too.
 
 ### Public website API (Phase 2, slice 7)
+
+**The exact contract for the website developer, with full examples, limits, errors and headers, is [website-integration.md](website-integration.md)** (checked against the code by `tests/website-contract.test.ts`). The summary below is for staff-side readers; if they disagree, fix them together.
 
 Everything here exists only when `PUBLIC_STOCK_ENABLED=true` (otherwise 404, for the public routes and the staff stock tools alike). **No authentication**: a token, cookie or org in the request is ignored; the org is the server's default org. **CORS:** `PUBLIC_ALLOWED_ORIGINS` (the website origins), GET / POST / OPTIONS, header `Content-Type` only, no credentials, never `*`; the app origins (`CORS_ALLOWED_ORIGINS`) have no access to these routes and the website origin has none to the rest of the API. Query strings are strict (an unknown parameter is a 400).
 

@@ -5,6 +5,25 @@ Status: **the code is ready; the bucket has not been changed.** This file record
 belong in this file: counts only. Every step that touches a bucket or the database is done by the maintainer, or with the
 maintainer's approval for that specific run.
 
+## Current state and what gates closing production
+
+**Staging (done by the maintainer in the storage console, not by this repo):** the main bucket's public development address is
+**disabled**, so the stored addresses in `VehiclePhoto.url`, `VehicleDocument.url` and `Vehicle.auctionSheetUrl` no longer open in a
+browser: they are identifiers only. `R2_PUBLIC_URL` must stay set and unchanged because key derivation parses it. Rollback is re-enabling
+the public development address. A separate **public stock bucket** exists for published listing images, with its public development address
+**enabled in staging only**; production needs a custom domain (undecided; there is no domain on the DNS provider yet).
+
+**Shared credential gap:** there is ONE credential pair, a token scoped to both buckets, because the settings have no separate pair for the
+public bucket. The design intends the public bucket to have its own token. A compromise of the API's credentials therefore reaches both
+buckets. Proposal (not built): docs/deferred/stock-credentials.md.
+
+**Production:** the main bucket **stays public until the Node staff client replaces the Next staff app**. Closing it is gated on ALL of:
+(1) the own-domain file-links gateway is deployed, (2) every client is converted to use it, (3) `npm run r2:audit` is clean, (4) a verified
+backup copy exists.
+
+**Staff decisions:** staff move fully to this API (the Next staff app will be retired); the iOS app uses this API; the file-link host is the
+API's own hostname for now (no separate files hostname).
+
 ## Where things stand
 
 - Existing files (vehicle photos, vehicle documents, the auction sheet) are stored as **full public URLs** in `VehiclePhoto.url`,
@@ -12,10 +31,11 @@ maintainer's approval for that specific run.
   organisation's folder (`org/<orgId>/...`).
 - **Customers never see an address or a key.** They get a photo or a document through the API by its database id
   (`/photos/:id/image`, `/documents/:id/file`); the API checks, reads the object itself and streams it.
-- **Staff now get signed links.** `signStaffFileUrl` (src/lib/object-storage.ts) turns a stored address into a short-lived signed
-  link on the storage API host. It uses the SAME key derivation as the customer gateway (the address must start with the
-  configured public base AND the key must start with `org/<the token's orgId>/`). The staff file endpoints return that link in
-  their `url` field plus `expiresAt` (see docs/api-contract.md), so staff screens keep working when the bucket stops being public.
+- **Staff now get links on this API's own domain** (ADR 0007, docs/adr/adr-0007-temporary-file-links-on-our-own-domain.md). The staff
+  file endpoints return a signed link in their `url` field plus `expiresAt` (docs/api-contract.md); opening it makes the API check the
+  database again (the person, the org, the row, the key derivation inside the org's folder) and stream the bytes. **Closing the bucket
+  therefore needs no storage CORS rule for GET and no presigned GET**: the browser never talks to storage. Presigned PUT (uploads) stays,
+  with its CORS rule for PUT.
 - **The stored value does not change.** The database still holds the public-looking address (it is the file's identity: the host
   is checked, the key is derived from it). Nothing in this plan edits a row.
 
@@ -46,8 +66,8 @@ Do not switch anything off until every line is ticked or consciously accepted. C
 
 | | Staff | Customers |
 |---|---|---|
-| How a file is reached | a signed link on the storage API host (the browser or app loads it directly) | the API streams the bytes (`/photos/:id/image`, `/documents/:id/file`) |
-| What the client sees | a URL that works for `STAFF_SIGNED_URL_TTL_SECONDS` (60 to 900, default 600) and `expiresAt` | an id only: never an address, a key or a link |
+| How a file is reached | a signed link on this API's own domain; the API checks, reads the object and streams it | the API streams the bytes (`/photos/:id/image`, `/documents/:id/file`) with the Bearer token |
+| What the client sees | a URL that works for `FILE_LINK_TTL_SECONDS` (30 to 900, default 300) and `expiresAt`; ids only, no storage host or key | an id only: never an address, a key or a link |
 | Authorisation | the staff token's org, checked before anything is signed | the customer's own id, org, release flags, checked before the store is touched |
 | A row that cannot be mapped | `url: null, unavailable: true`; a masked count is logged | the same 404 as any other failure |
 | Caching | the API answer is `no-store`; clients must not store the link | `private, max-age=300` for the bytes only |
@@ -111,7 +131,7 @@ deleting objects, which this plan never does.
 ## The public stock bucket stays public
 
 Public website stock images live in a **separate** bucket (`R2_PUBLIC_STOCK_BUCKET_NAME`) served on a **custom domain**
-(`PUBLIC_STOCK_IMAGE_BASE_URL`), with the shared public development address (`r2.dev`) **disabled**, nothing private in it, and bucket
+(`PUBLIC_STOCK_IMAGE_BASE_URL`), with the shared public development address (`r2.dev`) **disabled in production** (it is allowed in staging only, where the API gives one masked start-up warning; `APP_ENV=production` refuses to start with an `r2.dev` stock address), nothing private in it, and bucket
 listing off (docs/launch-checklist-stock.md). It is deliberately public and is not part of this plan. The two buckets must never be
 merged.
 
@@ -130,7 +150,9 @@ transition, which is why Plan A is preferred.
 - A signed link is a bearer credential until it expires: it is never stored, never logged (the redactor strips the signature, credential and
   session token from logs and errors), and the API response that carries it is `no-store`.
 - Thumbnails (`photos-thumb`, `staging-thumb`) live in the same bucket and need nothing special; a missing thumbnail falls back to the full image.
-- The activity log keeps the stored addresses of files that were added or removed. They identify objects but open nothing once the bucket is
-  private.
-- The presign response for an upload still contains a `publicUrl` (the stored form of the address). It is an identifier, not a working link,
-  after the switch; staff clients must send it back unchanged when registering the file and use the signed link from the file endpoints to view it.
+- **The activity log no longer receives file addresses.** New entries hold a file's id, kind and name only, and everything the activity-log
+  endpoints return is redacted at read time (storage addresses, hosts, keys, bucket names, the account id), old rows included. Stored history
+  is not rewritten.
+- **The upload presign no longer returns a public address.** It returns `{ uploadUrl, key, expiresInSeconds, headers }`; a file is registered by
+  its `key` and the stored address is built on the server. The signed `uploadUrl` necessarily contains the storage host and the account id (an
+  accepted exposure: staff-only, 300 s, one key).

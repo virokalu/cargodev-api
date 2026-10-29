@@ -3,9 +3,8 @@
 // once instead of when the 15-minute token expires. The org and customer id come only from the verified token.
 
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { canCustomerLogin } from "../lib/customer-access.js";
+import { findActiveCustomer } from "../lib/customer-access.js";
 import { CustomerTokenError, verifyCustomerToken } from "../lib/customer-jwt.js";
-import { getPrisma } from "../lib/prisma.js";
 import { errorBody } from "../lib/response.js";
 
 export interface CustomerPrincipal {
@@ -40,13 +39,10 @@ export function requireCustomer() {
       throw error;
     }
 
-    const user = await getPrisma().user.findFirst({
-      where: { id: payload.sub, org_id: payload.orgId },
-      select: { id: true, org_id: true, name: true, userType: true, loginEnabled: true, password: true, emailVerifiedAt: true, deletedAt: true },
-    });
-    if (!user || !canCustomerLogin(user)) return unauthenticated(reply);
+    const principal = await findActiveCustomer(payload.sub, payload.orgId);
+    if (!principal) return unauthenticated(reply);
 
-    request.customer = { id: user.id, orgId: user.org_id, name: user.name };
+    request.customer = principal;
     request.customerTokenExpiresAt = payload.exp !== undefined ? payload.exp * 1000 : null;
   };
 }

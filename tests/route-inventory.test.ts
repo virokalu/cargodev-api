@@ -101,6 +101,8 @@ describe("the table and the real routes are the same set", () => {
       /^POST \/api\/customer\/v1\/auth\/(register|verify-email|resend-verification|login|refresh|logout|forgot-password|reset-password)$/,
       /^GET \/api\/customer\/v1\/app\/min-version$/,
       /^(GET|POST) \/api\/public\//,
+      // The own-domain file links: no Bearer token; a signed link is the ticket (ADR 0007).
+      /^GET \/f\/v1\/:kind\/:id\/:variant$/,
     ];
     const unexpected = ROUTE_TABLE.filter((e) => e.kind === "public").map((e) => key(e.method, e.path)).filter((k) => !allowed.some((re) => re.test(k)));
     expect(unexpected).toEqual([]);

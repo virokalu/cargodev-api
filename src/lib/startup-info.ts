@@ -2,6 +2,7 @@
 // a human. Nothing here prints a value that came from a secret or a host.
 
 import { effectiveClientIpSource, isR2DevHost, type Env } from "../config/env.js";
+import { emailMode, emailWarnings } from "./email.js";
 
 /** The build's commit, shortened, when the host provides one. */
 export function buildCommit(source: NodeJS.ProcessEnv = process.env): string | null {
@@ -21,6 +22,8 @@ export function startupSummary(env: Env, source: NodeJS.ProcessEnv = process.env
     `client-ip=${effectiveClientIpSource(env)}`,
     `scheduler=${env.SCHEDULER_ENABLED ? "on" : "off"}`,
     `retention=${env.RETENTION_DRY_RUN ? "dry-run" : "deleting"}`,
+    `file-links=${env.FILE_LINK_SECRET && env.FILE_LINK_BASE_URL ? "on" : "off"}`,
+    `email=${emailMode(env)}`,
     `commit=${commit ?? "unknown"}`,
   ].join(" ");
 }
@@ -37,5 +40,9 @@ export function startupWarnings(env: Env): string[] {
       /* already rejected by the settings check */
     }
   }
+  if (!env.FILE_LINK_SECRET || !env.FILE_LINK_BASE_URL) {
+    warnings.push("FILE_LINK_SECRET and FILE_LINK_BASE_URL are not set: staff file links are off (files show as unavailable)");
+  }
+  warnings.push(...emailWarnings(env));
   return warnings;
 }

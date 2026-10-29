@@ -32,7 +32,6 @@ const objects = new Map<string, Buffer>();
 const calls = { put: [] as Parameters<ObjectStore["presignPut"]>[0][], get: [] as { key: string; ifNoneMatch?: string }[], del: [] as string[] };
 const etagOf = (key: string) => `"etag-${key.length}-${key.at(-5)}"`;
 const recorder: ObjectStore = {
-  presignGet: async (args) => `https://s3.example.test/${args.key}?X-Amz-Expires=${args.expiresInSeconds}&X-Amz-Signature=test`,
   presignPut: async (args) => (calls.put.push(args), `https://upload.example.test/${args.key}?signed=1`),
   getObject: async (args) => {
     calls.get.push(args);

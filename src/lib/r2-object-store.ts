@@ -56,17 +56,15 @@ export class R2ObjectStore implements ObjectStore {
     });
   }
 
-  async presignGet(args: { key: string; contentType: string; expiresInSeconds: number }): Promise<string> {
-    // The storage API host (path style), signed. The response type is pinned to the allowlisted type of the key and the
-    // object is marked private, whatever metadata it was uploaded with.
-    const command = new GetObjectCommand({ Bucket: this.bucket, Key: args.key, ResponseContentType: args.contentType, ResponseCacheControl: "private, no-store" });
-    return getSignedUrl(this.client, command, { expiresIn: args.expiresInSeconds });
-  }
-
-  async getObject(args: { key: string; ifNoneMatch?: string }): Promise<StoredObject> {
+  async getObject(args: { key: string; ifNoneMatch?: string; range?: string }): Promise<StoredObject> {
     try {
       const response = await this.client.send(
-        new GetObjectCommand({ Bucket: this.bucket, Key: args.key, ...(args.ifNoneMatch ? { IfNoneMatch: args.ifNoneMatch } : {}) })
+        new GetObjectCommand({
+          Bucket: this.bucket,
+          Key: args.key,
+          ...(args.ifNoneMatch ? { IfNoneMatch: args.ifNoneMatch } : {}),
+          ...(args.range ? { Range: args.range } : {}),
+        })
       );
       if (!response.Body) return { kind: "missing" };
       return {
@@ -74,12 +72,14 @@ export class R2ObjectStore implements ObjectStore {
         body: response.Body as Readable,
         contentLength: typeof response.ContentLength === "number" ? response.ContentLength : null,
         etag: response.ETag ?? null,
+        contentRange: response.ContentRange ?? null,
       };
     } catch (error) {
       const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
       const name = (error as { name?: string }).name;
       if (status === 304 || name === "NotModified") return { kind: "notModified", etag: args.ifNoneMatch ?? null };
       if (status === 404 || name === "NoSuchKey" || name === "NotFound") return { kind: "missing" };
+      if (status === 416 || name === "InvalidRange") return { kind: "rangeNotSatisfiable" };
       throw error;
     }
   }

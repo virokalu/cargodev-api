@@ -31,10 +31,11 @@ API's own hostname for now (no separate files hostname).
   organisation's folder (`org/<orgId>/...`).
 - **Customers never see an address or a key.** They get a photo or a document through the API by its database id
   (`/photos/:id/image`, `/documents/:id/file`); the API checks, reads the object itself and streams it.
-- **Staff now get signed links.** `signStaffFileUrl` (src/lib/object-storage.ts) turns a stored address into a short-lived signed
-  link on the storage API host. It uses the SAME key derivation as the customer gateway (the address must start with the
-  configured public base AND the key must start with `org/<the token's orgId>/`). The staff file endpoints return that link in
-  their `url` field plus `expiresAt` (see docs/api-contract.md), so staff screens keep working when the bucket stops being public.
+- **Staff now get links on this API's own domain** (ADR 0007, docs/adr/adr-0007-temporary-file-links-on-our-own-domain.md). The staff
+  file endpoints return a signed link in their `url` field plus `expiresAt` (docs/api-contract.md); opening it makes the API check the
+  database again (the person, the org, the row, the key derivation inside the org's folder) and stream the bytes. **Closing the bucket
+  therefore needs no storage CORS rule for GET and no presigned GET**: the browser never talks to storage. Presigned PUT (uploads) stays,
+  with its CORS rule for PUT.
 - **The stored value does not change.** The database still holds the public-looking address (it is the file's identity: the host
   is checked, the key is derived from it). Nothing in this plan edits a row.
 
@@ -65,8 +66,8 @@ Do not switch anything off until every line is ticked or consciously accepted. C
 
 | | Staff | Customers |
 |---|---|---|
-| How a file is reached | a signed link on the storage API host (the browser or app loads it directly) | the API streams the bytes (`/photos/:id/image`, `/documents/:id/file`) |
-| What the client sees | a URL that works for `STAFF_SIGNED_URL_TTL_SECONDS` (60 to 900, default 600) and `expiresAt` | an id only: never an address, a key or a link |
+| How a file is reached | a signed link on this API's own domain; the API checks, reads the object and streams it | the API streams the bytes (`/photos/:id/image`, `/documents/:id/file`) with the Bearer token |
+| What the client sees | a URL that works for `FILE_LINK_TTL_SECONDS` (30 to 900, default 300) and `expiresAt`; ids only, no storage host or key | an id only: never an address, a key or a link |
 | Authorisation | the staff token's org, checked before anything is signed | the customer's own id, org, release flags, checked before the store is touched |
 | A row that cannot be mapped | `url: null, unavailable: true`; a masked count is logged | the same 404 as any other failure |
 | Caching | the API answer is `no-store`; clients must not store the link | `private, max-age=300` for the bytes only |

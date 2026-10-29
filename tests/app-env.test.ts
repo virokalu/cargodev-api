@@ -6,6 +6,8 @@ const BASE_ENV = {
   DATABASE_URL: "postgresql://user:password@example.test:5432/dbname",
   MOBILE_JWT_SECRET: "mobile-secret-value-0123456789abcdefXX",
   ORG_ID: "org_x",
+  FILE_LINK_SECRET: "link-secret-value-for-tests-0123456789abcdef",
+  FILE_LINK_BASE_URL: "https://api.example.test",
 };
 async function load(extra: Record<string, string>) {
   vi.resetModules();
@@ -84,7 +86,7 @@ describe("start-up information", () => {
     const actual = await vi.importActual<typeof import("../src/config/env.js")>("../src/config/env.js");
     const env = actual.loadEnv({ ...BASE_ENV, APP_ENV: "staging", SCHEDULER_ENABLED: "true", CLIENT_IP_SOURCE: "header", CLIENT_IP_HEADER: "true-client-ip", RETENTION_DRY_RUN: "false" });
     const line = startupSummary(env, { RENDER_GIT_COMMIT: "0123456789abcdef0123456789abcdef01234567" });
-    expect(line).toBe("APP_ENV=staging NODE_ENV=development client-ip=header scheduler=on retention=deleting commit=0123456");
+    expect(line).toBe("APP_ENV=staging NODE_ENV=development client-ip=header scheduler=on retention=deleting file-links=on email=off commit=0123456");
     expect(line).not.toMatch(/secret|password|postgresql|org_x/);
     expect(buildCommit({})).toBeNull();
     expect(buildCommit({ GIT_COMMIT: "not a commit" })).toBeNull();
@@ -96,7 +98,7 @@ describe("start-up information", () => {
     vi.resetModules();
     const { startupSummary } = await import("../src/lib/startup-info.js");
     const actual = await vi.importActual<typeof import("../src/config/env.js")>("../src/config/env.js");
-    expect(startupSummary(actual.loadEnv({ ...BASE_ENV }), {})).toBe("APP_ENV=development NODE_ENV=development client-ip=socket scheduler=on retention=dry-run commit=unknown");
+    expect(startupSummary(actual.loadEnv({ ...BASE_ENV }), {})).toBe("APP_ENV=development NODE_ENV=development client-ip=socket scheduler=on retention=dry-run file-links=on email=off commit=unknown");
   });
 
   it("an r2.dev stock address outside production gives one masked warning (no host in it)", async () => {
@@ -107,6 +109,16 @@ describe("start-up information", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("r2.dev");
     expect(warnings[0]).not.toContain("0123456789abcdef");
+  });
+
+  it("file links off (no secret or base) gives one masked warning and shows in the summary", async () => {
+    vi.resetModules();
+    const { startupWarnings, startupSummary } = await import("../src/lib/startup-info.js");
+    const actual = await vi.importActual<typeof import("../src/config/env.js")>("../src/config/env.js");
+    const { FILE_LINK_SECRET: _a, FILE_LINK_BASE_URL: _b, ...withoutLinks } = BASE_ENV;
+    const env = actual.loadEnv(withoutLinks);
+    expect(startupWarnings(env)).toEqual(["FILE_LINK_SECRET and FILE_LINK_BASE_URL are not set: staff file links are off (files show as unavailable)"]);
+    expect(startupSummary(env, {})).toContain("file-links=off");
   });
 
   it("no warning for a custom domain, or when nothing is set", async () => {

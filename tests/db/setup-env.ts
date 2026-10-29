@@ -12,3 +12,7 @@ process.env["DATABASE_URL"] = "postgresql://user:password@invalid.invalid:5432/n
 process.env["R2_PUBLIC_URL"] = "https://files.example.test";
 process.env["OTP_PEPPER"] = "test-only-otp-pepper-value-0123456789abcdef";
 process.env["PUBLIC_STOCK_IMAGE_BASE_URL"] = "https://img.example.test";
+
+// Own-domain file links (ADR 0007): fake values, only for tests.
+process.env["FILE_LINK_SECRET"] = "test-only-file-link-secret-value-0123456789abcdef";
+process.env["FILE_LINK_BASE_URL"] = "https://api.example.test";

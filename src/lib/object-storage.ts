@@ -92,17 +92,16 @@ export function checkNewFileUrl(orgId: string, url: string, kind: FileKind, vehi
 import type { Readable } from "node:stream";
 
 export type StoredObject =
-  | { kind: "found"; body: Readable; contentLength: number | null; etag: string | null }
+  | { kind: "found"; body: Readable; contentLength: number | null; etag: string | null; contentRange?: string | null }
   | { kind: "notModified"; etag: string | null }
+  | { kind: "rangeNotSatisfiable" }
   | { kind: "missing" };
 
 export interface ObjectStore {
   /** A URL a staff client can PUT one object to. Signs the exact content length and type, nothing more. */
   presignPut(args: { key: string; contentType: string; contentLength: number; expiresInSeconds: number }): Promise<string>;
-  /** A short-lived URL a STAFF client can GET one object from (the storage API host, signed). The response type is pinned. */
-  presignGet(args: { key: string; contentType: string; expiresInSeconds: number }): Promise<string>;
-  /** Reads one object. With `ifNoneMatch`, answers notModified when the ETag still matches (no body is read). */
-  getObject(args: { key: string; ifNoneMatch?: string }): Promise<StoredObject>;
+  /** Reads one object. With `ifNoneMatch`, answers notModified when the ETag still matches (no body is read). With `range` ("bytes=0-99"), one part. */
+  getObject(args: { key: string; ifNoneMatch?: string; range?: string }): Promise<StoredObject>;
   /** Writes one object (server side: thumbnails). */
   putObject(args: { key: string; body: Buffer; contentType: string }): Promise<void>;
   deleteKey(key: string): Promise<void>;
@@ -249,33 +248,6 @@ export async function verifyUploadedObject(key: string, kind: FileKind): Promise
     if (found.contentLength !== null && found.contentLength > UPLOAD_LIMITS[kind].maxBytes) return `This file is larger than ${UPLOAD_LIMITS[kind].maxBytes / 1024 / 1024} MB.`;
   }
   return null;
-}
-
-export interface SignedStaffFileUrl {
-  /** A signed GET link on the storage API host. Valid until `expiresAt`. Never stored, never logged. */
-  url: string;
-  expiresAt: string;
-}
-
-/**
- * A short-lived link a STAFF member can open to see a stored file. The key comes from the SAME validated function the
- * customer gateway uses (keyFromOwnedUrlForOrg): the stored address must start with the configured public base AND the key
- * must start with `org/<orgId>/` of the verified token. Anything else (another org, another host, a traversal, a type that is
- * not on the allowlist, no store configured, a signing failure) is null: the caller reports the row as unavailable.
- */
-export async function signStaffFileUrl(orgId: string, storedUrl: string | null | undefined, nowMs: number = Date.now()): Promise<SignedStaffFileUrl | null> {
-  if (!storedUrl) return null;
-  const key = keyFromOwnedUrlForOrg(orgId, storedUrl);
-  if (!key || !store) return null;
-  const contentType = contentTypeForKey(key);
-  if (!contentType) return null;
-  const expiresInSeconds = loadEnv().STAFF_SIGNED_URL_TTL_SECONDS;
-  try {
-    const url = await store.presignGet({ key, contentType, expiresInSeconds });
-    return { url, expiresAt: new Date(nowMs + expiresInSeconds * 1000).toISOString() };
-  } catch {
-    return null; // the library's message could contain the address: it is dropped, not logged
-  }
 }
 
 /** Best effort. Used only while no store is installed: it records that an object was left behind. */

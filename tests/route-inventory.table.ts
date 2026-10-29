@@ -32,6 +32,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { method: "POST", path: "/api/v1/auth/login", kind: "public" },
   { method: "POST", path: "/api/v1/auth/refresh", kind: "public" },
   { method: "POST", path: "/api/v1/auth/logout", kind: "public" },
+  // The own-domain file links: no Bearer token, a SIGNED link is the ticket and the database is asked again on every fetch (ADR 0007).
+  { method: "GET", path: "/f/v1/:kind/:id/:variant", kind: "public" },
   { method: "GET", path: "/api/public/stock", kind: "public" },
   { method: "GET", path: "/api/public/stock/:slug", kind: "public" },
   { method: "POST", path: "/api/public/enquiries", kind: "public" },

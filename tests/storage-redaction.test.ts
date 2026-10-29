@@ -15,7 +15,7 @@ const KEY = "org/org_test_a/vehicles/v_fc_pending/photos/0f8fad5b-d9cb-469f-a165
 const STOCK_KEY = "stock/0123456789abcdef/0f8fad5b-d9cb-469f-a165-70867728950e.webp";
 const SIGNED = `https://${ACCOUNT}.r2.cloudflarestorage.com/${BUCKET}/${KEY}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAFAKE%2F20261029%2Fauto%2Fs3%2Faws4_request&X-Amz-Signature=abc123`;
 
-const state = vi.hoisted(() => ({ fake: undefined as unknown, configured: true }));
+const state = vi.hoisted(() => ({ fake: undefined as unknown, configured: true, extra: {} as Record<string, string> }));
 vi.mock("../src/lib/prisma.js", () => ({ getPrisma: () => (state.fake as FakePrisma).client }));
 vi.mock("../src/config/env.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/config/env.js")>();
@@ -26,6 +26,7 @@ vi.mock("../src/config/env.js", async (importOriginal) => {
       ...(state.configured
         ? { R2_PUBLIC_URL: "https://pub-0123456789abcdef0123456789abcdef.r2.dev", PUBLIC_STOCK_IMAGE_BASE_URL: "https://img.example.test", R2_ACCOUNT_ID: "0123456789abcdef0123456789abcdef", R2_BUCKET_NAME: "cargodev-fake-files", R2_PUBLIC_STOCK_BUCKET_NAME: "cargodev-fake-stock" }
         : {}),
+      ...state.extra,
     }),
   };
 });
@@ -37,6 +38,7 @@ import { listActivityLog } from "../src/services/activity-log.service.js";
 
 beforeEach(() => {
   state.configured = true;
+  state.extra = {};
 });
 
 describe("redactStorageReferences", () => {
@@ -121,7 +123,16 @@ describe("redactStorageReferences", () => {
   });
 
   it("a short configured name never mangles ordinary words (names under 4 characters are ignored)", () => {
-    expect(redactStorageReferences("the cat sat")).toBe("the cat sat");
+    state.extra = { R2_BUCKET_NAME: "cat" };
+    expect(redactStorageReferences("the cat sat on the mat")).toBe("the cat sat on the mat");
+    state.extra = { R2_BUCKET_NAME: "cats" }; // four characters is the shortest that is looked for
+    expect(redactStorageReferences("the cats sat")).toBe(`the ${NAME_REMOVED} sat`);
+  });
+
+  it("a configured host is removed on ANY port or path, not only under the exact configured base", () => {
+    expect(redactStorageReferences("https://img.example.test:8443/other/place.png")).toBe(ADDRESS_REMOVED);
+    expect(redactStorageReferences("http://img.example.test/x")).toBe(ADDRESS_REMOVED);
+    expect(redactStorageReferences("https://pub-0123456789abcdef0123456789abcdef.r2.dev:444/z")).toBe(ADDRESS_REMOVED);
   });
 });
 

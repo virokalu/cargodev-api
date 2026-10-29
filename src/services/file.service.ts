@@ -17,7 +17,10 @@ import { getPrisma } from "../lib/prisma.js";
 import { ServiceError } from "../lib/errors.js";
 import type { SessionUser } from "../lib/session-user.js";
 import { safeError } from "../lib/redact.js";
-import { checkNewFileKey, deleteObject, keyFromOwnedUrlForOrg, signStaffFileUrl, storedUrlForKey, verifyUploadedObject, type FileKind } from "../lib/object-storage.js";
+import { checkNewFileKey, contentTypeForKey, deleteObject, isImageType, keyFromOwnedUrlForOrg, requireStore, storedUrlForKey, verifyUploadedObject, type FileKind } from "../lib/object-storage.js";
+import type { Readable } from "node:stream";
+import type { FileLinkKind } from "../lib/file-link.js";
+import { issueFileLink, type LinkContext } from "./file-link.service.js";
 import { DOCUMENT_TYPE_META } from "../lib/constants/document-type.js";
 import { parseInput } from "../lib/parse.js";
 import { documentBodySchema, fileKeyBodySchema, photosAddedBodySchema } from "../validation/file.schema.js";
@@ -56,9 +59,9 @@ function deleteStoredFile(orgId: string, url: string): void {
 }
 
 /**
- * What a STAFF client receives for a stored file: a short-lived signed link in `url` (never the stored address) and when it
- * stops working. A row whose address cannot be mapped to a file this org may read has `url: null` and `unavailable: true`.
- * Clients must not store the link: ask again.
+ * What a STAFF client receives for a stored file: a short-lived link on THIS API's own domain in `url` (never the stored address, never a
+ * storage host) and when it stops working. A row whose address cannot be mapped to a file this org may read, or any file when links are not
+ * configured, has `url: null` and `unavailable: true`. Clients must not store the link: ask again.
  */
 export interface StaffFileLink {
   url: string | null;
@@ -66,15 +69,22 @@ export interface StaffFileLink {
   unavailable?: true;
 }
 
-async function staffLink(orgId: string, stored: string | null): Promise<StaffFileLink> {
-  const signed = await signStaffFileUrl(orgId, stored);
-  return signed ? { url: signed.url, expiresAt: signed.expiresAt } : { url: null, expiresAt: null, unavailable: true };
+const staffContext = (actor: { id: string; orgId: string }): LinkContext => ({ orgId: actor.orgId, userId: actor.id, audience: "staff" });
+
+/** Called only after the endpoint's own authorization (the vehicle is the caller's, the role is allowed). */
+function staffLink(context: LinkContext, kind: FileLinkKind, id: string, stored: string | null): StaffFileLink {
+  // The stored address must map to a file this org may read, through the same validated function as the customer gateway.
+  const key = stored ? keyFromOwnedUrlForOrg(context.orgId, stored) : null;
+  const type = key ? contentTypeForKey(key) : null;
+  const suitable = type !== null && (kind === "document" ? type === "application/pdf" : isImageType(type));
+  const issued = suitable ? issueFileLink(context, kind, id, "full") : null;
+  return issued ? { url: issued.url, expiresAt: issued.expiresAt } : { url: null, expiresAt: null, unavailable: true };
 }
 
 /** A masked count only: never an address, a key or an id. */
 function warnUnavailable(links: StaffFileLink[]): void {
   const count = links.filter((link) => link.unavailable).length;
-  if (count > 0) console.warn(`staff file links: ${count} stored file address(es) could not be signed`);
+  if (count > 0) console.warn(`staff file links: ${count} file(s) could not be linked`);
 }
 
 export interface VehiclePhotoListItem extends StaffFileLink {
@@ -150,14 +160,13 @@ async function loadStoredVehicleFiles(orgId: string, vehicleId: string): Promise
   };
 }
 
-/** The files of one vehicle for a staff client: every address is replaced by a short-lived signed link. */
-export async function listVehicleFiles(orgId: string, vehicleId: string): Promise<VehicleFiles> {
-  const stored = await loadStoredVehicleFiles(orgId, vehicleId);
-  const sheet = stored.auctionSheetUrl ? await staffLink(orgId, stored.auctionSheetUrl) : null;
-  const photos = await Promise.all(stored.photos.map(async (p) => ({ id: p.id, ...(await staffLink(orgId, p.url)), uploaderName: p.uploaderName, createdAt: p.createdAt })));
-  const documents = await Promise.all(
-    stored.documents.map(async (d) => ({ id: d.id, ...(await staffLink(orgId, d.url)), name: d.name, documentType: d.documentType, uploaderName: d.uploaderName, createdAt: d.createdAt }))
-  );
+/** The files of one vehicle for a staff client: every address is replaced by a short-lived link on our own domain. */
+export async function listVehicleFiles(actor: { id: string; orgId: string }, vehicleId: string): Promise<VehicleFiles> {
+  const stored = await loadStoredVehicleFiles(actor.orgId, vehicleId);
+  const context = staffContext(actor);
+  const sheet = stored.auctionSheetUrl ? staffLink(context, "auction-sheet", vehicleId, stored.auctionSheetUrl) : null;
+  const photos = stored.photos.map((p) => ({ id: p.id, ...staffLink(context, "photo", p.id, p.url), uploaderName: p.uploaderName, createdAt: p.createdAt }));
+  const documents = stored.documents.map((d) => ({ id: d.id, ...staffLink(context, "document", d.id, d.url), name: d.name, documentType: d.documentType, uploaderName: d.uploaderName, createdAt: d.createdAt }));
   warnUnavailable([...(sheet ? [sheet] : []), ...photos, ...documents]);
   return {
     auctionSheetUrl: sheet?.url ?? null,
@@ -177,48 +186,48 @@ export interface VehiclePdfImages {
 export const PDF_IMAGE_FETCH = { timeoutMs: 10_000, maxBytes: 15 * 1024 * 1024 } as const;
 const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
-async function readCapped(response: Response, maxBytes: number): Promise<Buffer | null> {
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > maxBytes) return null;
-  if (!response.body) return null;
-
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
+/** Reads a stream up to `maxBytes` within `timeoutMs`; null if it is larger or too slow (the stream is closed either way). */
+async function readStreamCapped(stream: Readable, maxBytes: number, timeoutMs: number): Promise<Buffer | null> {
+  const chunks: Buffer[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel();
-      return null;
+  const timer = setTimeout(() => stream.destroy(new Error("timeout")), timeoutMs);
+  try {
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      total += buffer.length;
+      if (total > maxBytes) {
+        stream.destroy();
+        return null;
+      }
+      chunks.push(buffer);
     }
-    chunks.push(value);
+    return Buffer.concat(chunks);
+  } finally {
+    clearTimeout(timer);
   }
-  return Buffer.concat(chunks);
 }
 
 /**
- * Fetches one stored image and returns it as a data URL, or null. The URL is re-checked against this
- * org's folder first (rows written before validation existed may hold anything), redirects are refused
- * (a redirect could send us to an internal address), and size, time and content type are capped.
+ * Reads one stored image through the object store and returns it as a data URL, or null. The stored address is re-checked against this
+ * org's folder first (rows written before validation existed may hold anything). The bytes come from the store directly: no link, no
+ * network call to a stored address. Size, time and content type are capped.
  */
 async function fetchAsDataUrl(orgId: string, url: string): Promise<string | null> {
-  // The address is mapped to a key by the same validated function as everywhere else, then signed: the server fetches the
-  // storage API with a short-lived link (the host is the store's own endpoint, never a value from a row).
-  const signed = await signStaffFileUrl(orgId, url);
-  if (!signed) return null;
+  const key = keyFromOwnedUrlForOrg(orgId, url);
+  const contentType = key ? contentTypeForKey(key) : null;
+  if (!key || !contentType || !ALLOWED_IMAGE_TYPES.has(contentType)) return null;
   try {
-    const response = await fetch(signed.url, {
-      redirect: "error",
-      signal: AbortSignal.timeout(PDF_IMAGE_FETCH.timeoutMs),
-    });
-    if (!response.ok) return null;
-    const contentType = (response.headers.get("content-type") ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
-    if (!ALLOWED_IMAGE_TYPES.has(contentType)) return null;
-    const buffer = await readCapped(response, PDF_IMAGE_FETCH.maxBytes);
-    if (!buffer) return null;
-    return `data:${contentType};base64,${buffer.toString("base64")}`;
+    const found = await Promise.race([
+      requireStore().getObject({ key }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), PDF_IMAGE_FETCH.timeoutMs).unref()),
+    ]);
+    if (found.kind !== "found") return null;
+    if (found.contentLength !== null && found.contentLength > PDF_IMAGE_FETCH.maxBytes) {
+      found.body.destroy();
+      return null;
+    }
+    const buffer = await readStreamCapped(found.body, PDF_IMAGE_FETCH.maxBytes, PDF_IMAGE_FETCH.timeoutMs);
+    return buffer ? `data:${contentType};base64,${buffer.toString("base64")}` : null;
   } catch {
     return null;
   }
@@ -274,7 +283,7 @@ export async function setAuctionSheet(
   // Best-effort cleanup of the replaced file: a storage failure never blocks the replace.
   if (vehicle.auctionSheetUrl && vehicle.auctionSheetUrl !== url) deleteStoredFile(actor.orgId, vehicle.auctionSheetUrl);
 
-  const link = await staffLink(actor.orgId, result.auctionSheetUrl);
+  const link = staffLink(staffContext(actor), "auction-sheet", vehicleId, result.auctionSheetUrl);
   warnUnavailable([link]);
   return { auctionSheetUrl: link.url, auctionSheetExpiresAt: link.expiresAt, ...(link.unavailable ? { auctionSheetUnavailable: true as const } : {}) };
 }
@@ -310,7 +319,7 @@ export async function addVehiclePhoto(
   // Best effort, after the commit: a missing thumbnail only means the photo is served in full.
   await createPhotoThumbnail(actor.orgId, photo.url);
 
-  const link = await staffLink(actor.orgId, photo.url);
+  const link = staffLink(staffContext(actor), "photo", photo.id, photo.url);
   warnUnavailable([link]);
   return { id: photo.id, ...link, uploaderName: photo.uploadedBy.name, createdAt: photo.createdAt };
 }
@@ -402,7 +411,7 @@ export async function addVehicleDocument(
   });
 
   notificationService.notifyRealtime(notification);
-  const link = await staffLink(actor.orgId, document.url);
+  const link = staffLink(staffContext(actor), "document", document.id, document.url);
   warnUnavailable([link]);
   return {
     id: document.id,

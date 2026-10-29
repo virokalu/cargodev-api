@@ -27,6 +27,7 @@ import { registerMilestoneRoutes } from "./routes/milestones.js";
 import { registerUploadRoutes } from "./routes/uploads.js";
 import { registerVehicleReleaseRoutes } from "./routes/vehicle-release.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
+import { registerFileLinkRoutes } from "./routes/file-links.js";
 import { SseHub } from "./lib/sse-hub.js";
 import { objectStoreConfigured, setObjectStore } from "./lib/object-storage.js";
 import { createR2ObjectStore } from "./lib/r2-object-store.js";
@@ -256,6 +257,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   );
 
   // The public website API: no login, its own prefix, its own CORS allow-list. Not mounted unless it is switched on.
+  // Temporary file links on our own domain (ADR 0007): no Bearer token, the signed link is the ticket.
+  registerFileLinkRoutes(app);
   if (publicStockEnabled) {
     await app.register(async (publicApi) => registerPublicRoutes(publicApi), { prefix: "/api/public" });
   }

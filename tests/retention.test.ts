@@ -22,6 +22,8 @@ const BASE_ENV = {
   DATABASE_URL: "postgresql://user:password@example.test:5432/dbname",
   MOBILE_JWT_SECRET: "mobile-secret-value-0123456789abcdefXX",
   ORG_ID: "org_x",
+  FILE_LINK_SECRET: "link-secret-value-for-tests-0123456789abcdef",
+  FILE_LINK_BASE_URL: "https://api.example.test",
 };
 async function loadEnvFresh(extra: Record<string, string>) {
   vi.resetModules();

@@ -96,7 +96,6 @@ describe("thumbnails next to stored photos", () => {
   const puts: string[] = [];
   const deletes: string[] = [];
   const store: ObjectStore = {
-    presignGet: async (args) => `https://s3.example.test/${args.key}?X-Amz-Expires=${args.expiresInSeconds}&X-Amz-Signature=test`,
     presignPut: async () => "https://upload.example.test/x",
     getObject: async ({ key }) => {
       const found = objects.get(key);
@@ -142,7 +141,8 @@ describe("thumbnails next to stored photos", () => {
     objects.set(KEY, { body: Buffer.from("<svg onload=alert(1)/>") });
     const photo = await addVehiclePhoto(actor(), "v_fc_pending", { key: KEY });
     // staff get a signed link in the response; the stored address in the row is unchanged
-    expect(photo.url).toBe(`https://s3.example.test/${KEY}?X-Amz-Expires=600&X-Amz-Signature=test`);
+    expect(photo.url).toMatch(/^https:\/\/api\.example\.test\/f\/v1\/photo\/[A-Za-z0-9_-]+\/full\?o=org_test_a&u=user_a_manager&a=staff&exp=\d+&sig=[A-Za-z0-9_-]{43}$/);
+    expect(photo.url).not.toContain(KEY);
     expect(fake.rows("vehiclePhoto")[0]!.url).toBe(`${BASE}/${KEY}`);
     expect(fake.rows("vehiclePhoto")).toHaveLength(1);
     expect(puts).toEqual([]);

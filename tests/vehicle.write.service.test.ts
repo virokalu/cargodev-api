@@ -107,6 +107,36 @@ describe("createVehicle", () => {
       expect(actions()).toEqual([]);
     });
 
+    it("with a store configured the objects must really exist and be within the size limit", async () => {
+      const { setObjectStore } = await import("../src/lib/object-storage.js");
+      const { Readable } = await import("node:stream");
+      const sizes = new Map<string, number>();
+      setObjectStore({
+        presignPut: async () => "https://upload.example.test/x",
+        getObject: async ({ key }: { key: string }) => (sizes.has(key) ? { kind: "found", body: Readable.from([Buffer.from("x")]), contentLength: sizes.get(key)!, etag: null } : { kind: "missing" }),
+        putObject: async () => undefined,
+        deleteKey: async () => undefined,
+      } as never); // only what registering a file reads is provided
+      try {
+        const photo = `org/${ORG_A}/uploads/staging/p.jpg`;
+        const doc = `org/${ORG_A}/uploads/staging/d.pdf`;
+        const sheet = `org/${ORG_A}/uploads/staging/s.png`;
+        await expect(createVehicle(actor(), { ...base, photoKeys: [photo] })).rejects.toMatchObject({ fieldErrors: { "photoKeys.0": expect.stringContaining("has not been uploaded") } });
+        await expect(createVehicle(actor(), { ...base, auctionSheetKey: sheet })).rejects.toMatchObject({ fieldErrors: { auctionSheetKey: expect.stringContaining("has not been uploaded") } });
+        await expect(createVehicle(actor(), { ...base, documents: [{ key: doc, name: "n", documentType: "OTHER" }] })).rejects.toMatchObject({ fieldErrors: { "documents.0.key": expect.stringContaining("has not been uploaded") } });
+        expect(fake.rows("vehiclePhoto")).toHaveLength(0);
+        sizes.set(photo, 10 * 1024 * 1024 + 1);
+        await expect(createVehicle(actor(), { ...base, photoKeys: [photo] })).rejects.toMatchObject({ fieldErrors: { "photoKeys.0": expect.stringContaining("10 MB") } });
+        sizes.set(photo, 1000);
+        sizes.set(doc, 1000);
+        sizes.set(sheet, 1000);
+        await expect(createVehicle(actor(), { ...base, photoKeys: [photo], auctionSheetKey: sheet, documents: [{ key: doc, name: "n", documentType: "OTHER" }] })).resolves.toBeTruthy();
+        expect(fake.rows("vehiclePhoto")).toHaveLength(1);
+      } finally {
+        setObjectStore(null);
+      }
+    });
+
     it("the old address fields are no longer accepted (unknown fields are ignored: nothing is attached)", async () => {
       const stagingUrl = `https://files.example.test/org/${ORG_A}/uploads/staging/a.jpg`;
       await createVehicle(actor(), { ...base, photoUrls: [stagingUrl], auctionSheetUrl: stagingUrl });

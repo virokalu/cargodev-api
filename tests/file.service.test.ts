@@ -9,7 +9,13 @@ vi.mock("../src/lib/prisma.js", () => ({
   getPrisma: () => (state.fake as FakePrisma).client,
 }));
 vi.mock("../src/config/env.js", () => ({
-  loadEnv: () => ({ R2_PUBLIC_URL: state.base, STAFF_SIGNED_URL_TTL_SECONDS: 600 }),
+  loadEnv: () => ({
+    R2_PUBLIC_URL: state.base,
+    FILE_LINK_SECRET: "link-secret-value-for-tests-0123456789abcdef",
+    FILE_LINK_BASE_URL: "https://api.example.test",
+    FILE_LINK_TTL_SECONDS: 300,
+    FILE_LINK_MAX_TTL_SECONDS: 900,
+  }),
 }));
 
 import { setObjectDeleter, setObjectStore, type ObjectStore } from "../src/lib/object-storage.js";
@@ -35,14 +41,23 @@ const docUrl = (name = "d.pdf") => `${BASE}/${docKey(name)}`;
 
 // Staff get short-lived signed links, never the stored address. The store holds only the objects a test says were uploaded
 // (registering a key checks the object exists and is not too large).
-const SIGNED = (key: string) => `https://s3.example.test/${key}?X-Amz-Expires=600&X-Amz-Signature=test`;
+const LINK = (kind: string, id: string) => new RegExp(`^https://api\\.example\\.test/f/v1/${kind}/${id}/full\\?o=${ORG_A}&u=user_a_manager&a=staff&exp=\\d+&sig=[A-Za-z0-9_-]{43}$`);
 const uploaded = new Map<string, number>(); // key -> size in bytes
+const opened: Readable[] = []; // every stream the store handed out
+const contents = new Map<string, Buffer>(); // what an object holds (default: one byte)
+const reads: string[] = []; // every key the store was asked for
+const lengthUnknown = new Set<string>(); // objects the store reports with no length
+const failing = new Set<string>(); // objects whose read throws
 const signingStore: ObjectStore = {
-  presignGet: async (args) => SIGNED(args.key),
   presignPut: async () => "https://upload.example.test/x",
   getObject: async ({ key }) => {
+    reads.push(key);
+    if (failing.has(key)) throw new Error("storage down");
     const size = uploaded.get(key);
-    return size === undefined ? { kind: "missing" } : { kind: "found", body: Readable.from([Buffer.from("x")]), contentLength: size, etag: null };
+    if (size === undefined) return { kind: "missing" };
+    const body = Readable.from([contents.get(key) ?? Buffer.from("x")]);
+    opened.push(body);
+    return { kind: "found", body, contentLength: lengthUnknown.has(key) ? null : size, etag: null };
   },
   putObject: async () => undefined,
   deleteKey: async (key) => void deleted.push(key),
@@ -57,6 +72,11 @@ beforeEach(() => {
   fake.seed("user", { id: "user_a_manager", org_id: ORG_A, userType: "STAFF", role: "MANAGER", loginEnabled: false, name: "Test Manager A" }, { id: "someone", org_id: ORG_A, userType: "STAFF", role: "MANAGER", loginEnabled: false, name: "Someone" }, { id: "mgr_actor", org_id: ORG_A, userType: "STAFF", role: "MANAGER", loginEnabled: true, name: "Actor" });
   state.base = BASE;
   uploaded.clear();
+  opened.length = 0;
+  contents.clear();
+  reads.length = 0;
+  lengthUnknown.clear();
+  failing.clear();
   for (const key of [photoKey(), photoKey(ORG_A, "v_fc_deleted"), docKey(), sheetKey(), sheetKey("one.jpg"), sheetKey("two.jpg")]) uploaded.set(key, 1000);
   vi.spyOn(console, "error").mockImplementation(() => undefined); // the best-effort thumbnail cannot read these fake objects
   setObjectStore(signingStore);
@@ -78,7 +98,7 @@ const rejects = async (p: Promise<unknown>, code: string) => {
 describe("a vehicle outside the caller's org is NOT_FOUND on every file operation", () => {
   const other = "v_b_fc";
   it.each([
-    ["list", () => listVehicleFiles(ORG_A, other)],
+    ["list", () => listVehicleFiles({ id: "user_a_manager", orgId: ORG_A }, other)],
     ["pdf images", () => getVehiclePdfImages(ORG_A, other)],
     ["set auction sheet", () => setAuctionSheet(actor(), other, { key: sheetKey() })],
     ["add photo", () => addVehiclePhoto(actor(), other, { key: photoKey() })],
@@ -154,6 +174,12 @@ describe("new file KEYS must be this org's own upload for this vehicle", () => {
     await expect(addVehiclePhoto(actor(), VEH, { key: photoKey() })).resolves.toBeTruthy();
   });
 
+  it("checking an upload does not leave its stream open (only the size is needed)", async () => {
+    await addVehiclePhoto(actor(), VEH, { key: photoKey() });
+    expect(opened.length).toBeGreaterThan(0);
+    expect(opened[0]!.destroyed).toBe(true);
+  });
+
   it("the value stored is built on the server from the key (a client cannot choose the address)", async () => {
     await addVehiclePhoto(actor(), VEH, { key: photoKey() });
     expect(fake.rows("vehiclePhoto")[0]!["url"]).toBe(photoUrl());
@@ -204,7 +230,7 @@ describe("photos", () => {
   it("adds a photo with an ActivityLog row, scoped to the caller's org", async () => {
     const photo = await addVehiclePhoto(actor(), VEH, { key: photoKey() });
     // the response carries a short-lived signed link, never the stored address
-    expect(photo).toMatchObject({ url: SIGNED(`org/${ORG_A}/vehicles/${VEH}/photos/a.jpg`), expiresAt: expect.any(String), uploaderName: expect.any(String) });
+    expect(photo).toMatchObject({ url: expect.stringMatching(LINK("photo", photo.id)), expiresAt: expect.any(String), uploaderName: expect.any(String) });
     expect(photo.url).not.toContain(BASE);
     expect(fake.rows("vehiclePhoto")[0]!["url"]).toBe(photoUrl()); // the database still holds the stored address
     expect(fake.rows("vehiclePhoto")).toHaveLength(1);
@@ -280,7 +306,7 @@ describe("auction sheet", () => {
   it("sets the sheet, logs before/after, and removes the replaced object", async () => {
     await setAuctionSheet(actor(), VEH, { key: sheetKey("one.jpg") });
     const second = await setAuctionSheet(actor(), VEH, { key: sheetKey("two.jpg") });
-    expect(second).toEqual({ auctionSheetUrl: SIGNED(`org/${ORG_A}/vehicles/${VEH}/auction-sheet/two.jpg`), auctionSheetExpiresAt: expect.any(String) });
+    expect(second).toEqual({ auctionSheetUrl: expect.stringMatching(LINK("auction-sheet", VEH)), auctionSheetExpiresAt: expect.any(String) });
     expect(deleted).toEqual([`org/${ORG_A}/vehicles/${VEH}/auction-sheet/one.jpg`]);
     expect(fake.rows("activityLog")).toHaveLength(2);
   });
@@ -292,64 +318,92 @@ describe("auction sheet", () => {
   });
 });
 
-describe("getVehiclePdfImages: the server-side fetch", () => {
-  const image = (type = "image/png", body = "abc", headers: Record<string, string> = {}) =>
-    new Response(body, { status: 200, headers: { "content-type": type, ...headers } });
-
-  const seedPhotos = (...urls: string[]) =>
-    urls.forEach((url, i) => fake.seed("vehiclePhoto", { id: `p${i}`, vehicleId: VEH, url, uploadedById: "staff_a1" }));
-
-  it("fetches own-org images with redirects refused and a timeout, returning data URLs", async () => {
-    seedPhotos(photoUrl());
-    const fetchMock = vi.fn(async () => image());
+describe("getVehiclePdfImages: reads through the store, never over the network", () => {
+  const seedPhotos = (...urls: string[]) => urls.forEach((url, i) => fake.seed("vehiclePhoto", { id: `p${i}`, vehicleId: VEH, url, uploadedById: "staff_a1" }));
+  const noNetwork = () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error("no network call may be made");
+    });
     vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  };
+
+  it("returns own-org images as data URLs, reading each key from the store and making no network call", async () => {
+    contents.set(photoKey(), Buffer.from("abc"));
+    uploaded.set(photoKey(), 3);
+    seedPhotos(photoUrl());
+    const fetchMock = noNetwork();
     const result = await getVehiclePdfImages(ORG_A, VEH);
-    expect(result.photoDataUrls).toEqual([`data:image/png;base64,${Buffer.from("abc").toString("base64")}`]);
-    // the server fetches the storage API with a signed link, not the public address
-    expect(fetchMock).toHaveBeenCalledWith(SIGNED(`org/${ORG_A}/vehicles/${VEH}/photos/a.jpg`), expect.objectContaining({ redirect: "error", signal: expect.anything() }));
-    expect(fetchMock).not.toHaveBeenCalledWith(photoUrl(), expect.anything());
+    expect(result.photoDataUrls).toEqual([`data:image/jpeg;base64,${Buffer.from("abc").toString("base64")}`]);
+    expect(reads).toEqual([photoKey()]);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("NEVER fetches a stored URL outside this org's folder (SSRF / cross-org)", async () => {
+  it("reads the auction sheet the same way", async () => {
+    fake.rows("vehicle").find((v) => v["id"] === VEH)!["auctionSheetUrl"] = `${BASE}/${sheetKey()}`;
+    contents.set(sheetKey(), Buffer.from("sheet"));
+    const fetchMock = noNetwork();
+    expect((await getVehiclePdfImages(ORG_A, VEH)).auctionSheetDataUrl).toBe(`data:image/jpeg;base64,${Buffer.from("sheet").toString("base64")}`);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("NEVER reads a stored address outside this org's folder (SSRF / cross-org): the store is not even asked", async () => {
     seedPhotos("http://169.254.169.254/latest/meta-data/", "http://localhost:5432/", photoUrl(ORG_B, "v_b_fc"), "https://evil.test/a.jpg");
     fake.rows("vehicle").find((v) => v["id"] === VEH)!["auctionSheetUrl"] = "http://10.0.0.5/admin";
-    const fetchMock = vi.fn(async () => image());
-    vi.stubGlobal("fetch", fetchMock);
+    const fetchMock = noNetwork();
     const result = await getVehiclePdfImages(ORG_A, VEH);
-    expect(fetchMock).not.toHaveBeenCalled();
     expect(result).toEqual({ auctionSheetDataUrl: null, photoDataUrls: [] });
+    expect(reads).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("never fetches when storage is not configured", async () => {
-    state.base = undefined;
+  it("reads nothing when storage is not configured, and does not throw when no store is installed", async () => {
     seedPhotos(photoUrl());
-    const fetchMock = vi.fn(async () => image());
-    vi.stubGlobal("fetch", fetchMock);
+    state.base = undefined;
     expect((await getVehiclePdfImages(ORG_A, VEH)).photoDataUrls).toEqual([]);
-    expect(fetchMock).not.toHaveBeenCalled();
+    state.base = BASE;
+    setObjectStore(null);
+    expect((await getVehiclePdfImages(ORG_A, VEH)).photoDataUrls).toEqual([]);
+    expect(reads).toEqual([]);
   });
 
   it.each([
-    ["a non-image type", () => image("text/html")],
-    ["an svg", () => image("image/svg+xml")],
-    ["a non-200", () => new Response("no", { status: 404, headers: { "content-type": "image/png" } })],
-    ["a declared size over the cap", () => image("image/png", "x", { "content-length": String(16 * 1024 * 1024) })],
-    ["a body over the cap", () => new Response(new Uint8Array(15 * 1024 * 1024 + 1), { headers: { "content-type": "image/png" } })],
-  ])("skips %s", async (_n, make) => {
-    seedPhotos(photoUrl());
-    vi.stubGlobal("fetch", vi.fn(async () => make()));
+    ["a pdf", "x.pdf"],
+    ["an svg", "x.svg"],
+    ["an html file", "x.html"],
+    ["a file with no extension", "x"],
+  ])("skips %s stored as a photo without reading it", async (_n, name) => {
+    uploaded.set(photoKey(ORG_A, VEH, name), 10);
+    seedPhotos(photoUrl(ORG_A, VEH, name));
+    expect((await getVehiclePdfImages(ORG_A, VEH)).photoDataUrls).toEqual([]);
+    expect(reads).toEqual([]);
+  });
+
+  it("skips a missing object", async () => {
+    seedPhotos(photoUrl(ORG_A, VEH, "gone.jpg"));
     expect((await getVehiclePdfImages(ORG_A, VEH)).photoDataUrls).toEqual([]);
   });
 
-  it("a network error or redirect error skips that image and keeps the others", async () => {
+  it("skips a declared size over the cap, and closes that stream", async () => {
+    uploaded.set(photoKey(), 16 * 1024 * 1024);
+    seedPhotos(photoUrl());
+    expect((await getVehiclePdfImages(ORG_A, VEH)).photoDataUrls).toEqual([]);
+    expect(opened[0]!.destroyed).toBe(true);
+  });
+
+  it("skips a body over the cap when its length is not declared", async () => {
+    uploaded.set(photoKey(), 1);
+    lengthUnknown.add(photoKey());
+    contents.set(photoKey(), Buffer.alloc(15 * 1024 * 1024 + 1, 1));
+    seedPhotos(photoUrl());
+    expect((await getVehiclePdfImages(ORG_A, VEH)).photoDataUrls).toEqual([]);
+  });
+
+  it("a store error skips that image and keeps the others", async () => {
+    uploaded.set(photoKey(ORG_A, VEH, "bad.jpg"), 10);
+    uploaded.set(photoKey(ORG_A, VEH, "good.jpg"), 10);
+    failing.add(photoKey(ORG_A, VEH, "bad.jpg"));
     seedPhotos(photoUrl(ORG_A, VEH, "bad.jpg"), photoUrl(ORG_A, VEH, "good.jpg"));
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (url.includes("/bad.jpg?")) throw new TypeError("redirect mode is set to error");
-        return image();
-      })
-    );
     expect((await getVehiclePdfImages(ORG_A, VEH)).photoDataUrls).toHaveLength(1);
   });
 });

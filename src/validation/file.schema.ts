@@ -21,12 +21,13 @@ export const DOCUMENT_TYPES = [
   "OTHER",
 ] as const;
 
-const fileUrl = z.string("url is required").trim().min(1, "url is required").max(2000, "url is too long");
+// A file is registered by the KEY the upload presign returned. The stored value is built on the server from it.
+const fileKey = z.string("key is required").trim().min(1, "key is required").max(1024, "key is too long");
 
-export const fileUrlBodySchema = z.object({ url: fileUrl });
+export const fileKeyBodySchema = z.object({ key: fileKey });
 
 export const documentBodySchema = z.object({
-  url: fileUrl,
+  key: fileKey,
   name: z.string("name is required").trim().min(1, "name is required").max(255, "name must be 255 characters or fewer"),
   documentType: z.enum(DOCUMENT_TYPES, { error: "documentType is not valid" }),
 });

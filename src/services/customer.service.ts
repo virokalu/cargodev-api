@@ -135,7 +135,14 @@ function toListItem(row: {
   return { ...rest, vehicleCount: _count.vehicles };
 }
 
-export async function listCustomers(orgId: string, query?: string): Promise<CustomerListItem[]> {
+/** What a role that may not see contact details gets: no email, phone or address (the keys are absent, not null). */
+export type CustomerListItemWithoutContact = Omit<CustomerListItem, "email" | "phone" | "address">;
+
+/**
+ * The customer list. `contact: false` (a VIEWER) removes email, phone and address from every row AND stops the search from
+ * matching them: otherwise a search for "@gmail.com" or "077" would reveal who has such an address or number.
+ */
+export async function listCustomers(orgId: string, query: string | undefined, contact: boolean): Promise<Array<CustomerListItem | CustomerListItemWithoutContact>> {
   const q = query?.trim();
   const customers = await getPrisma().user.findMany({
     where: {
@@ -145,8 +152,12 @@ export async function listCustomers(orgId: string, query?: string): Promise<Cust
         ? {
             OR: [
               { name: { contains: q, mode: "insensitive" } },
-              { email: { contains: q, mode: "insensitive" } },
-              { phone: { contains: q, mode: "insensitive" } },
+              ...(contact
+                ? [
+                    { email: { contains: q, mode: "insensitive" as const } },
+                    { phone: { contains: q, mode: "insensitive" as const } },
+                  ]
+                : []),
             ],
           }
         : {}),
@@ -154,7 +165,12 @@ export async function listCustomers(orgId: string, query?: string): Promise<Cust
     select: CUSTOMER_SELECT,
     orderBy: { name: "asc" },
   });
-  return customers.map(toListItem);
+  return customers.map((row) => {
+    const item = toListItem(row);
+    if (contact) return item;
+    const { email: _email, phone: _phone, address: _address, ...withoutContact } = item;
+    return withoutContact;
+  });
 }
 
 /** Fetches one customer row scoped to the org, or throws NOT_FOUND. */
@@ -225,8 +241,9 @@ export async function updateCustomer(
   const existing = await getOwnedCustomer(actor.orgId, customerId);
 
   return getPrisma().$transaction(async (tx) => {
-    const updated = await tx.user.update({
-      where: { id: customerId },
+    // The write carries org_id itself (not only getOwnedCustomer above): another org's id changes nothing.
+    const written = await tx.user.updateMany({
+      where: { id: customerId, org_id: actor.orgId, userType: "CUSTOMER" },
       data: {
         name: input.name,
         email: input.email,
@@ -234,8 +251,10 @@ export async function updateCustomer(
         country: input.country,
         address: input.address,
       },
-      select: CUSTOMER_SELECT,
     });
+    if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Customer not found.");
+    const updated = await tx.user.findFirst({ where: { id: customerId, org_id: actor.orgId, userType: "CUSTOMER" }, select: CUSTOMER_SELECT });
+    if (!updated) throw new ServiceError("NOT_FOUND", "Customer not found.");
 
     await activityLog.record(tx, {
       orgId: actor.orgId,
@@ -268,11 +287,10 @@ export async function renameCustomer(
   const current = await getOwnedCustomer(actor.orgId, id);
 
   return getPrisma().$transaction(async (tx) => {
-    const updated = await tx.user.update({
-      where: { id },
-      data: { name: trimmed },
-      select: { id: true, name: true },
-    });
+    const written = await tx.user.updateMany({ where: { id, org_id: actor.orgId, userType: "CUSTOMER" }, data: { name: trimmed } });
+    if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Customer not found.");
+    const updated = await tx.user.findFirst({ where: { id, org_id: actor.orgId, userType: "CUSTOMER" }, select: { id: true, name: true } });
+    if (!updated) throw new ServiceError("NOT_FOUND", "Customer not found.");
 
     await activityLog.record(tx, {
       orgId: actor.orgId,

@@ -244,19 +244,19 @@ export async function loginCustomer(rawBody: unknown, meta: RequestMeta): Promis
   if (user.lockoutUntil && user.lockoutUntil > new Date()) throw new ServiceError("FORBIDDEN", LOCKED);
 
   if (!(await bcrypt.compare(input.password, user.password))) {
-    await recordFailedLogin(user.id, user.failedLoginAttempts);
+    await recordFailedLogin(user.org_id, user.id, user.failedLoginAttempts);
     throw new ServiceError("VALIDATION", INVALID_LOGIN);
   }
 
-  await getPrisma().user.update({ where: { id: user.id }, data: { failedLoginAttempts: 0, lockoutUntil: null, lastActiveAt: new Date() } }).catch(() => {});
+  await getPrisma().user.updateMany({ where: { id: user.id, org_id: user.org_id }, data: { failedLoginAttempts: 0, lockoutUntil: null, lastActiveAt: new Date() } }).catch(() => {});
   return issueSession({ id: user.id, org_id: user.org_id, name: user.name, email: user.email }, meta);
 }
 
-async function recordFailedLogin(userId: string, current: number): Promise<void> {
+async function recordFailedLogin(orgId: string, userId: string, current: number): Promise<void> {
   const attempts = current + 1;
   const data: { failedLoginAttempts: number; lockoutUntil?: Date } = { failedLoginAttempts: attempts };
   if (attempts >= MAX_FAILED_ATTEMPTS) data.lockoutUntil = new Date(Date.now() + LOCKOUT_MINUTES * 60 * 1000);
-  await getPrisma().user.update({ where: { id: userId }, data }).catch(() => {});
+  await getPrisma().user.updateMany({ where: { id: userId, org_id: orgId }, data }).catch(() => {});
 }
 
 export async function refreshCustomerSession(rawBody: unknown, meta: RequestMeta): Promise<CustomerSessionResult> {
@@ -283,12 +283,12 @@ export async function refreshCustomerSession(rawBody: unknown, meta: RequestMeta
   try {
     await prisma.$transaction(async (tx) => {
       // Atomic claim: if a parallel request already rotated this token, count is 0 and everything rolls back.
-      const claimed = await tx.customerSession.updateMany({ where: { id: existing.id, revokedAt: null }, data: { revokedAt: new Date() } });
+      const claimed = await tx.customerSession.updateMany({ where: { id: existing.id, org_id: existing.org_id, revokedAt: null }, data: { revokedAt: new Date() } });
       if (claimed.count === 0) throw new SessionAlreadyUsed();
       const created = await tx.customerSession.create({
         data: { org_id: existing.org_id, userId: existing.userId, tokenHash: hashToken(newRefresh), userAgent: meta.userAgent ?? null, expiresAt },
       });
-      await tx.customerSession.update({ where: { id: existing.id }, data: { replacedByTokenId: created.id } });
+      await tx.customerSession.updateMany({ where: { id: existing.id, org_id: existing.org_id }, data: { replacedByTokenId: created.id } });
     });
   } catch (error) {
     if (error instanceof SessionAlreadyUsed) throw new ServiceError("FORBIDDEN", SESSION_EXPIRED);
@@ -348,11 +348,12 @@ export async function resetPassword(rawBody: unknown): Promise<{ reset: true }> 
   if (!(await consumeOtp(orgId, user.id, "RESET", input.code))) throw new ServiceError("VALIDATION", INVALID_CODE);
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.user.update({
-      where: { id: user.id },
+    const written = await tx.user.updateMany({
+      where: { id: user.id, org_id: orgId, userType: "CUSTOMER" },
       // Being able to read the mailbox proves the address, so a staff-created customer is verified here.
       data: { password: passwordHash, emailVerifiedAt: user.emailVerifiedAt ?? new Date(), failedLoginAttempts: 0, lockoutUntil: null },
     });
+    if (written.count !== 1) throw new ServiceError("VALIDATION", INVALID_CODE);
     await revokeAllCustomerSessions(tx, orgId, user.id);
     await activityLog.record(tx, { orgId, actorId: user.id, action: "CUSTOMER_RESET_PASSWORD", entity: "Customer", entityId: user.id });
   });
@@ -361,6 +362,29 @@ export async function resetPassword(rawBody: unknown): Promise<{ reset: true }> 
 
 // ---------------------------------------------------------------------------------------------
 // Delete account
+
+/** What an account looks like after it is removed: no name, address or way to sign in. The row stays because the audit trail and
+ * the business records point at it. Used by the customer's own deletion and by the retention job (unverified sign-ups). */
+export function anonymisedCustomerData(now: Date) {
+  return {
+    name: "Deleted customer",
+    email: null,
+    phone: null,
+    address: null,
+    companyName: null,
+    country: null,
+    destinationPort: null,
+    language: null,
+    theme: null,
+    assignedAgentId: null,
+    password: null,
+    loginEnabled: false,
+    emailVerifiedAt: null,
+    failedLoginAttempts: 0,
+    lockoutUntil: null,
+    deletedAt: now,
+  };
+}
 
 /** Removes personal data and ends access. Vehicles and other business records stay, pointing at an anonymous row. */
 export async function deleteCustomerAccount(customer: { id: string; orgId: string }, rawBody: unknown): Promise<{ deleted: true }> {
@@ -374,32 +398,16 @@ export async function deleteCustomerAccount(customer: { id: string; orgId: strin
 
   if (user.lockoutUntil && user.lockoutUntil > new Date()) throw new ServiceError("FORBIDDEN", LOCKED);
   if (!(await bcrypt.compare(password, user.password))) {
-    await recordFailedLogin(user.id, user.failedLoginAttempts);
+    await recordFailedLogin(user.org_id, user.id, user.failedLoginAttempts);
     throw new ServiceError("VALIDATION", INCORRECT_PASSWORD, { password: INCORRECT_PASSWORD });
   }
 
   await prisma.$transaction(async (tx) => {
-    await tx.user.update({
-      where: { id: user.id },
-      data: {
-        name: "Deleted customer",
-        email: null,
-        phone: null,
-        address: null,
-        companyName: null,
-        country: null,
-        destinationPort: null,
-        language: null,
-        theme: null,
-        assignedAgentId: null,
-        password: null,
-        loginEnabled: false,
-        emailVerifiedAt: null,
-        failedLoginAttempts: 0,
-        lockoutUntil: null,
-        deletedAt: new Date(),
-      },
+    const anonymised = await tx.user.updateMany({
+      where: { id: user.id, org_id: customer.orgId, userType: "CUSTOMER" },
+      data: anonymisedCustomerData(new Date()),
     });
+    if (anonymised.count !== 1) throw new ServiceError("NOT_FOUND", "Account not found.");
     await revokeAllCustomerSessions(tx, customer.orgId, user.id);
     await tx.otpCode.deleteMany({ where: { org_id: customer.orgId, userId: user.id } });
     await tx.deviceToken.deleteMany({ where: { org_id: customer.orgId, userId: user.id } });

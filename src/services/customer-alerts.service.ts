@@ -104,7 +104,7 @@ export async function markAlertsRead(customer: CustomerPrincipalLike, rawBody: u
   const body = parseInput(markReadBodySchema, rawBody, INVALID_INPUT);
   const scope = { org_id: customer.orgId, userId: customer.id, isRead: false };
   const result = await getPrisma().notification.updateMany({
-    where: "ids" in body ? { ...scope, id: { in: body.ids } } : scope,
+    where: "ids" in body ? { org_id: customer.orgId, userId: customer.id, isRead: false, id: { in: body.ids } } : scope,
     data: { isRead: true },
   });
   return { updated: result.count };
@@ -154,7 +154,7 @@ export async function updatePreferences(customer: CustomerPrincipalLike, rawBody
     };
     const data = { ...after, events: after.events };
     await tx.notificationPreference.upsert({
-      where: { userId: customer.id },
+      where: { userId: customer.id, org_id: customer.orgId },
       create: { org_id: customer.orgId, userId: customer.id, ...data },
       update: data,
     });
@@ -189,10 +189,10 @@ export async function registerCustomerDevice(customer: CustomerPrincipalLike, ra
   if (!Expo.isExpoPushToken(expoPushToken)) throw invalid();
 
   const prisma = getPrisma();
-  const existing = await prisma.deviceToken.findFirst({ where: { expoPushToken }, select: { id: true, userId: true } });
+  const existing = await prisma.deviceToken.findFirst({ where: { expoPushToken }, select: { id: true, userId: true, org_id: true } });
   if (existing && existing.userId !== customer.id) {
     // A token that belongs to a staff member's device is never taken over by a customer account.
-    const holder = await prisma.user.findFirst({ where: { id: existing.userId }, select: { userType: true } });
+    const holder = await prisma.user.findFirst({ where: { id: existing.userId, org_id: existing.org_id }, select: { userType: true } });
     if (holder?.userType !== "CUSTOMER") throw invalid();
   }
 
@@ -200,7 +200,7 @@ export async function registerCustomerDevice(customer: CustomerPrincipalLike, ra
     if (!existing) {
       const mine = await tx.deviceToken.findMany({ where: { org_id: customer.orgId, userId: customer.id }, orderBy: { lastSeenAt: "asc" }, select: { id: true } });
       const surplus = mine.length - (MAX_DEVICES_PER_CUSTOMER - 1);
-      if (surplus > 0) await tx.deviceToken.deleteMany({ where: { id: { in: mine.slice(0, surplus).map((d) => d.id) } } });
+      if (surplus > 0) await tx.deviceToken.deleteMany({ where: { org_id: customer.orgId, userId: customer.id, id: { in: mine.slice(0, surplus).map((d) => d.id) } } });
     }
     return tx.deviceToken.upsert({
       where: { expoPushToken },

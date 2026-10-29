@@ -4,7 +4,7 @@
 import type { Readable } from "node:stream";
 import { contentTypeForKey, isImageType, keyFromOwnedUrlForOrg, objectStoreConfigured, requireStore, thumbKeyFor } from "../lib/object-storage.js";
 import { safeError } from "../lib/redact.js";
-import { makeThumbnail } from "../lib/thumbnail.js";
+import { makeThumbnail, ThumbnailUnavailableError } from "../lib/thumbnail.js";
 
 /** Photos are limited to 10 MB at upload; anything bigger than this is not even read. */
 const MAX_ORIGINAL_BYTES = 12 * 1024 * 1024;
@@ -43,7 +43,8 @@ export async function createPhotoThumbnail(orgId: string, url: string): Promise<
     await store.putObject({ key: thumbKey, body: thumb, contentType });
     return true;
   } catch (error) {
-    console.error("thumbnail not created", safeError(error));
+    // The image library missing was already reported once; every other failure is logged (redacted).
+    if (!(error instanceof ThumbnailUnavailableError)) console.error("thumbnail not created", safeError(error));
     return false;
   }
 }

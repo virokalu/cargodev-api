@@ -257,6 +257,8 @@ describe("GET /notifications/stream: lifecycle", () => {
   it("rejects new streams with 429 once the instance-wide cap is reached", async () => {
     process.env["SSE_MAX_CONNECTIONS"] = "2";
     vi.resetModules();
+    // The reset gave the app a fresh module graph: the test seam (tokens' claims are trusted) must be switched on again.
+    (await import("../src/lib/staff-auth-seam.js")).setTrustTokenClaimsForTests(true);
     try {
       const { buildApp: buildCapped } = await import("../src/app.js");
       app = await buildCapped({ rateLimit: false });

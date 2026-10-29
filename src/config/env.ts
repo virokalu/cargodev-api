@@ -3,12 +3,15 @@
 // .env.example and the CI dummy env in the same change as this one.
 
 import { z } from "zod";
+import { hasInvalidAllowListEntry, parseAllowList } from "../lib/email-allow-list.js";
 
 // Not addresses: a client address is never read from these.
 const FORBIDDEN_IP_HEADERS = new Set(["authorization", "cookie", "set-cookie", "host", "content-type", "content-length", "user-agent", "origin", "referer", "accept"]);
 
 const baseSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  // Which deployment this is: it decides how strict some checks are (the public stock image address, email safety). Logged at start-up.
+  APP_ENV: z.enum(["production", "staging", "development"], { error: "APP_ENV must be production, staging or development" }).default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
@@ -65,6 +68,30 @@ const baseSchema = z.object({
   CUSTOMER_FILE_CACHE_SECONDS: z.coerce.number().int().min(0).max(86400).default(300),
   // Days after a vehicle's SHIPPED milestone before staff are reminded that no arrival has been recorded (then weekly).
   ARRIVAL_REMINDER_DAYS: z.coerce.number().int().min(1).max(365).default(45),
+  // Temporary file links on this API's own domain (ADR 0007). The secret signs them (32+ bytes, different from every other secret);
+  // the previous one is accepted during a rotation. The base is this API's own https origin (links are <base>/f/v1/...).
+  FILE_LINK_SECRET: z.string().refine((v) => Buffer.byteLength(v, "utf8") >= 32, "FILE_LINK_SECRET must be at least 32 bytes").optional(),
+  FILE_LINK_SECRET_PREVIOUS: z.string().refine((v) => Buffer.byteLength(v, "utf8") >= 32, "FILE_LINK_SECRET_PREVIOUS must be at least 32 bytes").optional(),
+  FILE_LINK_BASE_URL: z.string().url().optional(),
+  // How long a link lives (seconds), and the longest any link may be accepted for (a hard cap, also against a stolen secret).
+  FILE_LINK_TTL_SECONDS: z.coerce.number().int().min(30).max(900).default(300),
+  FILE_LINK_MAX_TTL_SECONDS: z.coerce.number().int().min(30).max(900).default(900),
+  // Retention (the daily job). Days after which expired one-time codes, expired or revoked sessions (customer and staff), READ
+  // customer alerts, and never-verified self-registered customers (with nothing linked to them) are removed. Chats and
+  // enquiries are not touched: their retention is an open business question (docs/privacy-checklist.md).
+  // Dry run is the DEFAULT, in every environment: the job only counts what it WOULD remove and logs the counts. Set this to
+  // false, on purpose, to let it delete. Must be exactly "true" or "false".
+  RETENTION_DRY_RUN: z
+    .enum(["true", "false"], { error: "RETENTION_DRY_RUN must be true or false" })
+    .default("true")
+    .transform((value) => value === "true"),
+  RETENTION_OTP_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
+  RETENTION_SESSION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
+  RETENTION_ALERT_DAYS: z.coerce.number().int().min(1).max(3650).default(180),
+  UNVERIFIED_ACCOUNT_DAYS: z.coerce.number().int().min(1).max(3650).default(14),
+  // How long (seconds) the API remembers that a staff user is still active and which role they hold, before it reads the
+  // database again. Changes made in this process apply at once; another instance sees them within this time. 0 turns it off.
+  STAFF_AUTH_CACHE_SECONDS: z.coerce.number().int().min(0).max(300).default(30),
   // The oldest customer app build the API still serves (GET /api/customer/v1/app/min-version). Raise it to force an update.
   APP_MIN_VERSION: z.string().regex(/^\d+\.\d+\.\d+$/, "APP_MIN_VERSION must look like 1.2.3").default("1.0.0"),
   // Optional. Only raises Expo push rate limits; push works without it.
@@ -73,6 +100,9 @@ const baseSchema = z.object({
   // RESEND_API_KEY nothing is ever sent, the message is only noted in the log (masked).
   RESEND_API_KEY: z.string().min(1).optional(),
   EMAIL_FROM: z.string().min(3).optional(),
+  // Email safety: a comma-separated list of addresses and whole domains ("a@example.test,@example.test"). When set, ONLY matching
+  // recipients get email; everything else is dropped with a masked log line. Required when APP_ENV=staging and RESEND_API_KEY is set.
+  EMAIL_ALLOWED_RECIPIENTS: z.string().default(""),
   // Signs CUSTOMER access tokens (a separate zone from staff). Long and random, unique per environment and
   // different from MOBILE_JWT_SECRET (startup fails if they are equal). Unset means the customer API is
   // not mounted at all.
@@ -112,6 +142,95 @@ const baseSchema = z.object({
   ORG_ID: z.string().min(1, "ORG_ID is required"),
 });
 
+/** True for r2.dev and any of its subdomains (the throwaway public address Cloudflare gives a bucket). */
+export function isR2DevHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  return host === "r2.dev" || host.endsWith(".r2.dev");
+}
+
+/**
+ * Why PUBLIC_STOCK_IMAGE_BASE_URL is not acceptable, or null. Always: an https address with no credentials, query or fragment.
+ * In production: not an r2.dev host (that address is for trying things out; production needs a custom domain). The message
+ * never contains the value.
+ */
+export function stockImageBaseUrlProblem(value: string, appEnv: "production" | "staging" | "development"): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return "PUBLIC_STOCK_IMAGE_BASE_URL must be a valid address";
+  }
+  if (url.protocol !== "https:") return "PUBLIC_STOCK_IMAGE_BASE_URL must be an https address";
+  if (url.username !== "" || url.password !== "") return "PUBLIC_STOCK_IMAGE_BASE_URL must not contain credentials";
+  if (url.search !== "" || url.hash !== "" || value.includes("?") || value.includes("#")) return "PUBLIC_STOCK_IMAGE_BASE_URL must not contain a query or a fragment";
+  if (appEnv === "production" && isR2DevHost(url.hostname)) {
+    return "PUBLIC_STOCK_IMAGE_BASE_URL must not be an r2.dev address when APP_ENV is production (use a custom domain)";
+  }
+  return null;
+}
+
+/** Why FILE_LINK_BASE_URL is not acceptable, or null: an https ORIGIN only (no path, credentials, query or fragment). */
+export function fileLinkBaseUrlProblem(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return "FILE_LINK_BASE_URL must be a valid address";
+  }
+  if (url.protocol !== "https:") return "FILE_LINK_BASE_URL must be an https address";
+  if (url.username !== "" || url.password !== "") return "FILE_LINK_BASE_URL must not contain credentials";
+  if (url.search !== "" || url.hash !== "" || value.includes("?") || value.includes("#")) return "FILE_LINK_BASE_URL must not contain a query or a fragment";
+  if (url.pathname !== "/" ) return "FILE_LINK_BASE_URL must be an origin only (no path)";
+  return null;
+}
+
+/** The email allow-list: well formed, and mandatory in staging when real mail could be sent. Messages never repeat the value. */
+function validateEmailSafety(env: { APP_ENV: string; RESEND_API_KEY?: string | undefined; EMAIL_ALLOWED_RECIPIENTS: string }, ctx: z.RefinementCtx): void {
+  const list = parseAllowList(env.EMAIL_ALLOWED_RECIPIENTS);
+  if (hasInvalidAllowListEntry(list)) {
+    ctx.addIssue({ code: "custom", path: ["EMAIL_ALLOWED_RECIPIENTS"], message: "EMAIL_ALLOWED_RECIPIENTS must be a comma-separated list of addresses (a@example.test) and domains (@example.test)" });
+  }
+  if (env.APP_ENV === "staging" && env.RESEND_API_KEY !== undefined && list.length === 0) {
+    ctx.addIssue({ code: "custom", path: ["EMAIL_ALLOWED_RECIPIENTS"], message: "EMAIL_ALLOWED_RECIPIENTS is required when APP_ENV is staging and RESEND_API_KEY is set (staging must not email real customers)" });
+  }
+}
+
+/** The file-link settings: both or none (both in production), a strong secret that differs from every other secret, TTL within the cap. */
+function validateFileLinks(
+  env: {
+    NODE_ENV: string;
+    APP_ENV: string;
+    FILE_LINK_SECRET?: string | undefined;
+    FILE_LINK_SECRET_PREVIOUS?: string | undefined;
+    FILE_LINK_BASE_URL?: string | undefined;
+    FILE_LINK_TTL_SECONDS: number;
+    FILE_LINK_MAX_TTL_SECONDS: number;
+    [key: string]: unknown;
+  },
+  ctx: z.RefinementCtx
+): void {
+  const add = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
+  const production = env.NODE_ENV === "production" || env.APP_ENV === "production";
+  if (production && env.FILE_LINK_SECRET === undefined) add("FILE_LINK_SECRET", "FILE_LINK_SECRET is required in production");
+  if (production && env.FILE_LINK_BASE_URL === undefined) add("FILE_LINK_BASE_URL", "FILE_LINK_BASE_URL is required in production");
+  if (env.FILE_LINK_SECRET !== undefined && env.FILE_LINK_BASE_URL === undefined && !production) add("FILE_LINK_BASE_URL", "FILE_LINK_BASE_URL is required when FILE_LINK_SECRET is set");
+  if (env.FILE_LINK_BASE_URL !== undefined && env.FILE_LINK_SECRET === undefined && !production) add("FILE_LINK_SECRET", "FILE_LINK_SECRET is required when FILE_LINK_BASE_URL is set");
+  if (env.FILE_LINK_SECRET_PREVIOUS !== undefined && env.FILE_LINK_SECRET === undefined) add("FILE_LINK_SECRET_PREVIOUS", "FILE_LINK_SECRET_PREVIOUS needs FILE_LINK_SECRET");
+  if (env.FILE_LINK_BASE_URL !== undefined) {
+    const problem = fileLinkBaseUrlProblem(env.FILE_LINK_BASE_URL);
+    if (problem) add("FILE_LINK_BASE_URL", problem);
+  }
+  const others = ["MOBILE_JWT_SECRET", "CUSTOMER_JWT_SECRET", "OTP_PEPPER", "R2_SECRET_ACCESS_KEY", "TURNSTILE_SECRET", "RESEND_API_KEY", "EXPO_ACCESS_TOKEN"]
+    .map((name) => env[name])
+    .filter((v): v is string => typeof v === "string" && v !== "");
+  if (env.FILE_LINK_SECRET !== undefined && others.includes(env.FILE_LINK_SECRET)) add("FILE_LINK_SECRET", "FILE_LINK_SECRET must differ from every other secret");
+  if (env.FILE_LINK_SECRET_PREVIOUS !== undefined) {
+    if (others.includes(env.FILE_LINK_SECRET_PREVIOUS)) add("FILE_LINK_SECRET_PREVIOUS", "FILE_LINK_SECRET_PREVIOUS must differ from every other secret");
+    if (env.FILE_LINK_SECRET_PREVIOUS === env.FILE_LINK_SECRET) add("FILE_LINK_SECRET_PREVIOUS", "FILE_LINK_SECRET_PREVIOUS must differ from FILE_LINK_SECRET");
+  }
+  if (env.FILE_LINK_TTL_SECONDS > env.FILE_LINK_MAX_TTL_SECONDS) add("FILE_LINK_TTL_SECONDS", "FILE_LINK_TTL_SECONDS must not exceed FILE_LINK_MAX_TTL_SECONDS");
+}
+
 const R2_CREDENTIALS = ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME"] as const;
 
 const envSchema = baseSchema.superRefine((env, ctx) => {
@@ -120,6 +239,11 @@ const envSchema = baseSchema.superRefine((env, ctx) => {
     for (const name of R2_CREDENTIALS) {
       if (env[name] === undefined) ctx.addIssue({ code: "custom", path: [name], message: `${name} is required when any R2 credential is set` });
     }
+  }
+  // No silent default in production: behind a load balancer the default (socket) makes every visitor share one rate-limit
+  // bucket, and a wrong "trust" guess lets clients pick their own address. The operator must choose, on purpose.
+  if (env.NODE_ENV === "production" && env.CLIENT_IP_SOURCE === undefined) {
+    ctx.addIssue({ code: "custom", path: ["CLIENT_IP_SOURCE"], message: "CLIENT_IP_SOURCE must be set explicitly in production (socket, hops or header)" });
   }
   if (env.CLIENT_IP_SOURCE === "header" && env.CLIENT_IP_HEADER === undefined) {
     ctx.addIssue({ code: "custom", path: ["CLIENT_IP_HEADER"], message: "CLIENT_IP_HEADER is required when CLIENT_IP_SOURCE is header" });
@@ -133,6 +257,12 @@ const envSchema = baseSchema.superRefine((env, ctx) => {
   if (env.PUBLIC_ALLOWED_ORIGINS.split(",").some((origin) => origin.trim() === "*")) {
     ctx.addIssue({ code: "custom", path: ["PUBLIC_ALLOWED_ORIGINS"], message: "PUBLIC_ALLOWED_ORIGINS must list origins, never *" });
   }
+  if (env.PUBLIC_STOCK_IMAGE_BASE_URL !== undefined) {
+    const problem = stockImageBaseUrlProblem(env.PUBLIC_STOCK_IMAGE_BASE_URL, env.APP_ENV);
+    if (problem) ctx.addIssue({ code: "custom", path: ["PUBLIC_STOCK_IMAGE_BASE_URL"], message: problem });
+  }
+  validateFileLinks(env, ctx);
+  validateEmailSafety(env, ctx);
   if (env.R2_PUBLIC_STOCK_BUCKET_NAME !== undefined && env.R2_ACCOUNT_ID === undefined) {
     ctx.addIssue({ code: "custom", path: ["R2_PUBLIC_STOCK_BUCKET_NAME"], message: "R2_PUBLIC_STOCK_BUCKET_NAME needs the R2 credentials" });
   }
@@ -166,7 +296,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const parsed = envSchema.safeParse(present);
   if (!parsed.success) {
     const names = [...new Set(parsed.error.issues.map((issue) => issue.path.join(".")))];
-    throw new Error(`Invalid environment variables: ${names.join(", ")}. See docs/env.md.`);
+    // Our own checks (code "custom") carry fixed messages that never contain a value; they say what to fix.
+    const hints = [...new Set(parsed.error.issues.filter((issue) => issue.code === "custom").map((issue) => issue.message))];
+    throw new Error(`Invalid environment variables: ${names.join(", ")}. See docs/env.md.${hints.length ? ` ${hints.join("; ")}.` : ""}`);
   }
   cached = parsed.data;
   return cached;

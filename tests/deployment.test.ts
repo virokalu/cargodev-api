@@ -387,6 +387,13 @@ describe("container files", () => {
     expect(lines(dockerfile).filter((l) => l.startsWith('CMD ["node", "dist/'))).toHaveLength(1);
   });
 
+  it("the CI .env scan runs as root and ignores find's exit status (a non-root find that cannot read a folder exits 1, and bash -e would stop the step silently)", () => {
+    const scan = lines(ci).find((l) => l.includes("find / -xdev"));
+    expect(scan).toBeDefined();
+    expect(scan).toContain("--user 0");
+    expect(scan).toMatch(/2>\/dev\/null; exit 0'\)$/);
+  });
+
   it("installs without running package scripts, and only production dependencies in the final stage", () => {
     const installs = lines(dockerfile).filter((l) => l.includes("npm ci"));
     expect(installs.length).toBeGreaterThan(0);

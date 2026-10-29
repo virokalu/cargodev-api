@@ -153,8 +153,8 @@ export function registerVehicleRoutes(app: FastifyInstance) {
 
   // Files. Reads are by serial; writes by id.
   app.get<{ Params: { serial: string } }>("/vehicles/:serial/files", auth, async (request) => {
-    const { orgId } = currentUser(request);
-    return success(await listVehicleFiles(orgId, await resolveVehicleIdBySerial(orgId, request.params.serial)));
+    const user = currentUser(request);
+    return success(await listVehicleFiles(user, await resolveVehicleIdBySerial(user.orgId, request.params.serial)));
   });
 
   app.get<{ Params: { serial: string } }>("/vehicles/:serial/pdf-images", auth, async (request) => {

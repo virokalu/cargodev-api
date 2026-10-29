@@ -43,7 +43,11 @@ export async function updateFaq(actor: SessionUser, id: string, rawBody: unknown
   return getPrisma().$transaction(async (tx) => {
     const before = await tx.faq.findFirst({ where: { id, org_id: actor.orgId }, select });
     if (!before) throw NOT_FOUND();
-    const updated = await tx.faq.update({ where: { id }, data, select });
+    // The write carries org_id itself (not only the read above): another org's id changes nothing.
+    const written = await tx.faq.updateMany({ where: { id, org_id: actor.orgId }, data });
+    if (written.count !== 1) throw NOT_FOUND();
+    const updated = await tx.faq.findFirst({ where: { id, org_id: actor.orgId }, select });
+    if (!updated) throw NOT_FOUND();
     await activityLog.record(tx, { orgId: actor.orgId, actorId: actor.id, action: "UPDATE_FAQ", entity: "Faq", entityId: id, before: toDto(before), after: toDto(updated) });
     return toDto(updated);
   });
@@ -54,7 +58,8 @@ export async function deleteFaq(actor: SessionUser, id: string): Promise<void> {
   await getPrisma().$transaction(async (tx) => {
     const before = await tx.faq.findFirst({ where: { id, org_id: actor.orgId }, select });
     if (!before) throw NOT_FOUND();
-    await tx.faq.delete({ where: { id } });
+    const removed = await tx.faq.deleteMany({ where: { id, org_id: actor.orgId } });
+    if (removed.count !== 1) throw NOT_FOUND();
     await activityLog.record(tx, { orgId: actor.orgId, actorId: actor.id, action: "DELETE_FAQ", entity: "Faq", entityId: id, before: toDto(before) });
   });
 }

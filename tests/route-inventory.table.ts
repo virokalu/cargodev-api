@@ -32,6 +32,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { method: "POST", path: "/api/v1/auth/login", kind: "public" },
   { method: "POST", path: "/api/v1/auth/refresh", kind: "public" },
   { method: "POST", path: "/api/v1/auth/logout", kind: "public" },
+  // The own-domain file links: no Bearer token, a SIGNED link is the ticket and the database is asked again on every fetch (ADR 0007).
+  { method: "GET", path: "/f/v1/:kind/:id/:variant", kind: "public" },
   { method: "GET", path: "/api/public/stock", kind: "public" },
   { method: "GET", path: "/api/public/stock/:slug", kind: "public" },
   { method: "POST", path: "/api/public/enquiries", kind: "public" },
@@ -73,6 +75,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { method: "GET", path: "/api/customer/v1/conversations/:id/messages", kind: "customer" },
   { method: "POST", path: "/api/customer/v1/conversations/:id/messages", kind: "customer" },
   // STAFF (/api/v1): a staff token, roles from each route's authenticate() list
+  // Contact details (email, phone, address) are left out for a VIEWER: in the list, in its search, and in the by-customer report
+  // (tests/viewer-privacy.test.ts). Search and detail carry only { id, name } for every role.
   { method: "GET", path: "/api/v1/customers", kind: "staff", roles: ANY },
   { method: "GET", path: "/api/v1/customers/search", kind: "staff", roles: ANY },
   { method: "GET", path: "/api/v1/customers/:id", kind: "staff", roles: ANY },

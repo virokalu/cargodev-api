@@ -1,11 +1,11 @@
 // Builds the Fastify app. Does not listen: server.ts starts it, tests use app.inject().
 
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyLoggerOptions, type FastifyReply, type FastifyRequest } from "fastify";
 import helmet from "@fastify/helmet";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { effectiveClientIpSource, loadEnv } from "./config/env.js";
-import { registerClientIpHeader } from "./lib/client-ip.js";
+import { registerClientIpHeader, registerForwardingHeaderWarning } from "./lib/client-ip.js";
 import { errorHandler, notFoundHandler } from "./lib/error-handler.js";
 import { registerPostResponse } from "./lib/post-response.js";
 import { success } from "./lib/response.js";
@@ -27,6 +27,7 @@ import { registerMilestoneRoutes } from "./routes/milestones.js";
 import { registerUploadRoutes } from "./routes/uploads.js";
 import { registerVehicleReleaseRoutes } from "./routes/vehicle-release.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
+import { registerFileLinkRoutes } from "./routes/file-links.js";
 import { SseHub } from "./lib/sse-hub.js";
 import { objectStoreConfigured, setObjectStore } from "./lib/object-storage.js";
 import { createR2ObjectStore } from "./lib/r2-object-store.js";
@@ -65,6 +66,8 @@ export interface BuildAppOptions {
   clientIp?: { source: "socket" | "hops" | "header"; header?: string };
   /** Receives the masked warning when the client address header is missing or invalid (tests). */
   onClientIpWarning?: (message: string) => void;
+  /** Tests only: how often an open staff stream re-checks its user against the database (default 60 000 ms). */
+  sseRecheckMs?: number;
   /** Overrides PUBLIC_STOCK_ENABLED (the public website API and the staff stock tools). */
   publicStockEnabled?: boolean;
   /** Overrides PUBLIC_ALLOWED_ORIGINS. */
@@ -80,6 +83,13 @@ export interface BuildAppOptions {
 function trustHops(hops: number) {
   return (_address: string, hop: number): boolean => hop < hops;
 }
+
+// What a log line may say about a request: the method and the ROUTE PATTERN, and about the reply: the status.
+type LogSerializers = NonNullable<FastifyLoggerOptions["serializers"]>;
+const REQUEST_LOG_SERIALIZERS: LogSerializers = {
+  req: (request) => ({ method: request.method, route: (request as unknown as FastifyRequest).routeOptions?.url ?? "(no matching route)" }),
+  res: (reply) => ({ statusCode: (reply as unknown as FastifyReply).statusCode }),
+};
 
 export const GLOBAL_RATE_LIMIT = { max: 300, timeWindow: "1 minute" } as const;
 
@@ -123,6 +133,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       ? {
           level: env.LOG_LEVEL,
           redact: ["req.headers.authorization", "req.headers.cookie"],
+          // A request line carries only the method and the ROUTE PATTERN (for example /api/v1/vehicles/:serial/files): never the
+          // raw URL, the query string, a path parameter, a header or the client address. The response line carries the status;
+          // Fastify adds the duration (responseTime) and the request id (reqId). Staff search text, customer names, serials and
+          // tokens in a URL therefore never reach a log.
+          serializers: REQUEST_LOG_SERIALIZERS,
           ...(options.logStream ? { stream: options.logStream } : {}),
         }
       : false,
@@ -144,6 +159,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // and the logs see it. In socket and hops modes no forwarding header is read here.
   if (clientIpSource === "header" && clientIpHeader) {
     registerClientIpHeader(app, { header: clientIpHeader, ...(options.onClientIpWarning ? { warn: options.onClientIpWarning } : {}) });
+  }
+  if (clientIpSource === "socket") {
+    registerForwardingHeaderWarning(app, { ...(options.onClientIpWarning ? { warn: options.onClientIpWarning } : {}) });
   }
   // Customer email is sent after the response (lib/post-response.ts).
   registerPostResponse(app);
@@ -225,7 +243,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       registerReportRoutes(api);
       registerActivityLogRoutes(api);
       registerLookupRoutes(api);
-      registerNotificationRoutes(api, { sseHub });
+      registerNotificationRoutes(api, { sseHub, ...(options.sseRecheckMs !== undefined ? { recheckMs: options.sseRecheckMs } : {}) });
       registerAdminJobRoutes(api, { scheduler });
       registerVehicleRoutes(api);
       registerMilestoneRoutes(api);
@@ -239,6 +257,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   );
 
   // The public website API: no login, its own prefix, its own CORS allow-list. Not mounted unless it is switched on.
+  // Temporary file links on our own domain (ADR 0007): no Bearer token, the signed link is the ticket.
+  registerFileLinkRoutes(app);
   if (publicStockEnabled) {
     await app.register(async (publicApi) => registerPublicRoutes(publicApi), { prefix: "/api/public" });
   }

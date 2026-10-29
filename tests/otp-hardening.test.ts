@@ -8,6 +8,7 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FakePrisma } from "./helpers/fake-prisma.js";
 import { newCustomerFake, post } from "./helpers/customer-fixtures.js";
+import { onVirtualClock } from "./helpers/virtual-clock.js";
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -193,9 +194,9 @@ describe("email goes out only AFTER the response, and never changes it", () => {
   it("a slow send does not slow the answer, and a failing send does not change it", async () => {
     state.sendDelayMs = 400;
     const tiny = await tinyApp(() => queueEmail({ to: "a@example.test", subject: "s", text: "t" }));
-    const started = Date.now();
-    const res = await tiny.inject({ method: "GET", url: "/x" });
-    expect(Date.now() - started).toBeLessThan(300);
+    // On a virtual clock: if the handler waited for the 400 ms send, 400 virtual ms would pass before the answer.
+    const { result: res, ms } = await onVirtualClock(() => tiny.inject({ method: "GET", url: "/x" }));
+    expect(ms).toBe(0);
     expect(res.statusCode).toBe(200);
     state.sendFails = true;
     const failing = await tiny.inject({ method: "GET", url: "/x" });
@@ -314,9 +315,9 @@ describe("a registered, an unregistered and a staff address look the same (answe
   async function sample(path: string, kind: keyof typeof addresses, i: number) {
     identifierLimiter.reset();
     const email = addresses[kind](i);
-    const started = performance.now();
-    const res = await post(app, path, path === "/auth/register" ? { name: "Timing Person", email } : { email }, {}, `10.1.${i}.1`);
-    return { ms: performance.now() - started, status: res.statusCode, body: res.body };
+    // Virtual time: the floor timer is the only thing a response waits on, so this does not depend on how busy the machine is.
+    const { result: res, ms } = await onVirtualClock(() => post(app, path, path === "/auth/register" ? { name: "Timing Person", email } : { email }, {}, `10.1.${i}.1`));
+    return { ms, status: res.statusCode, body: res.body };
   }
 
   it.each(["/auth/register", "/auth/resend-verification", "/auth/forgot-password"])("%s", async (path) => {
@@ -330,13 +331,12 @@ describe("a registered, an unregistered and a staff address look the same (answe
         times.push(s.ms);
         answers.add(`${s.status} ${s.body}`);
       }
-      times.sort((a, b) => a - b);
+      // Every response waits for exactly the floor: no shorter (the branch cost would show) and no longer (extra waiting would show).
+      expect(times, `${kind}: every response takes exactly the floor`).toEqual([FLOOR, FLOOR, FLOOR, FLOOR, FLOOR]);
       medians[kind] = times[2]!;
-      expect(times[0], `${kind}: every response waits for the floor`).toBeGreaterThanOrEqual(FLOOR - 5);
     }
     expect(answers.size, "one status and body for every kind of address").toBe(1);
-    const values = Object.values(medians);
-    expect(Math.max(...values) - Math.min(...values), JSON.stringify(medians)).toBeLessThan(60);
+    expect(new Set(Object.values(medians)).size, JSON.stringify(medians)).toBe(1);
   });
 
   it("email delivery is not part of the measured time", async () => {
@@ -344,7 +344,8 @@ describe("a registered, an unregistered and a staff address look the same (answe
     state.sendDelayMs = 500;
     const slow = await sample("/auth/register", "unregistered", 1); // sends an email
     const none = await sample("/auth/register", "registered", 1); // sends the "already registered" email
-    expect(Math.abs(slow.ms - none.ms)).toBeLessThan(60);
-    expect(slow.ms).toBeLessThan(FLOOR + 150);
+    // The 500 ms send happens after the response: neither answer waits for it.
+    expect(slow.ms).toBe(FLOOR);
+    expect(none.ms).toBe(FLOOR);
   });
 });

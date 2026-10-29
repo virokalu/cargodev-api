@@ -1,67 +1,158 @@
-# Moving existing files into the private bucket
+# Making the main bucket private
 
-Status: **a plan, not yet carried out.** It records how to move files that are stored today as public URLs into a private bucket that
-is reached only through the API, without losing a file and without a gap in service. No names, URLs or keys belong in this file:
-counts only. Every step that touches a bucket or the database is done by the maintainer or with the maintainer's approval for that
-specific run.
+Status: **the code is ready; the bucket has not been changed.** This file records how to turn off public access on the main
+(private files) bucket without losing a file and without a gap in service. No hostnames, account ids, keys, URLs or object names
+belong in this file: counts only. Every step that touches a bucket or the database is done by the maintainer, or with the
+maintainer's approval for that specific run.
+
+## Current state and what gates closing production
+
+**Staging (done by the maintainer in the storage console, not by this repo):** the main bucket's public development address is
+**disabled**, so the stored addresses in `VehiclePhoto.url`, `VehicleDocument.url` and `Vehicle.auctionSheetUrl` no longer open in a
+browser: they are identifiers only. `R2_PUBLIC_URL` must stay set and unchanged because key derivation parses it. Rollback is re-enabling
+the public development address. A separate **public stock bucket** exists for published listing images, with its public development address
+**enabled in staging only**; production needs a custom domain (undecided; there is no domain on the DNS provider yet).
+
+**Shared credential gap:** there is ONE credential pair, a token scoped to both buckets, because the settings have no separate pair for the
+public bucket. The design intends the public bucket to have its own token. A compromise of the API's credentials therefore reaches both
+buckets. Proposal (not built): docs/deferred/stock-credentials.md.
+
+**Production:** the main bucket **stays public until the Node staff client replaces the Next staff app**. Closing it is gated on ALL of:
+(1) the own-domain file-links gateway is deployed, (2) every client is converted to use it, (3) `npm run r2:audit` is clean, (4) a verified
+backup copy exists.
+
+**Staff decisions:** staff move fully to this API (the Next staff app will be retired); the iOS app uses this API; the file-link host is the
+API's own hostname for now (no separate files hostname).
 
 ## Where things stand
 
-- Existing files (vehicle photos, vehicle documents, the auction sheet) are stored as **full public URLs** in
-  `VehiclePhoto.url`, `VehicleDocument.url` and `Vehicle.auctionSheetUrl`. On the staging copy they all sit under the public base,
-  inside their organisation's folder (`org/<orgId>/...`). A count per column is recorded in the private notes.
-- New uploads are signed (a short-lived PUT link) into the same layout. **Customers never see an address or a key**: they get a photo
-  or a document through the API by its database id (`/photos/:id/image`, `/documents/:id/file`); the API checks, reads the object and
-  streams it. Staff screens still show the stored URLs.
-- The gateway re-derives the object key from the stored URL (`keyFromOwnedUrlForOrg`), so it already works with a URL that points
-  into the bucket the API can read.
+- Existing files (vehicle photos, vehicle documents, the auction sheet) are stored as **full public URLs** in `VehiclePhoto.url`,
+  `VehicleDocument.url` and `Vehicle.auctionSheetUrl`. They sit under the public base (`R2_PUBLIC_URL`), inside their
+  organisation's folder (`org/<orgId>/...`).
+- **Customers never see an address or a key.** They get a photo or a document through the API by its database id
+  (`/photos/:id/image`, `/documents/:id/file`); the API checks, reads the object itself and streams it.
+- **Staff now get links on this API's own domain** (ADR 0007, docs/adr/adr-0007-temporary-file-links-on-our-own-domain.md). The staff
+  file endpoints return a signed link in their `url` field plus `expiresAt` (docs/api-contract.md); opening it makes the API check the
+  database again (the person, the org, the row, the key derivation inside the org's folder) and stream the bytes. **Closing the bucket
+  therefore needs no storage CORS rule for GET and no presigned GET**: the browser never talks to storage. Presigned PUT (uploads) stays,
+  with its CORS rule for PUT.
+- **The stored value does not change.** The database still holds the public-looking address (it is the file's identity: the host
+  is checked, the key is derived from it). Nothing in this plan edits a row.
 
-## Target
+## Plan A (chosen): keep the same bucket, disable public access
 
-- The files live in a **private bucket** with no public access and no public domain. Only the API (its access key) can read or write.
-- The database stores the **object key** (for example `org/<orgId>/vehicles/<id>/photos/<file>`), not a URL. Readers build what they
-  need: the gateway reads the key; staff screens get what they need from the API (a signed, short-lived link or an API stream).
-- The old public bucket is closed (public access off, then emptied and deleted) only after everything has been verified.
+The bucket and every object stay where they are. Only public read access is switched off, once nothing depends on it.
 
-## Order of work
+### 1. Find out what depends on the public address (consumers checklist)
 
-Each step ends with a check. Do not start the next one before the check passes.
+Do not switch anything off until every line is ticked or consciously accepted. Check each consumer, on staging first.
 
-1. **Inventory (read-only).** Count, per table and column, how many rows hold a URL, how many point into the expected bucket and
-   organisation folder, how many are anything else (those are investigated first). Count the objects in the bucket and compare with the
-   rows. Record the counts only.
-2. **Stop making the problem bigger: new uploads first.** Create the private bucket (no public access). Point **new** uploads at it
-   (`R2_BUCKET_NAME`, signed PUT as today) and store the **key** for new rows from now on (a code change with a test, behind a
-   switch). Old rows keep working because readers accept both a URL and a key during the transition. Check: upload a test file
-   as staff; a customer with a released vehicle sees it through the gateway; the response carries no address.
-3. **Copy and verify (old bucket to private bucket).** Copy every object, key unchanged, with a tool run by the maintainer from a
-   trusted machine. Never print keys or URLs. After the copy, verify: object count equal; for every object, size equal and checksum
-   equal. Check: zero mismatches, zero missing. Repeat the copy for anything uploaded to the old bucket in the meantime until a
-   final pass copies nothing new.
-4. **Update the stored locations to keys.** A reviewed script, run on a **copy of the data first**, then (with approval, after a
-   snapshot or backup) on the real database: for each row whose URL points at the old bucket's base, store the key; in a
-   transaction per batch; the number of rows changed per column is printed and must equal the inventory. This is a data update, not a
-   schema change; if a new column is wanted for the key it is an additive migration, generated with `diff-script` and
-   approved before any `deploy`. The old column is dropped only later, by a separate approved contract migration. Check: the count
-   of rows still holding a URL is zero; the gateway test suite passes against the copy.
-5. **Switch the readers to the gateway.** Staff screens stop using stored URLs: the API returns what they need (a short-lived signed
-   link, or a stream through the API). The PDF export fetches through the store, not through a public URL. Check: a search for the old
-   public base in the code and in API responses finds nothing; the file access tests pass.
-6. **Close the old bucket.** Turn public access off on the old bucket first and watch for errors for a week (the images in old emails
-   or caches will fail: expected). Only then empty and delete it. Keep one verified backup of its contents off-platform for the period
-   the business chooses. Check: nothing user-facing breaks; error rates unchanged.
+- [ ] **The staff web pages (Next.js)**: anything that renders an `<img>`, link or download from a stored address must use the `url`
+      the API returns now (the signed link), never a value saved earlier. Pages that cached or stored an old address break at the switch.
+- [ ] **The iOS staff app**: the same. Check image caches that key on the address (the signed link changes on every request, so a cache
+      keyed on it never hits; key the cache on the file id instead). Old builds that still read the stored address stop working: decide
+      the minimum app version (`APP_MIN_VERSION` is for the customer app; staff builds need their own cut-off) before the switch.
+- [ ] **PDF generation**: the export fetches images through `GET /vehicles/:serial/pdf-images`, which the API now serves by fetching a
+      signed link itself. Test an export with an auction sheet and several photos. Any other PDF code that fetches a stored address
+      directly must change first.
+- [ ] **Old links**: links already sent in emails, chats, spreadsheets or bookmarks, and any cached copy in a browser or CDN, stop
+      working. Search for places staff paste addresses. Accept this, or keep access until they are replaced.
+- [ ] **The customer app** needs nothing: it never had an address.
+- [ ] **Public stock** is a different bucket and is not affected (below).
+- [ ] **Anything else with the old public address**: a search of the code, the staff apps and the website for the public host name
+      must find nothing that is still shown to a person after the switch.
 
-## Rollback
+### 2. Staff signed links versus the customer gateway
 
-- Steps 1 to 3 change nothing the app depends on: stop at any point.
-- Step 4 is reversible from the snapshot or backup taken before it, and from the old bucket (still intact).
-- Step 5 is reversible by redeploying the previous version (readers accept URLs and keys during the transition).
-- Step 6 is the only step that cannot be undone, so it comes last and only after the retention period.
+| | Staff | Customers |
+|---|---|---|
+| How a file is reached | a signed link on this API's own domain; the API checks, reads the object and streams it | the API streams the bytes (`/photos/:id/image`, `/documents/:id/file`) with the Bearer token |
+| What the client sees | a URL that works for `FILE_LINK_TTL_SECONDS` (30 to 900, default 300) and `expiresAt`; ids only, no storage host or key | an id only: never an address, a key or a link |
+| Authorisation | the staff token's org, checked before anything is signed | the customer's own id, org, release flags, checked before the store is touched |
+| A row that cannot be mapped | `url: null, unavailable: true`; a masked count is logged | the same 404 as any other failure |
+| Caching | the API answer is `no-store`; clients must not store the link | `private, max-age=300` for the bytes only |
+
+Staff clients must treat the `url` as a ticket, not an address: use it now, ask again later.
+
+### 3. Bucket settings to prepare (before the switch)
+
+- **CORS for the presigned PUT** (staff uploads go straight to the bucket): allowed origins = only the staff web app's origins;
+  methods `PUT` (and `GET`/`HEAD` for staff screens that load signed links from the browser); allowed headers `Content-Type`
+  (and `Content-Length` if the tool needs it); max age a few minutes. Without it uploads fail even though the link is valid. The
+  rule is on the bucket, not on the API host. Re-check it after turning public access off: signed links are not public access.
+- **Scoped tokens, one per bucket and per environment.** The API's key is limited to this bucket (object read, write, delete, list
+  only if needed); the staging API uses a different bucket and a different key; the public stock bucket has its own key; the
+  audit and copy tools use short-lived keys that you revoke afterwards. Never reuse a developer's personal key, never one key across
+  environments.
+- **The public domain on this bucket** (and the shared public development address `r2.dev`) will be disconnected at the switch; plan the
+  order below so nothing still uses them.
+
+### 4. Backup copy before closing
+
+- [ ] Take a **verified copy of the whole bucket** into a separate bucket on a different account or provider (a one-way copy tool run by
+      the maintainer, never printing keys). Verify: object count equal (compare with `npm run r2:audit`), and for a sample plus every
+      object over a size threshold, size and checksum equal.
+- [ ] Keep it until the retention period the business chooses has passed after the switch.
+- [ ] Take a database snapshot too (the stored addresses are the map to the files).
+
+### 5. Verification steps
+
+Run `npm run r2:audit` first (read-only; it prints counts only). It shows how many objects are in each top-level folder and how many stored
+addresses in the database are on the configured public address versus anywhere else. Anything "elsewhere" is investigated first: those
+rows cannot be signed and will show as unavailable.
+
+On **staging** (with its own bucket made private the same way):
+
+1. Staff: open a vehicle, see photos, documents and the auction sheet load; open an export; upload a photo, a document and an auction
+   sheet; delete one. Each works with public access OFF.
+2. A signed link works until `expiresAt` and fails afterwards; a link for one object does not open another.
+3. The bucket's public address answers 403/404 for an object that used to load without a signature.
+4. A customer with a released vehicle still sees its photos and documents through the app (the gateway).
+5. A search of logs and API responses finds no signed-link secret (`X-Amz-Signature`, `X-Amz-Credential`, `X-Amz-Security-Token`).
+
+Then in **production**, in this order, one change at a time: (a) deploy the API version that returns signed links and check staff screens;
+(b) wait until staff app builds that read the stored address are gone; (c) take the backup copy (section 4); (d) disable public access
+on the bucket (and disconnect its public domain and `r2.dev`); (e) repeat steps 1 to 5 above on production straight away.
+
+### 6. Monitoring
+
+- Watch the staff apps' image and download errors, and the API's rate of `unavailable` rows (the masked warning), for a week after the switch.
+- Watch the storage provider's request metrics for 403s on the old public path: a few mean old links, a steady stream means a consumer
+  was missed.
+- The external uptime monitor and the file gateway tests (docs/testing.md) stay green.
+
+### 7. Rollback (re-enable public access)
+
+Nothing was copied, moved or edited, so rollback is switching the bucket's public access (and its public domain) back on. Objects, keys and
+database rows are unchanged, and the API keeps working either way (customers use the gateway; staff links work with or without public
+access). Do this at the first sign of a missed consumer, fix the consumer, then repeat the switch. The only thing that cannot be undone is
+deleting objects, which this plan never does.
+
+## The public stock bucket stays public
+
+Public website stock images live in a **separate** bucket (`R2_PUBLIC_STOCK_BUCKET_NAME`) served on a **custom domain**
+(`PUBLIC_STOCK_IMAGE_BASE_URL`), with the shared public development address (`r2.dev`) **disabled in production** (it is allowed in staging only, where the API gives one masked start-up warning; `APP_ENV=production` refuses to start with an `r2.dev` stock address), nothing private in it, and bucket
+listing off (docs/launch-checklist-stock.md). It is deliberately public and is not part of this plan. The two buckets must never be
+merged.
+
+## Plan B (not chosen): move the files into a new private bucket
+
+If the main bucket cannot be made private for a reason that cannot be removed, files can be copied to a new private bucket instead:
+create it (no public access, own scoped key); point new uploads at it; copy every object with the key unchanged and verify counts, sizes and
+checksums; switch the readers (the staff signed links and the gateway already derive the key from the stored address, so a stored
+address still maps to the same key in the new bucket); only then close and finally delete the old bucket after the retention period. A
+later, separate step may store keys instead of addresses (a data update on a copy first, with a snapshot, with approval; any new column
+is an additive migration generated with `diff-script` and approved before any `deploy`). This costs one full copy and a longer
+transition, which is why Plan A is preferred.
 
 ## Risks and notes
 
-- **Public stock images** are a different bucket by design (`docs/launch-checklist-stock.md`) and are not part of this move.
-- **Thumbnails** (`photos-thumb`, `staging-thumb`) are copied with everything else; a missing thumbnail falls back to the full image.
-- **Cached or emailed URLs** to the old public bucket stop working at step 6. No customer-facing screen uses them; check staff exports.
-- **Cost:** reading and writing every object once; the copy is the only large transfer.
-- **Never** use a developer's personal credentials for the copy: use a short-lived key limited to the two buckets, and revoke it after.
+- A signed link is a bearer credential until it expires: it is never stored, never logged (the redactor strips the signature, credential and
+  session token from logs and errors), and the API response that carries it is `no-store`.
+- Thumbnails (`photos-thumb`, `staging-thumb`) live in the same bucket and need nothing special; a missing thumbnail falls back to the full image.
+- **The activity log no longer receives file addresses.** New entries hold a file's id, kind and name only, and everything the activity-log
+  endpoints return is redacted at read time (storage addresses, hosts, keys, bucket names, the account id), old rows included. Stored history
+  is not rewritten.
+- **The upload presign no longer returns a public address.** It returns `{ uploadUrl, key, expiresInSeconds, headers }`; a file is registered by
+  its `key` and the stored address is built on the server. The signed `uploadUrl` necessarily contains the storage host and the account id (an
+  accepted exposure: staff-only, 300 s, one key).

@@ -26,7 +26,8 @@ import { getPrisma } from "../lib/prisma.js";
 import { ServiceError } from "../lib/errors.js";
 import type { SessionUser } from "../lib/session-user.js";
 import { safeError } from "../lib/redact.js";
-import { checkNewFileUrl, type FileKind } from "../lib/object-storage.js";
+import { checkNewFileKey, storedUrlForKey, verifyUploadedObject, type FileKind } from "../lib/object-storage.js";
+import { fileReference } from "../lib/file-reference.js";
 import { vehicleCreateSchema, vehicleUpdateSchema, flattenFieldErrors } from "../validation/vehicle.schema.js";
 import { assignNextSerial, assignLegacySerial, correctSerialNumber } from "./serial.service.js";
 import * as activityLog from "./activity-log.service.js";
@@ -439,22 +440,31 @@ async function assertLookupIdsInOrg(orgId: string, input: VehicleLookupFields): 
   }
 }
 
-/** Files attached while creating a vehicle must be uploads staged for THIS org. */
-function assertNewFileUrls(
+/**
+ * Files attached while creating a vehicle are sent as KEYS and must be uploads staged for THIS org (folder, characters, type) that
+ * really exist within the size limit. The address that gets stored is built from the key afterwards (storedUrlForKey).
+ */
+async function assertNewFileKeys(
   orgId: string,
-  input: { auctionSheetUrl: string | null; photoUrls: string[]; documents: Array<{ url: string }> }
-): void {
+  input: { auctionSheetKey: string | null; photoKeys: string[]; documents: Array<{ key: string }> }
+): Promise<void> {
   const fieldErrors: Record<string, string> = {};
-  const check = (field: string, url: string, kind: FileKind) => {
-    const message = checkNewFileUrl(orgId, url, kind);
+  const check = async (field: string, key: string, kind: FileKind) => {
+    const message = checkNewFileKey(orgId, key, kind) ?? (await verifyUploadedObject(key, kind));
     if (message) fieldErrors[field] = message;
   };
-  if (input.auctionSheetUrl) check("auctionSheetUrl", input.auctionSheetUrl, "AUCTION_SHEET");
-  input.photoUrls.forEach((url, i) => check(`photoUrls.${i}`, url, "VEHICLE_PHOTO"));
-  input.documents.forEach((doc, i) => check(`documents.${i}.url`, doc.url, "VEHICLE_DOCUMENT"));
+  if (input.auctionSheetKey) await check("auctionSheetKey", input.auctionSheetKey, "AUCTION_SHEET");
+  for (const [i, key] of input.photoKeys.entries()) await check(`photoKeys.${i}`, key, "VEHICLE_PHOTO");
+  for (const [i, doc] of input.documents.entries()) await check(`documents.${i}.key`, doc.key, "VEHICLE_DOCUMENT");
   if (Object.keys(fieldErrors).length > 0) {
     throw new ServiceError("VALIDATION", "One or more files are not valid uploads.", fieldErrors);
   }
+}
+
+/** The vehicle as the activity log keeps it: the auction sheet is a file reference (id, kind, name), never the stored address. */
+function loggedVehicle(row: { id: string; auctionSheetUrl: string | null }): unknown {
+  const { auctionSheetUrl, ...rest } = row;
+  return { ...JSON.parse(JSON.stringify(rest)), auctionSheet: auctionSheetUrl ? fileReference("AUCTION_SHEET", row.id, auctionSheetUrl) : null };
 }
 
 function isUniqueViolation(error: unknown): boolean {
@@ -495,6 +505,13 @@ async function mapCorrectionConflict<T>(track: SerialPrefix, newNumber: number, 
 
 type TxClient = Prisma.TransactionClient;
 
+/** A vehicle write that carries org_id in its own where clause (not only in the read before it). Zero rows is a 404 and rolls
+ * the surrounding transaction back, so another org's id changes nothing. */
+async function writeVehicle(tx: TxClient, orgId: string, id: string, data: Prisma.VehicleUncheckedUpdateManyInput): Promise<void> {
+  const written = await tx.vehicle.updateMany({ where: { id, org_id: orgId }, data });
+  if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
+}
+
 /** No notification of any kind (event-driven or cron) fires for a vehicle
  * whose row colour status is a cancel status — a fallen-through deal doesn't
  * need staff chasing payment/transport/LC for it anymore. Checked against
@@ -516,7 +533,14 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
       flattenFieldErrors(parsed.error)
     );
   }
-  const input = parsed.data;
+  // Files arrive as keys; the addresses stored below are built from them here.
+  const posted = parsed.data;
+  const input = {
+    ...posted,
+    auctionSheetUrl: posted.auctionSheetKey ? (storedUrlForKey(posted.auctionSheetKey) ?? "") : null,
+    photoUrls: posted.photoKeys.map((key) => storedUrlForKey(key) ?? ""),
+    documents: posted.documents.map(({ key, ...rest }) => ({ ...rest, url: storedUrlForKey(key) ?? "" })),
+  };
 
   if (input.isLegacyEntry && input.legacySerialNumber == null) {
     throw new ServiceError("VALIDATION", "Legacy serial number is required.", {
@@ -596,7 +620,7 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
   // back would join that org's data.
   await assertLookupIdsInOrg(user.orgId, input);
   // File URLs are stored and later fetched/deleted by the server: only our own org's uploads.
-  assertNewFileUrls(user.orgId, input);
+  await assertNewFileKeys(user.orgId, posted);
 
   const vehicle = await mapSerialConflict(input.track, input.isLegacyEntry ? legacySerialNumber : null, () =>
     getPrisma().$transaction(async (tx) => {
@@ -778,7 +802,7 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
         action: "ADD_VEHICLE_PHOTO",
         entity: "VehiclePhoto",
         entityId: photo.id,
-        after: { url },
+        after: fileReference("VEHICLE_PHOTO", photo.id, url),
       });
     }
     for (const document of input.documents) {
@@ -798,7 +822,7 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
         action: "ADD_VEHICLE_DOCUMENT",
         entity: "VehicleDocument",
         entityId: createdDocument.id,
-        after: { url: document.url, name: document.name, documentType: document.documentType },
+        after: { ...fileReference("VEHICLE_DOCUMENT", createdDocument.id, document.url), name: document.name, documentType: document.documentType },
       });
     }
 
@@ -832,7 +856,7 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
       entityId: created.id,
       // Snapshot through JSON to turn Date objects into plain ISO strings —
       // the ActivityLog.after column is Json, not a live Prisma model.
-      after: JSON.parse(JSON.stringify(created)),
+      after: loggedVehicle(created),
     });
 
     return {
@@ -1003,9 +1027,7 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
     if (!existing) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
     const { nextStatus, statusTransition, purchaseDateChanged, auctionBillNewlyPaid } = decide(existing);
 
-    const result = await tx.vehicle.update({
-      where: { id },
-      data: {
+    await writeVehicle(tx, user.orgId, id, {
         auctionItemNo: input.auctionItemNo,
         chassisNo: input.chassisNo,
         modelId: input.modelId,
@@ -1058,8 +1080,9 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
         sellingPriceCurrency: input.sellingPrice !== null ? (input.sellingPriceCurrency ?? "JPY") : null,
 
         shipmentStatus: nextStatus,
-      },
     });
+    const result = await tx.vehicle.findFirst({ where: { id, org_id: user.orgId } });
+    if (!result) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
 
     let bookingReceivedNotification: notificationService.EmitParams | null = null;
     let revertedToPendingNotification: notificationService.EmitParams | null = null;
@@ -1161,8 +1184,8 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
       action: "UPDATE_VEHICLE",
       entity: "Vehicle",
       entityId: id,
-      before: JSON.parse(JSON.stringify(existing)),
-      after: JSON.parse(JSON.stringify(result)),
+      before: loggedVehicle(existing),
+      after: loggedVehicle(result),
     });
 
     return {
@@ -1192,15 +1215,17 @@ export async function deleteVehicle(orgId: string, actorId: string, id: string):
   const existing = await assertVehicleInOrg(orgId, id);
 
   await getPrisma().$transaction(async (tx) => {
-    const deleted = await tx.vehicle.update({ where: { id }, data: { deletedAt: new Date() } });
+    await writeVehicle(tx, orgId, id, { deletedAt: new Date() });
+    const deleted = await tx.vehicle.findFirst({ where: { id, org_id: orgId } });
+    if (!deleted) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
     await activityLog.record(tx, {
       orgId,
       actorId,
       action: "DELETE_VEHICLE",
       entity: "Vehicle",
       entityId: id,
-      before: JSON.parse(JSON.stringify(existing)),
-      after: JSON.parse(JSON.stringify(deleted)),
+      before: loggedVehicle(existing),
+      after: loggedVehicle(deleted),
     });
   });
 }
@@ -1223,7 +1248,7 @@ export async function updateVehicleRowColourStatus(
   }
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.vehicle.update({ where: { id }, data: { rowColourStatusId } });
+    await writeVehicle(tx, orgId, id, { rowColourStatusId });
     await activityLog.record(tx, {
       orgId,
       actorId,
@@ -1250,7 +1275,7 @@ export async function updateVehicleAuctionBillPaid(
   const auctionBillNewlyPaid = auctionBillPaid === true && existing.auctionBillPaid !== true;
 
   const notification = await getPrisma().$transaction(async (tx) => {
-    await tx.vehicle.update({ where: { id }, data: { auctionBillPaid } });
+    await writeVehicle(tx, orgId, id, { auctionBillPaid });
     await activityLog.record(tx, {
       orgId,
       actorId,
@@ -1311,10 +1336,7 @@ export async function convertVehicleToExport(
   }
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.vehicle.update({
-      where: { id },
-      data: { convertedToExport: true, convertedToExportAt: new Date(), destination },
-    });
+    await writeVehicle(tx, orgId, id, { convertedToExport: true, convertedToExportAt: new Date(), destination });
     await tx.statusHistory.create({
       data: {
         vehicleId: id,
@@ -1358,10 +1380,7 @@ export async function revertVehicleToLocal(orgId: string, actorId: string, id: s
   }
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.vehicle.update({
-      where: { id },
-      data: { convertedToExport: false },
-    });
+    await writeVehicle(tx, orgId, id, { convertedToExport: false });
     await activityLog.record(tx, {
       orgId,
       actorId,
@@ -1394,10 +1413,7 @@ export async function convertVehicleToLocal(orgId: string, actorId: string, id: 
   }
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.vehicle.update({
-      where: { id },
-      data: { convertedToLocal: true, convertedToLocalAt: new Date() },
-    });
+    await writeVehicle(tx, orgId, id, { convertedToLocal: true, convertedToLocalAt: new Date() });
     await activityLog.record(tx, {
       orgId,
       actorId,
@@ -1427,10 +1443,7 @@ export async function revertVehicleToExport(orgId: string, actorId: string, id: 
   }
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.vehicle.update({
-      where: { id },
-      data: { convertedToLocal: false },
-    });
+    await writeVehicle(tx, orgId, id, { convertedToLocal: false });
     await activityLog.record(tx, {
       orgId,
       actorId,
@@ -1473,10 +1486,7 @@ export async function correctVehicleSerialNumber(
   return mapCorrectionConflict(existing.serialPrefix, newNumber, () => getPrisma().$transaction(async (tx) => {
     const { serial } = await correctSerialNumber(tx, orgId, existing.serialPrefix, newNumber, id);
 
-    await tx.vehicle.update({
-      where: { id },
-      data: { serialNumber: newNumber, serial },
-    });
+    await writeVehicle(tx, orgId, id, { serialNumber: newNumber, serial });
 
     await activityLog.record(tx, {
       orgId,

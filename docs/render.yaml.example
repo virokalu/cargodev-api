@@ -6,18 +6,23 @@ services:
   - type: web
     name: cargodev-api
     runtime: docker
+    region: singapore
     dockerfilePath: ./Dockerfile
     # Exactly one instance (docs/deployment.md: the limiters and the event bus live in memory).
     numInstances: 1
     plan: starter
     # Static route; answers without touching the database.
     healthCheckPath: /health
-    # At least SHUTDOWN_TIMEOUT_MS (30 s) plus a margin, so SIGTERM is not followed by SIGKILL too early.
-    maxShutdownDelaySeconds: 35
+    # At least SHUTDOWN_TIMEOUT_MS (30 s) plus a margin for open streams, so SIGTERM is not followed by SIGKILL too early.
+    maxShutdownDelaySeconds: 45
     # Deploy on purpose (after the additive migration has been applied from the maintainer's laptop).
     autoDeploy: false
+    # No persistent disk: nothing is written locally (files live in object storage, data in the database).
     envVars:
       - key: NODE_ENV
+        value: production
+      # production | staging | development. A staging service copies this file with APP_ENV=staging (see the notes at the end).
+      - key: APP_ENV
         value: production
       - key: PORT
         value: "4000"
@@ -49,6 +54,23 @@ services:
         sync: false
       - key: RESEND_API_KEY
         sync: false
+      # Staging only: with RESEND_API_KEY set, staging refuses to start without this (addresses or @domain, comma separated).
+      - key: EMAIL_ALLOWED_RECIPIENTS
+        sync: false
+      # Temporary file links on this API's own domain (docs/deployment.md, ADR 0007). Required in production.
+      - key: FILE_LINK_SECRET
+        sync: false
+      - key: FILE_LINK_SECRET_PREVIOUS # only while rotating
+        sync: false
+      - key: FILE_LINK_BASE_URL # this service's own https address
+        sync: false
+      - key: FILE_LINK_TTL_SECONDS
+        value: "300"
+      - key: FILE_LINK_MAX_TTL_SECONDS
+        value: "900"
+      # Cleanup jobs delete nothing until this is switched to false on purpose (docs/runbook.md).
+      - key: RETENTION_DRY_RUN
+        value: "true"
       - key: EMAIL_FROM
         sync: false
       - key: R2_PUBLIC_URL
@@ -72,4 +94,6 @@ services:
         sync: false
       - key: TURNSTILE_SECRET
         sync: false
-# NOT set on the API host, ever: MIGRATION_DATABASE_URL, DIRECT_URL. Not set on staging: RESEND_API_KEY, EMAIL_FROM.
+# NOT set on the API host, ever: MIGRATION_DATABASE_URL, DIRECT_URL.
+# Staging: APP_ENV=staging; RESEND_API_KEY and EMAIL_FROM only together with EMAIL_ALLOWED_RECIPIENTS; its own stock bucket
+# (an r2.dev address is allowed there and nowhere else).

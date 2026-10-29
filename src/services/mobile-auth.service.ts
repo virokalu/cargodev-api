@@ -164,7 +164,7 @@ export async function refreshMobileToken(rawBody: unknown, meta: RequestMeta): P
       // it, count is 0 and this whole transaction rolls back, so one token can
       // never produce two live successors.
       const claimed = await tx.refreshToken.updateMany({
-        where: { id: existing.id, revokedAt: null },
+        where: { id: existing.id, org_id: existing.org_id, revokedAt: null },
         data: { revokedAt: new Date() },
       });
       if (claimed.count === 0) throw new RefreshTokenAlreadyUsed();
@@ -179,8 +179,8 @@ export async function refreshMobileToken(rawBody: unknown, meta: RequestMeta): P
           expiresAt,
         },
       });
-      await tx.refreshToken.update({
-        where: { id: existing.id },
+      await tx.refreshToken.updateMany({
+        where: { id: existing.id, org_id: existing.org_id },
         data: { replacedByTokenId: created.id },
       });
     });

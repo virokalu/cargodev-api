@@ -90,10 +90,12 @@ describe("POST /uploads/presign", () => {
   it("signs for 300 seconds, pins the exact size and type, and keeps the key inside the vehicle's folder for that kind", async () => {
     const res = await presign("MANAGER", photoRequest);
     const data = res.json().data;
-    expect(Object.keys(data).sort()).toEqual(["expiresInSeconds", "headers", "key", "publicUrl", "uploadUrl"]);
+    // No public address: the client gets a signed PUT link and the key to send back when it registers the file.
+    expect(Object.keys(data).sort()).toEqual(["expiresInSeconds", "headers", "key", "uploadUrl"]);
     expect(data.expiresInSeconds).toBe(300);
     expect(data.key).toMatch(new RegExp(`^org/${ORG_A}/vehicles/v_fc_pending/photos/[0-9a-f-]{36}-front-view\\.jpg$`));
-    expect(data.publicUrl).toBe(`${BASE}/${data.key}`);
+    expect(res.body).not.toContain(BASE);
+    expect(JSON.stringify(data)).not.toMatch(/publicUrl|r2\.dev/);
     expect(data.headers).toEqual({ "Content-Type": "image/jpeg" });
     expect(calls.put).toEqual([{ key: data.key, contentType: "image/jpeg", contentLength: 1_000_000, expiresInSeconds: 300 }]);
   });
@@ -599,8 +601,8 @@ describe("customer file gateway: authorise first, then stream", () => {
       const text = responses.map((r) => (binary.has(r.body) ? "" : r.body) + JSON.stringify(r.headers)).join("\n");
       const everything = `${text}\n${lines.join("")}\n${consoleOutput.join("\n")}`;
       const forbidden = ["org/", ORG_A + "/", "vehicles/v_", "/photos/", "/documents/bl", "r2.cloudflarestorage", "cloudflarestorage", ACCOUNT_ID, "files.example.test", "photos-thumb"];
-      // The request URL itself is logged by the server and legitimately contains "/photos/<id>/image"; strip those.
-      const scrubbed = everything.replace(/\/api\/customer\/v1\/(photos|documents)\/[A-Za-z0-9_%.-]*\/(image|file)/g, "[route]");
+      // The log carries the route PATTERN ("/photos/:photoId/image"), which legitimately contains "/photos/"; strip those.
+      const scrubbed = everything.replace(/\/api\/customer\/v1\/(photos|documents)\/:?[A-Za-z0-9_%.-]*\/(image|file)/g, "[route]");
       for (const secret of forbidden) expect(scrubbed, secret).not.toContain(secret);
       expect(lines.join("").length).toBeGreaterThan(0);
     } finally {

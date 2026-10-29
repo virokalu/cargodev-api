@@ -32,6 +32,14 @@ export function chatScopeFor(role: StaffRole | null | undefined): ChatScopeKind 
   return null;
 }
 
+/**
+ * May this role see a customer's contact details (email, phone, address)? A VIEWER sees names and counts only: they cannot read
+ * the customer list's contact columns, search by them, or find them in a report. Every other role is unchanged.
+ */
+export function canSeeCustomerContact(role: StaffRole): boolean {
+  return role !== "VIEWER";
+}
+
 /** See how ready a vehicle is to be shown to its customer (booleans and counts only, nothing is changed). */
 export const RELEASE_READINESS_ROLES: readonly StaffRole[] = ["ADMINISTRATOR", "MANAGER", "OPERATOR"];
 

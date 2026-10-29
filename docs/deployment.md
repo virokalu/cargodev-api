@@ -75,6 +75,30 @@ release order). The running service must not be able to run them.
   database pool, exit 0. If anything hangs the process exits 1 at the deadline. Set the host's termination grace period to at least
   `SHUTDOWN_TIMEOUT_MS` plus a few seconds (for example 35 s), otherwise the host's SIGKILL arrives first.
 
+## File links on the API's own domain
+
+`GET /f/v1/...` (ADR 0007) is served by this API on the same hostname as the rest of the API for now (`FILE_LINK_BASE_URL` = the API origin; no separate `files.<domain>` hostname is needed). It needs `FILE_LINK_SECRET` and `FILE_LINK_BASE_URL`, which are **required in production** (the start stops without them).
+
+- **Caching at the edge:** these answers are private to one person. If a CDN or proxy sits in front, add a rule to **bypass the cache** for `/f/v1/*` (the API already sends `Cache-Control: private`, which a correct edge honours; the rule makes it certain).
+- **CORS:** a plain `<img>`, `<a>` or PDF viewer needs none. Only a browser app that loads a link with `fetch` from another origin needs that origin in the API's CORS list (`GET` only).
+- **If you later give files their own hostname** (for example `files.<domain>`): point a CNAME at the API host, set `FILE_LINK_BASE_URL` to it, and keep the cache bypass rule for that hostname. No code change.
+- **Closing the main bucket needs no storage CORS rule for GET**: the browser never talks to storage (uploads still need the PUT rule).
+- Rotating the secret: docs/runbook.md.
+
+## Build inputs: every file the image copies must be in the commit
+
+A host that builds from git (Render, CI) sees only the **commit**, not your disk. A Dockerfile, `tsconfig.build.json` or `prisma/` folder that exists locally but was never committed makes the host fail with `failed to read dockerfile: open Dockerfile: no such file or directory` or `COPY failed: file not found`.
+
+`sh scripts/check-build-inputs.sh [commit]` (read-only; default `HEAD`) reads the Dockerfile and `.dockerignore` **as committed** and fails, listing every problem, if:
+
+- `Dockerfile` is not at the repo root with exactly that name in the commit (a wrong capital letter or a subfolder is reported with what it found);
+- a `COPY`/`ADD` source (other than `--from=<stage>` copies) has no file in the commit;
+- every file of a source is left out of the build context by `.dockerignore` (Docker rules: patterns are relative to the root, `*` does not cross `/`, the last match wins, `!` puts a file back).
+
+It runs in CI before the image is built (the `image` job), and `tests/check-build-inputs.test.ts` proves it on throwaway repositories. To check what a host built, pass its commit: `sh scripts/check-build-inputs.sh fed2350`.
+
+If the host says it cannot find the Dockerfile: (1) run the script with the commit hash from the host's log; (2) if it fails, that commit is missing files, so deploy a newer commit (the host builds the commit it names, not your branch tip); (3) if it passes, check the service settings: branch, **Root Directory empty**, **Dockerfile Path `./Dockerfile`**, and that auto-deploy builds the latest commit. Setting the host to deploy only after CI checks pass keeps a broken commit from ever reaching it.
+
 ## Client address (rate limits and logs)
 
 `CLIENT_IP_SOURCE` decides where `request.ip` comes from:
@@ -90,6 +114,12 @@ through, anyone can pick their own address and escape every rate limit. If the h
 socket address is used and a masked warning is logged (the header name only, at most once a minute). Run the self-test in the
 runbook after every host or setting change. Behind a load balancer with `socket`, every request shares the balancer's address and one
 rate-limit bucket: set the mode before go-live.
+
+**Production refuses to start without `CLIENT_IP_SOURCE`** (any of the three values is accepted; the choice must be deliberate). In `socket` mode, if requests arrive carrying `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `True-Client-IP`, `CF-Connecting-IP` or `X-Client-IP`, the API logs one warning a minute naming the header names (never a value or an address): that usually means a proxy is in front and the mode should be `hops` or `header`.
+
+## Request logs
+
+A request log line carries the method, the route PATTERN (for example `/api/v1/vehicles/:serial/files`; `(no matching route)` for an unknown URL), the status, the duration and the request id. It never carries the raw URL, the query string, a path parameter, a header or the client address, so search text, serials and tokens in a URL cannot reach a log. Authorization and cookie headers and token, hash and signed-URL parameters are redacted wherever they could still appear.
 
 ## Portability checklist
 
@@ -122,4 +152,19 @@ A new consumer is added to this list before it is given access.
 
 ## Example service definition
 
-`docs/render.yaml.example` is a minimal, secret-free definition for a Docker host (names of variables, no values).
+`docs/render.yaml.example` is a minimal, secret-free definition for a Docker host (names of variables, no values): Docker runtime, region singapore, health check `/health`, `maxShutdownDelaySeconds: 45`, one instance, no persistent disk, `sync: false` for every secret. Keep it equivalent to what is deployed.
+
+## First-deploy checklist
+
+Do these in order; stop at the first failure.
+
+1. **Settings.** `APP_ENV`, `NODE_ENV`, `FILE_LINK_SECRET` (own value, at least 32 bytes), `FILE_LINK_BASE_URL` (this service's own https address), the database address (the session pooler), and for staging `EMAIL_ALLOWED_RECIPIENTS` (with a mail key) and a stock address that is allowed for that `APP_ENV`. All secrets set in the host's dashboard, none in the repo.
+2. **Start-up line.** In the first log lines check the summary: `APP_ENV`, client-IP mode, scheduler on/off, retention (`dry-run` until you decide otherwise), file links on, email off / allow-list / open, build commit. Any warning line is read and understood before going on.
+3. **Health.** `GET /health` is 200.
+4. **Smoke tests.** Run `scripts/smoke-test.ps1` (docs/runbook.md, "Smoke test") with test accounts; every check PASS or an understood SKIP.
+5. **Client-IP self-test.** Run the self-test in docs/runbook.md and set `CLIENT_IP_SOURCE` only as far as it proves.
+6. **Redeploy-while-streaming test.** Open a notification stream (smoke test or a staff client), trigger a redeploy, and confirm: the stream ends cleanly within `maxShutdownDelaySeconds`, the client reconnects to the new instance and catches up with `GET /notifications`, and the old instance's log shows an orderly shutdown (no SIGKILL).
+7. **File links.** Open one photo from a staff client, then wait for the link to expire and confirm the same link now gives the plain 404.
+8. **Rollback.** Know the previous image / commit before deploying; to roll back, redeploy it. Migrations are additive, so the previous version keeps working against the new schema; a migration is never rolled back by hand (docs/runbook.md).
+9. **Notifications.** Turn on the host's deploy-failed and service-unhealthy alerts to the maintainer's address, and confirm one test alert arrives.
+

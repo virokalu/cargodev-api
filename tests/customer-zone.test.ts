@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi  } from "vitest";
 vi.setConfig({ testTimeout: 30_000 });
 import type { FakePrisma } from "./helpers/fake-prisma.js";
 import { ORG_A, ORG_B } from "./helpers/fixtures.js";
+import { onVirtualClock } from "./helpers/virtual-clock.js";
 import {
   CUSTOMER_PASSWORD,
   NEW_PASSWORD,
@@ -334,9 +335,9 @@ describe("timing: unknown and real addresses cost the same", () => {
       ["/auth/forgot-password", { email: "nobody@example.test" }],
       ["/auth/resend-verification", { email: "nobody@example.test" }],
     ] as const) {
-      const started = Date.now();
-      await post(app, path, body);
-      expect(Date.now() - started, `${path} ${JSON.stringify(body)}`).toBeGreaterThanOrEqual(115);
+      // Virtual clock: the answer takes exactly the floor, whatever the branch and however busy the machine is.
+      const { ms } = await onVirtualClock(() => post(app, path, body));
+      expect(ms, `${path} ${JSON.stringify(body)}`).toBe(120);
     }
   });
 });

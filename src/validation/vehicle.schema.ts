@@ -231,15 +231,15 @@ export const vehicleCreateSchema = z
     // Deliberately NOT in vehicleSharedFields: editing the auction sheet
     // happens exclusively through the Files panel's immediate-persist action,
     // never through this form's update payload (see vehicle-form.tsx).
-    auctionSheetUrl: optionalText(2000),
+    auctionSheetKey: optionalText(1024),
     // Same create-only staging treatment as auctionSheetUrl above — Photos
     // and Documents added after creation go exclusively through the Files
     // panel's immediate-persist actions instead.
-    photoUrls: z.array(z.string().max(2000)).max(50).optional().default([]),
+    photoKeys: z.array(z.string().max(1024)).max(50).optional().default([]),
     documents: z
       .array(
         z.object({
-          url: z.string().max(2000),
+          key: z.string().max(1024),
           name: z.string().min(1).max(255),
           documentType: z.enum([
             "LC",

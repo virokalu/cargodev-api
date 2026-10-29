@@ -2,7 +2,7 @@
 // .env.example holds placeholders only. Runs the real script with `sh`.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -95,5 +95,77 @@ describe(".gitignore", () => {
     expect(at(".env.*")).toBeGreaterThan(at(".env"));
     expect(at("!.env.example")).toBeGreaterThan(at(".env.*"));
     expect(lines).not.toContain(".env*");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+describe("the pre-commit hook (.husky/pre-commit) in a throwaway repository", () => {
+  // The real hook and the real scan are copied into a new repository, a file is STAGED there, and the hook is run.
+  vi.setConfig({ testTimeout: 120_000 });
+  const git = (cwd: string, ...args: string[]) => spawnSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.test", ...args], { cwd, encoding: "utf8" });
+
+  function repoWithHook() {
+    const repo = mkdtempSync(path.join(tmpdir(), "hook-"));
+    git(repo, "init", "-q");
+    mkdirSync(path.join(repo, "scripts"));
+    mkdirSync(path.join(repo, ".husky"));
+    copyFileSync(script, path.join(repo, "scripts", "secret-scan.sh"));
+    copyFileSync(path.join(root, ".husky", "pre-commit"), path.join(repo, ".husky", "pre-commit"));
+    return repo;
+  }
+  const runHook = (repo: string) => {
+    const result = spawnSync("sh", [".husky/pre-commit"], { cwd: repo, encoding: "utf8" });
+    return { code: result.status, output: `${result.stdout}${result.stderr}` };
+  };
+  // Built at runtime so this file never contains a secret-looking assignment.
+  const FAKE_SECRET = ["const ", "pass", "word", " = ", JSON.stringify("Xk29fj3Lqp0Zz"), ";\n"].join("");
+
+  it("invokes the scan the way CI does: file names on stdin, one per line, from the staged list", () => {
+    const hook = readFileSync(path.join(root, ".husky", "pre-commit"), "utf8");
+    expect(hook).toContain("git diff --cached --name-only --diff-filter=ACM | sh scripts/secret-scan.sh");
+    const code = hook.split(/\r?\n/).filter((line) => !line.trim().startsWith("#")).join(" ");
+    expect(code).not.toContain("|| true"); // a finding must block the commit (the comments mention it; the code must not use it)
+  });
+
+  it("a staged fake secret blocks the commit (non-zero exit, names the file)", () => {
+    const repo = repoWithHook();
+    writeFileSync(path.join(repo, "leak.ts"), FAKE_SECRET);
+    git(repo, "add", "--", "leak.ts");
+    const { code, output } = runHook(repo);
+    expect(code).not.toBe(0);
+    expect(output).toContain("leak.ts");
+  });
+
+  it("a staged clean file passes, and so does a staged file whose value is a placeholder", () => {
+    const repo = repoWithHook();
+    writeFileSync(path.join(repo, "clean.ts"), "export const answer = 42;\n");
+    writeFileSync(path.join(repo, "placeholder.ts"), `const apiKey = "example-placeholder-value";\n`);
+    git(repo, "add", "--", "clean.ts", "placeholder.ts");
+    expect(runHook(repo).code).toBe(0);
+  });
+
+  it("a fake secret that is NOT staged is not the hook's business (only the staged list is scanned)", () => {
+    const repo = repoWithHook();
+    writeFileSync(path.join(repo, "clean.ts"), "export const answer = 42;\n");
+    git(repo, "add", "--", "clean.ts");
+    writeFileSync(path.join(repo, "unstaged-leak.ts"), FAKE_SECRET);
+    expect(runHook(repo).code).toBe(0);
+  });
+
+  it("a staged file that is DELETED in the commit is skipped, not an error", () => {
+    const repo = repoWithHook();
+    writeFileSync(path.join(repo, "gone.ts"), "export const x = 1;\n");
+    git(repo, "add", "--", "gone.ts");
+    git(repo, "commit", "-q", "-m", "add");
+    git(repo, "rm", "-q", "--", "gone.ts");
+    expect(runHook(repo).code).toBe(0);
+  });
+
+  it("the scan reads the file on disk, not the staged copy: a leak added after staging is caught (so stage what you scanned)", () => {
+    const repo = repoWithHook();
+    writeFileSync(path.join(repo, "later.ts"), "export const x = 1;\n");
+    git(repo, "add", "--", "later.ts");
+    writeFileSync(path.join(repo, "later.ts"), FAKE_SECRET); // edited after staging
+    expect(runHook(repo).code).not.toBe(0);
   });
 });

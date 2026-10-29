@@ -23,6 +23,7 @@ import {
 import { flattenFieldErrors } from "../validation/shared.js";
 import * as activityLog from "./activity-log.service.js";
 import { revokeAllUserTokens } from "./mobile-auth.service.js";
+import { invalidateStaffAuth } from "./staff-auth-state.service.js";
 
 const PASSWORD_SALT_ROUNDS = 10;
 
@@ -138,7 +139,7 @@ export async function createStaff(actor: SessionUser, rawInput: unknown): Promis
   const passwordHash = await bcrypt.hash(input.password, PASSWORD_SALT_ROUNDS);
 
   try {
-    return await getPrisma().$transaction(async (tx) => {
+    const result = await getPrisma().$transaction(async (tx) => {
       const created = await tx.user.create({
         data: {
           org_id: actor.orgId,
@@ -167,6 +168,9 @@ export async function createStaff(actor: SessionUser, rawInput: unknown): Promis
       // shared User model (customers have no role).
       return created as StaffListItem;
     });
+    // After the commit: the new account's first request must see it (a "not allowed" answer may be cached for this id).
+    invalidateStaffAuth(actor.orgId, result.id);
+    return result;
   } catch (error) {
     // @@unique([org_id, email]) — surfaced as a field error rather than a 500.
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
@@ -227,9 +231,10 @@ export async function updateStaff(
     : undefined;
 
   try {
-    return await getPrisma().$transaction(async (tx) => {
-      const updated = await tx.user.update({
-        where: { id: staffId },
+    const result = await getPrisma().$transaction(async (tx) => {
+      // The write carries org_id itself (not only getOwnedStaff above): another org's id changes nothing.
+      const written = await tx.user.updateMany({
+        where: { id: staffId, org_id: actor.orgId, userType: "STAFF" },
         data: {
           name: input.name,
           email: input.email,
@@ -238,8 +243,10 @@ export async function updateStaff(
           loginEnabled: input.active,
           ...(passwordHash ? { password: passwordHash } : {}),
         },
-        select: STAFF_SELECT,
       });
+      if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Staff account not found.");
+      const updated = await tx.user.findFirst({ where: { id: staffId, org_id: actor.orgId, userType: "STAFF" }, select: STAFF_SELECT });
+      if (!updated) throw new ServiceError("NOT_FOUND", "Staff account not found.");
 
       await activityLog.record(tx, {
         orgId: actor.orgId,
@@ -268,6 +275,9 @@ export async function updateStaff(
 
       return updated as StaffListItem;
     });
+    // After the commit: a deactivation or a role change applies on the very next request in this process.
+    invalidateStaffAuth(actor.orgId, staffId);
+    return result;
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       throw new ServiceError("CONFLICT", "A staff account with this email already exists.", {
@@ -294,12 +304,11 @@ export async function setStaffActive(
     );
   }
 
-  return getPrisma().$transaction(async (tx) => {
-    const updated = await tx.user.update({
-      where: { id: staffId },
-      data: { loginEnabled: active },
-      select: STAFF_SELECT,
-    });
+  const result = await getPrisma().$transaction(async (tx) => {
+    const written = await tx.user.updateMany({ where: { id: staffId, org_id: actor.orgId, userType: "STAFF" }, data: { loginEnabled: active } });
+    if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Staff account not found.");
+    const updated = await tx.user.findFirst({ where: { id: staffId, org_id: actor.orgId, userType: "STAFF" }, select: STAFF_SELECT });
+    if (!updated) throw new ServiceError("NOT_FOUND", "Staff account not found.");
 
     await activityLog.record(tx, {
       orgId: actor.orgId,
@@ -319,6 +328,8 @@ export async function setStaffActive(
 
     return updated as StaffListItem;
   });
+  invalidateStaffAuth(actor.orgId, staffId);
+  return result;
 }
 
 // ─────────────────────────────────────────────
@@ -385,11 +396,10 @@ export async function updateOwnProfileDetails(
 
   try {
     return await getPrisma().$transaction(async (tx) => {
-      const updated = await tx.user.update({
-        where: { id: actor.id },
-        data: { name: input.name, email: input.email, phone: input.phone },
-        select: OWN_PROFILE_SELECT,
-      });
+      const written = await tx.user.updateMany({ where: { id: actor.id, org_id: actor.orgId }, data: { name: input.name, email: input.email, phone: input.phone } });
+      if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Profile not found.");
+      const updated = await tx.user.findFirst({ where: { id: actor.id, org_id: actor.orgId }, select: OWN_PROFILE_SELECT });
+      if (!updated) throw new ServiceError("NOT_FOUND", "Profile not found.");
 
       await activityLog.record(tx, {
         orgId: actor.orgId,
@@ -445,7 +455,8 @@ export async function changeOwnPassword(actor: SessionUser, rawInput: unknown): 
   const passwordHash = await bcrypt.hash(input.newPassword, PASSWORD_SALT_ROUNDS);
 
   await getPrisma().$transaction(async (tx) => {
-    await tx.user.update({ where: { id: actor.id }, data: { password: passwordHash } });
+    const written = await tx.user.updateMany({ where: { id: actor.id, org_id: actor.orgId }, data: { password: passwordHash } });
+    if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Profile not found.");
 
     // No before/after snapshot here — a password hash has no business being
     // written to the audit trail, even hashed.

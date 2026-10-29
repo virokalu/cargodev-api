@@ -85,7 +85,7 @@ export function contentDispositionFor(contentType: AllowedContentType, displayNa
 }
 
 /** R2 returns ETags in quotes; make sure the header always is. */
-function quoteEtag(etag: string | null): string | null {
+export function quoteEtag(etag: string | null): string | null {
   if (!etag) return null;
   return etag.startsWith('"') || etag.startsWith("W/") ? etag : `"${etag}"`;
 }
@@ -127,7 +127,7 @@ export async function openCustomerFile(
   if (thumbKey) result = await store.getObject({ key: thumbKey, ...conditional });
   if (result.kind === "missing") result = await store.getObject({ key: file.key, ...conditional });
 
-  if (result.kind === "missing") throw NOT_FOUND();
+  if (result.kind === "missing" || result.kind === "rangeNotSatisfiable") throw NOT_FOUND();
   if (result.kind === "notModified") return { status: 304, etag: quoteEtag(result.etag) };
   return {
     status: 200,

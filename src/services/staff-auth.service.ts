@@ -92,16 +92,16 @@ export async function verifyStaffCredentials(
 
   const passwordValid = await bcrypt.compare(password, user.password);
   if (!passwordValid) {
-    await recordFailedLoginAttempt(user.id, user.failedLoginAttempts);
+    await recordFailedLoginAttempt(user.org_id, user.id, user.failedLoginAttempts);
     return null;
   }
 
-  await resetFailedLoginAttempts(user.id);
+  await resetFailedLoginAttempts(user.org_id, user.id);
 
   // Record the login timestamp (non-blocking — don't await, don't let a
   // failed timestamp update block login).
   getPrisma().user
-    .update({ where: { id: user.id }, data: { lastActiveAt: new Date() } })
+    .updateMany({ where: { id: user.id, org_id: user.org_id }, data: { lastActiveAt: new Date() } })
     .catch(() => {
       // Intentionally ignore.
     });
@@ -115,7 +115,7 @@ export async function verifyStaffCredentials(
   };
 }
 
-async function recordFailedLoginAttempt(userId: string, currentAttempts: number): Promise<void> {
+async function recordFailedLoginAttempt(orgId: string, userId: string, currentAttempts: number): Promise<void> {
   const attempts = currentAttempts + 1;
   const data: { failedLoginAttempts: number; lockoutUntil?: Date } = {
     failedLoginAttempts: attempts,
@@ -125,11 +125,11 @@ async function recordFailedLoginAttempt(userId: string, currentAttempts: number)
   }
   // Bookkeeping failure must not surface as a different login error than
   // "invalid credentials" — swallow it, same treatment as lastActiveAt above.
-  await getPrisma().user.update({ where: { id: userId }, data }).catch(() => {});
+  await getPrisma().user.updateMany({ where: { id: userId, org_id: orgId }, data }).catch(() => {});
 }
 
-async function resetFailedLoginAttempts(userId: string): Promise<void> {
+async function resetFailedLoginAttempts(orgId: string, userId: string): Promise<void> {
   await getPrisma().user
-    .update({ where: { id: userId }, data: { failedLoginAttempts: 0, lockoutUntil: null } })
+    .updateMany({ where: { id: userId, org_id: orgId }, data: { failedLoginAttempts: 0, lockoutUntil: null } })
     .catch(() => {});
 }

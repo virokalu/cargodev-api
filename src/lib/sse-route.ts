@@ -6,11 +6,21 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { errorBody } from "./response.js";
 import type { SseHub } from "./sse-hub.js";
 
+/** How often an open staff stream asks the database whether its user is still allowed (never longer than this). */
+export const STREAM_RECHECK_MS = 60_000;
+
 export function openSseStream(
   hub: SseHub,
   request: FastifyRequest,
   reply: FastifyReply,
-  who: { userId: string; orgId: string; expiresAt: number }
+  who: {
+    userId: string;
+    orgId: string;
+    expiresAt: number;
+    /** Asked every recheckMs; false closes the stream (a disabled user keeps nothing open). An error keeps it open. */
+    recheck?: () => Promise<boolean>;
+    recheckMs?: number;
+  }
 ): FastifyReply {
   if (!hub.hasCapacity()) {
     reply.header("Retry-After", "30");
@@ -36,7 +46,24 @@ export function openSseStream(
 
   const connection = hub.open({ userId: who.userId, orgId: who.orgId, sink: raw, expiresAt: who.expiresAt });
 
-  const cleanup = () => connection.dispose();
+  let recheckTimer: NodeJS.Timeout | undefined;
+  const recheck = who.recheck;
+  if (recheck) {
+    recheckTimer = setInterval(() => {
+      void recheck().then(
+        (allowed) => {
+          if (!allowed) connection.close({ event: "closed", data: { reason: "unauthorized" } });
+        },
+        () => undefined // the database is unreachable right now: keep the stream, ask again next time
+      );
+    }, who.recheckMs ?? STREAM_RECHECK_MS);
+    recheckTimer.unref();
+  }
+
+  const cleanup = () => {
+    if (recheckTimer) clearInterval(recheckTimer);
+    connection.dispose();
+  };
   request.raw.on("close", cleanup);
   request.raw.on("error", cleanup);
   raw.on("close", cleanup);

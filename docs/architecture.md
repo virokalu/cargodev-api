@@ -7,7 +7,7 @@ HTTP request
    |
 routes/      thin: auth -> zod parse -> call service -> shape response
    |
-services/    all business logic, framework-free, throws ServiceError
+services/    all business logic, framework-free, throws ServiceError. Every write carries org_id in its own where clause (not only in the read before it)
    |
 Prisma       data access (PostgreSQL), always scoped by orgId
 ```
@@ -34,7 +34,7 @@ src/
 ## Request lifecycle
 
 1. `onRequest` hook sets `Cache-Control: no-store`.
-2. Auth hook verifies the access token and attaches `{ id, role, orgId, name, email }`.
+2. Auth hook verifies the access token, then asks `getFreshStaffAuth(userId, orgId)` (`services/staff-auth-state.service.ts`: the database row, through a per-process cache of `STAFF_AUTH_CACHE_SECONDS`) and attaches `{ id, role, orgId, name, email }` taken from the DATABASE, not from the token. A missing, deactivated or non-staff user is a 401. `user.service` calls `invalidateStaffAuth` after the commit of every create, edit, (de)activation and role change, and a generation counter stops a read that was in flight from caching an old answer. Staff streams re-check with `bypassCache` every 60 s (`lib/sse-route.ts`). Tests may take the token's claims through the `NODE_ENV=test` seam in `lib/staff-auth-seam.ts`; it does nothing in any other environment.
 3. Role allow-list for the route is checked (403 if not allowed).
 4. Route parses input with zod.
 5. Route calls a service with the user and parsed input.
@@ -79,6 +79,10 @@ mutation (service)
 | Scheduled job | Runs in-process | The advisory lock already stops two instances running it at once. Sequential reruns (a deploy overlap) are safe only because the job is idempotent. Set `SCHEDULER_ENABLED=false` on instances that should not try. |
 | Stream caps | Per instance | Per instance, so the effective cap multiplies by the instance count. |
 
+## Staff file links (private-ready bucket)
+
+`lib/object-storage.ts` has the one store seam (`presignPut` for uploads, `getObject` with an optional range, `putObject`, `deleteKey`); there is no presigned GET. Staff and customer file links are on this API's own domain (ADR 0007): `lib/file-link.ts` builds and checks the signed text, `services/file-link.service.ts` issues links (`issueFileLink`, only after an endpoint's own authorization) and opens them (`openFileLink`: signature, expiry, then the database for the person and the file, then the store), and `routes/file-links.ts` serves `GET /f/v1/:kind/:id/:variant` with one identical 404 for every failure. `file.service.ts` puts the link in the `url` field of the staff file responses and reads PDF-export images straight through the store. The stored addresses in the database are unchanged. `scripts/r2-audit.ts` (`npm run r2:audit`) is the read-only counter used before the bucket is closed.
+
 ## Running it (deployment shape)
 
 One container, one process, nothing on disk (docs/deployment.md). `lib/shutdown.ts` is the SIGTERM path: `app.close()` (its preClose hook tells streams `event: shutdown`, its onClose hook waits for the scheduler for at most `SCHEDULER_SHUTDOWN_TIMEOUT_MS`), then the database pool is closed, all under `SHUTDOWN_TIMEOUT_MS`. `lib/client-ip.ts` implements `CLIENT_IP_SOURCE=header`: an early hook that replaces `request.ip` with one validated header, before the rate limiter reads it. The pool size is `DATABASE_POOL_MAX`. The image is built from `Dockerfile` (`npm run build` compiles `src` to `dist`); `scripts/db-latency.ts` measures database distance without printing the address.
@@ -109,7 +113,8 @@ One container, one process, nothing on disk (docs/deployment.md). `lib/shutdown.
 - **Staff uploads** use a presigned PUT (300 s, exact size and content type, no checksum headers). The key is built by the server with the extension of the signed type. Staff downloads are unchanged: the stored public URL.
 - **Customer downloads go through the API (the gateway).** The customer app asks for `/photos/:id/image` or `/documents/:id/file`; the API authorises (own vehicle, same org, export track, released; file released), reads the object with its own R2 credentials and streams it with safe headers (`nosniff`, private caching, ETag/304, inline for images and attachment for documents). The client never sees an R2 address, a key or a link.
 - **Options considered.** (1) **API proxy, now:** simplest, one place for authorisation and logging, nothing private is exposed; costs API bandwidth and a connection per download. (2) **Cloudflare Worker gateway, later:** the same checks in front of a private bucket at the edge, with caching, offloading bytes from the API; it needs a signed token or a call back to the API for the decision and a separate deployment. (3) Presigned GET links for customers: rejected, because a link is a bearer secret that can be forwarded and cached. The API proxy is kept behind `openCustomerFile`, so a Worker can replace it without changing the authorisation rules.
-- **Thumbnails:** made by `photo-thumbnail.service.ts` with `sharp` after a photo is added (best effort, never fatal), stored beside the photos folder. See ADR 0006 for how untrusted image bytes are handled.
+- **Retention:** `services/retention.service.ts` runs inside the daily job, after the vehicle checks and under the same advisory lock, once per org, in one transaction with at most 1000 rows per table per run (a backlog is worked off over several days). **It is a dry run unless `RETENTION_DRY_RUN=false`** (the default is true in every environment): the same queries run and one masked line of counts is logged per run (all orgs added together, never an org id), and nothing is removed. A customer counts as self-registered only if the registration step wrote a `CUSTOMER_REGISTER` log row with that customer as the actor (a customer created by staff never has one), and owns nothing only if no vehicle row (soft-deleted included), no chat and no link request points at them. When switched on it deletes expired one-time codes (`RETENTION_OTP_DAYS`), expired or revoked customer and staff sessions (`RETENTION_SESSION_DAYS`) and READ customer alerts (`RETENTION_ALERT_DAYS`), and anonymises never-verified self-registered customers who own nothing (`UNVERIFIED_ACCOUNT_DAYS`; anonymised, not deleted, because the audit trail points at the row). Chats and enquiries are never touched. It writes one `RETENTION_CLEANUP` ActivityLog row per org per run with counts only, and only when something was removed; the row is attributed to the org's oldest administrator (the audit trail needs a user), and an org with no administrator is skipped. Idempotent: a second run finds nothing.
+- **Thumbnails:** made by `photo-thumbnail.service.ts` with `sharp` (loaded lazily on first use: if it cannot load, one masked error is logged, no thumbnail is made and `thumb` requests are served the full image) after a photo is added (best effort, never fatal), stored beside the photos folder. See ADR 0006 for how untrusted image bytes are handled.
 - **Public stock images (slice 7)** live in a SEPARATE public bucket (`R2_PUBLIC_STOCK_BUCKET_NAME`, same account and credentials) served from `PUBLIC_STOCK_IMAGE_BASE_URL`, with nothing private in it, behind `PUBLIC_STOCK_ENABLED`. Keys are `stock/<hash of org id>/<random>.<ext>`. They are never mixed with the private bucket (`lib/public-stock-storage.ts` is the only code that talks to it).
 - **Milestones** (`milestone.service.ts`): a unique key on (vehicle, type); automation inserts with ON CONFLICT DO NOTHING inside the status-change transaction and, going down, removes only automatic milestones nobody touched (rule in ADR 0006).
 

@@ -125,7 +125,7 @@ describe("thumbnails next to stored photos", () => {
   it("adding a photo writes a smaller copy under photos-thumb with the right content type", async () => {
     const original = await image(2400, 1600, "jpeg");
     objects.set(KEY, { body: original });
-    await addVehiclePhoto(actor(), "v_fc_pending", { url: `${BASE}/${KEY}` });
+    await addVehiclePhoto(actor(), "v_fc_pending", { key: KEY });
     const thumbKey = KEY.replace("/photos/", "/photos-thumb/");
     expect(puts).toEqual([thumbKey]);
     const thumb = objects.get(thumbKey)!;
@@ -139,8 +139,11 @@ describe("thumbnails next to stored photos", () => {
   it("a photo that cannot be processed is still added, with no thumbnail and no stack in the log", async () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     objects.set(KEY, { body: Buffer.from("<svg onload=alert(1)/>") });
-    const photo = await addVehiclePhoto(actor(), "v_fc_pending", { url: `${BASE}/${KEY}` });
-    expect(photo.url).toBe(`${BASE}/${KEY}`);
+    const photo = await addVehiclePhoto(actor(), "v_fc_pending", { key: KEY });
+    // staff get a signed link in the response; the stored address in the row is unchanged
+    expect(photo.url).toMatch(/^https:\/\/api\.example\.test\/f\/v1\/photo\/[A-Za-z0-9_-]+\/full\?o=org_test_a&u=user_a_manager&a=staff&exp=\d+&sig=[A-Za-z0-9_-]{43}$/);
+    expect(photo.url).not.toContain(KEY);
+    expect(fake.rows("vehiclePhoto")[0]!.url).toBe(`${BASE}/${KEY}`);
     expect(fake.rows("vehiclePhoto")).toHaveLength(1);
     expect(puts).toEqual([]);
     const logged = log.mock.calls.flat().map((x) => JSON.stringify(x)).join(" ");
@@ -148,10 +151,17 @@ describe("thumbnails next to stored photos", () => {
     expect(logged).not.toContain("org/");
   });
 
-  it("a photo whose object is missing in storage is still added", async () => {
-    await addVehiclePhoto(actor(), "v_fc_pending", { url: `${BASE}/${KEY}` });
+  it("a photo whose object cannot be read afterwards (gone right after registering) is still added, with no thumbnail", async () => {
+    // Registering checks the object exists (first read); the thumbnail then reads it again and finds nothing.
+    vi.spyOn(store, "getObject").mockImplementationOnce(async () => ({ kind: "found", body: Readable.from([Buffer.from("x")]), contentLength: 1, etag: null }));
+    await addVehiclePhoto(actor(), "v_fc_pending", { key: KEY });
     expect(fake.rows("vehiclePhoto")).toHaveLength(1);
     expect(puts).toEqual([]);
+  });
+
+  it("a key whose object was never uploaded is refused: nothing is added", async () => {
+    await expect(addVehiclePhoto(actor(), "v_fc_pending", { key: KEY })).rejects.toMatchObject({ code: "VALIDATION", fieldErrors: { key: expect.stringContaining("has not been uploaded") } });
+    expect(fake.rows("vehiclePhoto")).toHaveLength(0);
   });
 
   it("an oversized original is not read into memory", async () => {
@@ -177,7 +187,7 @@ describe("thumbnails next to stored photos", () => {
 
   it("deleting a photo also removes its thumbnail, and only that org's", async () => {
     objects.set(KEY, { body: await image(900, 600, "jpeg") });
-    const photo = await addVehiclePhoto(actor(), "v_fc_pending", { url: `${BASE}/${KEY}` });
+    const photo = await addVehiclePhoto(actor(), "v_fc_pending", { key: KEY });
     await deleteVehiclePhoto(actor(), "v_fc_pending", photo.id);
     await vi.waitFor(() => expect(deletes).toContain(KEY.replace("/photos/", "/photos-thumb/")));
     expect(deletes).toContain(KEY);

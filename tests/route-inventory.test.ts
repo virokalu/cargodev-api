@@ -17,6 +17,8 @@ vi.mock("../src/lib/expo-push.js", () => ({ sendExpoPushNotifications: vi.fn().m
 
 import { buildApp } from "../src/app.js";
 import { signAccessToken } from "../src/lib/mobile-jwt.js";
+import { setTrustTokenClaimsForTests } from "../src/lib/staff-auth-seam.js";
+import { clearStaffAuthCache } from "../src/services/staff-auth-state.service.js";
 
 type Role = "ADMINISTRATOR" | "MANAGER" | "OPERATOR" | "VIEWER";
 const ROLES: Role[] = ["ADMINISTRATOR", "MANAGER", "OPERATOR", "VIEWER"];
@@ -27,13 +29,18 @@ let app: FastifyInstance;
 const registered: { method: string; url: string }[] = [];
 
 beforeAll(async () => {
+  // Every staff route here is checked against the DATABASE (role and active flag), not the token's claims.
+  setTrustTokenClaimsForTests(false);
+  clearStaffAuthCache();
   const fake = newCustomerFake();
   for (const role of ROLES) fake.seed("user", { id: USER[role], org_id: ORG_A, userType: "STAFF", role, name: role, loginEnabled: true });
+  fake.seed("user", { id: "staff_off", org_id: ORG_A, userType: "STAFF", role: "ADMINISTRATOR", name: "Disabled Admin", loginEnabled: false });
   state.fake = fake;
   app = await buildApp({ rateLimit: false, publicStockEnabled: true, onRoute: (route) => registered.push(route) });
 });
 afterAll(async () => {
   await app.close();
+  setTrustTokenClaimsForTests(true);
 });
 
 const key = (method: string, path: string) => `${method} ${path}`;
@@ -94,6 +101,8 @@ describe("the table and the real routes are the same set", () => {
       /^POST \/api\/customer\/v1\/auth\/(register|verify-email|resend-verification|login|refresh|logout|forgot-password|reset-password)$/,
       /^GET \/api\/customer\/v1\/app\/min-version$/,
       /^(GET|POST) \/api\/public\//,
+      // The own-domain file links: no Bearer token; a signed link is the ticket (ADR 0007).
+      /^GET \/f\/v1\/:kind\/:id\/:variant$/,
     ];
     const unexpected = ROUTE_TABLE.filter((e) => e.kind === "public").map((e) => key(e.method, e.path)).filter((k) => !allowed.some((re) => re.test(k)));
     expect(unexpected).toEqual([]);
@@ -130,6 +139,27 @@ describe("staff routes", () => {
       const status = (await send(entry, await staffHeaders(role))).statusCode;
       if (roles.includes(role)) expect([401, 403], `${role} is allowed`).not.toContain(status);
       else expect(status, `${role} is NOT allowed`).toBe(403);
+    }
+  });
+});
+
+describe("staff routes take the role and the active flag from the database, not the token", () => {
+  const staffEntries = ROUTE_TABLE.filter((e) => e.kind === "staff").map((e) => [key(e.method, e.path), e] as const);
+  const claim = async (sub: string, role: Role) => ({
+    authorization: `Bearer ${await signAccessToken({ sub, orgId: ORG_A, role, name: sub, email: null })}`,
+  });
+
+  it.each(staffEntries)("%s: a deactivated user and an unknown user are 401, even with an admin claim", async (_name, entry) => {
+    expect((await send(entry, await claim("staff_off", "ADMINISTRATOR"))).statusCode, "deactivated").toBe(401);
+    expect((await send(entry, await claim("staff_nobody", "ADMINISTRATOR"))).statusCode, "unknown").toBe(401);
+  });
+
+  it.each(staffEntries.filter(([, e]) => !e.stream))("%s: a role the database does not give is 403 whatever the token claims", async (_name, entry) => {
+    for (const role of ROLES) {
+      if (entry.roles!.includes(role)) continue;
+      // The token claims the strongest role the route allows; the database says `role`.
+      const status = (await send(entry, await claim(USER[role], entry.roles![0]!))).statusCode;
+      expect(status, `${role} claiming ${entry.roles![0]}`).toBe(403);
     }
   });
 });

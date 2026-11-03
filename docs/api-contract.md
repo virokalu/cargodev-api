@@ -4,6 +4,8 @@ Source of truth for clients. Update this file in the same PR that changes behavi
 
 **Building a staff web or iOS app?** Read [staff-frontend-integration.md](staff-frontend-integration.md): the complete staff-zone contract (every `/api/v1` route with its roles, exact request fields, example responses, the sign-in and refresh rules, files, live updates, and the gaps), checked against the code by `tests/staff-frontend-contract.test.ts`. The customer app has [customer-app-integration.md](customer-app-integration.md) and the public website [website-integration.md](website-integration.md).
 
+**Already have a client built for the original mobile API?** [legacy-parity-report.md](legacy-parity-report.md) compares every endpoint of the original contract ([legacy/mobile-api-reference.md](legacy/mobile-api-reference.md)) with this API (same, additive, changed, unknown).
+
 ## Envelope
 
 Success: `{ "data": <payload> }`
@@ -399,4 +401,4 @@ ARRIVED and DELIVERED are recorded by staff only; nothing sets them automaticall
 
 ## Known doc drift
 
-The staff vehicle list `sort` default in code is `serial` with `dir=desc` (and `track=FC`); an earlier version of this line said `purchaseDate desc`, which is the old web screen's order, not this API's. Send `sort=purchaseDate&dir=desc` to get that order. See [staff-frontend-integration.md](staff-frontend-integration.md), section 1.
+The staff vehicle list `sort` default in code is `serial` with `dir=desc` (and `track=FC`); an earlier version of this line said `purchaseDate desc`, which is the old web screen's order, not this API's. Send `sort=purchaseDate&dir=desc` to get that order. The original mobile contract agrees with the code (`docs/legacy/mobile-api-reference.md` lines 126 and 134-135). See [staff-frontend-integration.md](staff-frontend-integration.md), section 1.

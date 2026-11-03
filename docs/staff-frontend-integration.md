@@ -1,6 +1,6 @@
 # Staff frontend integration contract
 
-**Contract version:** 1.5.0 (2026-11-03). Staff zone: everything under `/api/v1`, plus the signed file links under `/f/v1`.
+**Contract version:** 1.5.1 (2026-11-03). Staff zone: everything under `/api/v1`, plus the signed file links under `/f/v1`.
 **Written for:** a frontend developer who has never seen this repository and is building the staff web app (Next.js) or the iOS staff app against this API.
 **Source of truth:** the code. This file is checked against the running routes by `tests/staff-frontend-contract.test.ts`: every JSON example below (a fenced block marked `example:<id>`) is compared, key for key, with what the real route returns for fake data, and every `/api/v1` route must appear here with the roles the code allows. If the test fails, this file or the code is wrong. `docs/api-contract.md` is the shorter reference for all zones; this file is the complete staff contract.
 
@@ -3904,9 +3904,9 @@ This section is built from this repository's own documents (`docs/implementation
 | Area | Old Next.js app / earlier API | This API |
 |---|---|---|
 | Sessions | NextAuth cookie session in the browser | Bearer access token (20 minutes) plus a rotating refresh token (30 days). No cookies. Changing a password here revokes the API's refresh tokens but does **not** touch a separate old-app cookie session |
-| Failed sign-in | Web form collapsed every failure into a generic message | `400 VALIDATION` for a wrong password, `403 FORBIDDEN` for a locked account, both as JSON |
-| Refresh failures | n/a | `403`, not 401 (section 2) |
-| Vehicle list default order | The old web screen opened sorted by purchase date, newest first (this is what `docs/implementation-plan.md` calls "the code default") | **`serial` descending**, default track `FC`. An older line in `docs/api-contract.md` that said `purchaseDate desc` was wrong and has been corrected. If the new screen should open by purchase date, send `sort=purchaseDate&dir=desc` explicitly |
+| Failed sign-in | Web form collapsed every failure into a generic message | `400 VALIDATION` for a wrong password, `403 FORBIDDEN` for a locked account, both as JSON. **The original mobile API contract says the same** (`docs/legacy/mobile-api-reference.md`, lines 54-56) |
+| Refresh failures | `403` "Session expired. Please sign in again." for an unknown, expired, used or revoked token or a deactivated account (original contract, lines 67-69) | The same (section 2) |
+| Vehicle list default order | The original **mobile** contract says `serial` descending, track `FC` (`docs/legacy/mobile-api-reference.md` lines 126, 134-135). The old **web** screen is said to have opened by purchase date, newest first (`docs/implementation-plan.md`; that code is not in this repository) | **`serial` descending**, default track `FC`: the same as the original mobile contract. If the new screen should open by purchase date, send `sort=purchaseDate&dir=desc` explicitly. The default is held until the old route handler's behaviour is checked |
 | Create and update answers | *Unknown* (the old server actions' return values are not recorded here) | `POST /vehicles` and `PUT /vehicles/:id` return the detail shape of `GET /vehicles/:serial` (since 1.1.0) |
 | File addresses | A stored public address, later a presigned storage address, in `url` | A short-lived link on the API's own domain (section 6). Never stored |
 | Upload registration | The client sent the file's public address | The client sends the `key` the presign returned; the server builds the address |
@@ -4034,6 +4034,7 @@ Breaking changes are announced here before they ship. The test `tests/staff-fron
 
 | Version | Date | Change |
 |---|---|---|
+| 1.5.1 | 2026-11-03 | Wording only: section 8 now cites the original mobile contract (`docs/legacy/mobile-api-reference.md`) for the sign-in and refresh statuses and the default list order, and `docs/legacy-parity-report.md` compares every legacy endpoint with this API. No behaviour changed |
 | 1.5.0 | 2026-11-03 | **Compatible fix:** every create or update with a unique key answers `409 CONFLICT` with a field error when two requests collide, never `500`: customer create and update (`fieldErrors.email`), staff create, update and own profile (`email`), lookup create and rename (`name`), vehicle create with a legacy serial (`legacySerialNumber`) and serial correction (`serialNumber`). Verified with concurrent requests against a real database |
 | 1.4.0 | 2026-11-01 | **Additive:** the vehicle detail (and the answers of `POST /vehicles` and `PUT /vehicles/:id`) gains `storedShipmentStatus`; its `shipmentStatus` is, and always was in the code, the effective value. New `GET /vehicles/:serial/timeline` (the derived Shipment Timeline of the detail screen). Documentation fix: 1.0.0 to 1.3.0 wrongly called the detail's `shipmentStatus` the stored value |
 | 1.3.0 | 2026-11-01 | **Behaviour change (PATCH semantics):** `PATCH /customers/:id`, `PATCH /staff/:id` and `PATCH /profile` now change only the fields sent. Before, they replaced the whole record, so an omitted field was cleared (customer, profile phone) or required (`role` and `active` on staff). Full bodies still work. Unknown fields and empty bodies are now `400`. A password change keeps revoking the caller's own refresh token |

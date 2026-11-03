@@ -95,6 +95,10 @@ If you see "The database test harness refused to run", read the message: it says
 
 - `tests/deployment.test.ts`: the settings and their refusals (pool size, shutdown deadlines, client address source and header name), graceful shutdown (order, a second signal, a failing close, the deadline cutting off a hang, a real app sending `event: shutdown`), the pool size reaching the driver, the client address modes (socket ignores every forwarding header; hops; header mode with validation, fallback, one masked warning a minute, and rate-limit keys that follow the header), the database latency script with a fake client, and the container files (pinned tag, non-root, exec-form CMD, health check, `--ignore-scripts`, no `.env` copied, `.dockerignore`, the CI image job).
 - `tests/route-inventory.test.ts` with `tests/route-inventory.table.ts`: every registered route against one explicit table, in both directions, then 401 / cross-zone 401 / 403 per role for every non-public route, and the operator scope for chat.
+- `tests/staff-frontend-contract.test.ts` with `tests/helpers/staff-contract-examples.ts`: docs/staff-frontend-integration.md cannot drift. Every JSON example is compared, key set for key set, with what the real route returns for fake data; every `/api/v1` route needs a section and a role-matrix row that agree with the route inventory; the facts block and the forwarder example are recomputed from the code.
+- `tests/trusted-forwarder.test.ts`, `tests/trusted-forwarder-compare.test.ts`, `tests/forwarder-env.test.ts`: the trusted forwarder (ADR 0008), every verification step mutation-checked.
+- `tests/patch-semantics.test.ts`, `tests/vehicle-detail-status.test.ts`, `tests/cors-expose.test.ts`: PATCH semantics, the effective and stored status and the derived timeline, and the exposed response headers.
+- Real Postgres (`npm run test:db`): `tests/db/customer-list.db.test.ts` (vehicleCount excludes soft-deleted vehicles) and `tests/db/unique-violation.db.test.ts` (concurrent saves end in exactly one success and a 409).
 
 ## Slice 7 tests
 

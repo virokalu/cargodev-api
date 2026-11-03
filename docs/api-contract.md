@@ -59,7 +59,7 @@ Logout is idempotent. If `expoPushToken` is sent, that device token is removed, 
 | GET | /api/v1/customers/search?q= | any staff | done. `{ id, name }` only, for every role |
 | GET | /api/v1/customers/:id | any staff | done. `{ id, name }` only, for every role |
 | POST | /api/v1/customers | ADMINISTRATOR, MANAGER | done |
-| PATCH | /api/v1/customers/:id | ADMINISTRATOR, MANAGER | done |
+| PATCH | /api/v1/customers/:id | ADMINISTRATOR, MANAGER | done. **Partial update**: only the fields sent change (absent = unchanged, `null` or blank clears an optional field); unknown fields and an empty body are 400. The log records only changed fields |
 
 ### Staff and profile
 
@@ -67,10 +67,10 @@ Logout is idempotent. If `expoPushToken` is sent, that device token is removed, 
 |---|---|---|---|
 | GET | /api/v1/staff?q= | ADMINISTRATOR, MANAGER | done |
 | POST | /api/v1/staff | ADMINISTRATOR | done |
-| PATCH | /api/v1/staff/:id | ADMINISTRATOR | done |
+| PATCH | /api/v1/staff/:id | ADMINISTRATOR | done. **Partial update** (any of name, email, phone, role, active, password; at least one): absent = unchanged; blank or null password = unchanged; unknown fields and an empty body are 400 |
 | POST | /api/v1/staff/:id/active `{ "active": boolean }` | ADMINISTRATOR | done |
 | GET | /api/v1/profile | any staff | done |
-| PATCH | /api/v1/profile | any staff | done |
+| PATCH | /api/v1/profile | any staff | done. **Partial update** (any of name, email, phone; at least one): absent = unchanged, `phone: null` clears; unknown fields and an empty body are 400 |
 | POST | /api/v1/profile/password | any staff | done |
 | GET | /api/v1/organization | any staff | done |
 
@@ -172,7 +172,7 @@ Automation records BOOKING_RECEIVED (when a vehicle enters that status) and SHIP
 |---|---|---|---|---|
 | POST | /api/v1/uploads/presign | ADMINISTRATOR, MANAGER, OPERATOR | `{ vehicleId?, kind: AUCTION_SHEET \| VEHICLE_PHOTO \| VEHICLE_DOCUMENT, fileName, contentType, fileSize }` | 200 `{ uploadUrl, key, expiresInSeconds: 300, headers: { "Content-Type" } }` |
 
-The vehicle must be the caller's org's (otherwise 404, and nothing is signed). The server builds the key (the client never chooses it): `org/<orgId>/vehicles/<vehicleId>/{photos|documents|auction-sheet}/<uuid>-<safe name>.<ext>`, or `org/<orgId>/uploads/staging/...` when there is no vehicle yet. The extension always comes from the signed content type, never from the file name. The link is signed for the exact size and type, valid 5 minutes. **Only these content types, matched exactly:** photos and auction sheets `image/jpeg`, `image/png`, `image/webp` (up to 10 MB); documents `application/pdf` (up to 20 MB). Anything else (svg, html, gif, "image/jpeg; charset=...", other casing) is a 400. Send the file with a PUT to `uploadUrl` using exactly the returned headers, then pass `publicUrl` to the add-photo / add-document / auction-sheet endpoints. 400 `File storage is not configured.` when storage is off.
+The vehicle must be the caller's org's (otherwise 404, and nothing is signed). The server builds the key (the client never chooses it): `org/<orgId>/vehicles/<vehicleId>/{photos|documents|auction-sheet}/<uuid>-<safe name>.<ext>`, or `org/<orgId>/uploads/staging/...` when there is no vehicle yet. The extension always comes from the signed content type, never from the file name. The link is signed for the exact size and type, valid 5 minutes. **Only these content types, matched exactly:** photos and auction sheets `image/jpeg`, `image/png`, `image/webp` (up to 10 MB); documents `application/pdf` (up to 20 MB). Anything else (svg, html, gif, "image/jpeg; charset=...", other casing) is a 400. Send the file with a PUT to `uploadUrl` using exactly the returned headers, then pass the returned `key` to the add-photo / add-document / auction-sheet endpoints (there is no public address in the answer). 400 `File storage is not configured.` when storage is off.
 
 ### Vehicle files
 

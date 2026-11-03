@@ -1,10 +1,12 @@
 // Builds the Fastify app. Does not listen: server.ts starts it, tests use app.inject().
 
+import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance, type FastifyLoggerOptions, type FastifyReply, type FastifyRequest } from "fastify";
 import helmet from "@fastify/helmet";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { effectiveClientIpSource, loadEnv } from "./config/env.js";
+import { registerTrustedForwarder } from "./lib/trusted-forwarder.js";
 import { registerClientIpHeader, registerForwardingHeaderWarning } from "./lib/client-ip.js";
 import { errorHandler, notFoundHandler } from "./lib/error-handler.js";
 import { registerPostResponse } from "./lib/post-response.js";
@@ -54,6 +56,10 @@ export interface BuildAppOptions {
   logStream?: NodeJS.WritableStream;
   /** Per-IP limits. Tests that hammer one route turn this off. */
   rateLimit?: boolean;
+  /** Overrides the trusted-forwarder secrets (current first, then the previous one). Tests only. */
+  forwarderSecrets?: string[];
+  /** Clock for the forwarder timestamp check, in milliseconds. Tests only. */
+  forwarderNow?: () => number;
   /** Overrides CORS_ALLOWED_ORIGINS. */
   corsOrigins?: string[];
   /** Jobs to register. Defaults to the production set (see scheduler/index.ts). */
@@ -93,6 +99,10 @@ const REQUEST_LOG_SERIALIZERS: LogSerializers = {
 
 export const GLOBAL_RATE_LIMIT = { max: 300, timeWindow: "1 minute" } as const;
 
+/** Response headers a browser script may read from a cross-origin answer (Access-Control-Expose-Headers). The rate limiter sends the
+ * X-RateLimit-* trio on every answer and Retry-After on a 429; X-Request-Id names the request in the server log. */
+export const CORS_EXPOSED_HEADERS = ["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "X-Request-Id"] as const;
+
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const env = loadEnv();
 
@@ -128,6 +138,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   const publicStockEnabled = options.publicStockEnabled ?? env.PUBLIC_STOCK_ENABLED;
 
   const app = Fastify({
+    // A fresh random id per request; the client cannot choose it (no request-id header is read).
+    genReqId: () => randomUUID(),
     trustProxy: trustProxyHops > 0 ? trustHops(trustProxyHops) : false,
     logger: options.logger
       ? {
@@ -155,14 +167,30 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   app.addHook("onRequest", async (_request, reply) => {
     reply.header("Cache-Control", "no-store");
   });
+  // The request id (the same value as reqId in the server log), so a support report can quote it.
+  app.addHook("onRequest", async (request, reply) => {
+    reply.header("X-Request-Id", request.id);
+  });
+  const forwarderSecrets = options.forwarderSecrets ?? [env.TRUSTED_FORWARDER_SECRET, env.TRUSTED_FORWARDER_SECRET_PREVIOUS].filter((v): v is string => typeof v === "string" && v !== "");
   // Header mode: request.ip becomes the (validated) address in one named header. Registered FIRST, so the rate limiter
   // and the logs see it. In socket and hops modes no forwarding header is read here.
   if (clientIpSource === "header" && clientIpHeader) {
     registerClientIpHeader(app, { header: clientIpHeader, ...(options.onClientIpWarning ? { warn: options.onClientIpWarning } : {}) });
   }
   if (clientIpSource === "socket") {
-    registerForwardingHeaderWarning(app, { ...(options.onClientIpWarning ? { warn: options.onClientIpWarning } : {}) });
+    registerForwardingHeaderWarning(app, {
+      ...(options.onClientIpWarning ? { warn: options.onClientIpWarning } : {}),
+      // X-Client-IP is the trusted forwarder's own header when that feature is on (lib/trusted-forwarder.ts).
+      ...(forwarderSecrets.length > 0 ? { ignore: ["x-client-ip"] } : {}),
+    });
   }
+  // Trusted forwarder (ADR 0008): after the address hooks above, before the rate limiter, so a verified visitor address is the one
+  // the limits, the lockout keys and the logs see. Off (nothing registered) unless a secret is configured.
+  registerTrustedForwarder(app, {
+    secrets: forwarderSecrets,
+    ...(options.forwarderNow ? { now: options.forwarderNow } : {}),
+    ...(options.onClientIpWarning ? { warn: options.onClientIpWarning } : {}),
+  });
   // Customer email is sent after the response (lib/post-response.ts).
   registerPostResponse(app);
   app.decorateRequest("user", null);
@@ -217,6 +245,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       callback(null, {
         origin: (origin, check) => check(null, origin !== undefined && list.includes(origin)),
         methods: isPublic ? ["GET", "POST", "OPTIONS"] : ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+        exposedHeaders: [...CORS_EXPOSED_HEADERS],
         allowedHeaders: isPublic ? ["Content-Type"] : ["Authorization", "Content-Type"],
         ...(isPublic ? { maxAge: 600 } : {}),
       });

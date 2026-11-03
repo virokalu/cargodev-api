@@ -115,6 +115,9 @@ socket address is used and a masked warning is logged (the header name only, at 
 runbook after every host or setting change. Behind a load balancer with `socket`, every request shares the balancer's address and one
 rate-limit bucket: set the mode before go-live.
 
+### Server-side callers: the trusted forwarder (optional)
+
+A web front end that runs on a server (the Next app) makes every visitor look like one address. Set `TRUSTED_FORWARDER_SECRET` (and give the same value to that server, and only to that server) to let it pass the real visitor address in three signed headers; the API believes the address only when the signature verifies and is under a minute old. Without the secret the feature is off and the headers are ignored. It overrides the address only for requests that carry a valid signature; it does not replace `CLIENT_IP_SOURCE`. Rotate: set the new value as `TRUSTED_FORWARDER_SECRET` and the old one as `TRUSTED_FORWARDER_SECRET_PREVIOUS`, switch the caller, then remove the previous one. A refused signature logs one masked warning a minute (reason and header names only). Details and the signing recipe: docs/staff-frontend-integration.md, section 9; decision: docs/adr/adr-0008-trusted-forwarder-for-server-side-callers.md.
 **Production refuses to start without `CLIENT_IP_SOURCE`** (any of the three values is accepted; the choice must be deliberate). In `socket` mode, if requests arrive carrying `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `True-Client-IP`, `CF-Connecting-IP` or `X-Client-IP`, the API logs one warning a minute naming the header names (never a value or an address): that usually means a proxy is in front and the mode should be `hops` or `header`.
 
 ## Request logs

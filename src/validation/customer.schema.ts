@@ -38,7 +38,34 @@ export const customerCreateSchema = z.object({
   address: optionalText(300),
 });
 
-export const customerUpdateSchema = customerCreateSchema;
+// PATCH semantics: only the fields sent change. An absent field is left alone (undefined, never coerced to null); an explicit null
+// or a blank string clears a nullable field; unknown fields are a 400; an empty body is a 400.
+const patchText = (maxLength: number) =>
+  z
+    .string()
+    .nullable()
+    .optional()
+    .transform((v) => (v === undefined ? undefined : emptyToNull(v)))
+    .refine((v) => v === undefined || v === null || v.length <= maxLength, { message: `Must be ${maxLength} characters or fewer` });
+
+const patchEmail = z
+  .string()
+  .nullable()
+  .optional()
+  .transform((v) => (v === undefined ? undefined : emptyToNull(v)))
+  .transform((v) => (v ? v.toLowerCase() : v))
+  .refine((v) => v === undefined || v === null || z.string().email().safeParse(v).success, { message: "Enter a valid email address" });
+
+export const customerUpdateSchema = z
+  .object({
+    name: z.string().trim().min(1, "Name is required").max(150, "Must be 150 characters or fewer").optional(),
+    email: patchEmail,
+    phone: patchText(30),
+    country: patchText(100),
+    address: patchText(300),
+  })
+  .strict()
+  .refine((v) => Object.values(v).some((x) => x !== undefined), { message: "Send at least one field to change" });
 
 export type CustomerCreateInput = z.infer<typeof customerCreateSchema>;
 export type CustomerUpdateInput = z.infer<typeof customerUpdateSchema>;

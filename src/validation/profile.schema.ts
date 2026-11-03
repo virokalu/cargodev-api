@@ -11,11 +11,20 @@ import {
   newPasswordSchema,
 } from "./shared.js";
 
-export const profileDetailsSchema = z.object({
-  name: nameSchema,
-  email: emailSchema,
-  phone: phoneSchema,
-});
+// PATCH semantics: only the fields sent change (absent = unchanged; phone: explicit null or blank clears it); unknown fields are a 400.
+export const profileDetailsSchema = z
+  .object({
+    name: nameSchema.optional(),
+    email: emailSchema.optional(),
+    phone: z
+      .string()
+      .nullable()
+      .optional()
+      .transform((v) => (v === undefined ? undefined : v && v.trim() !== "" ? v.trim() : null))
+      .refine((v) => v === undefined || v === null || v.length <= 30, { message: "Must be 30 characters or fewer" }),
+  })
+  .strict()
+  .refine((v) => Object.values(v).some((x) => x !== undefined), { message: "Send at least one field to change" });
 
 export const changePasswordSchema = z
   .object({

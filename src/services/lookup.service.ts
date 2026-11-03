@@ -9,6 +9,7 @@
 // typed in any case reuses the existing row.
 
 import { getPrisma } from "../lib/prisma.js";
+import { isUniqueViolation } from "../lib/unique-violation.js";
 import { ServiceError } from "../lib/errors.js";
 import { buildTrackWhere, type TrackFilter } from "../lib/vehicle-track.js";
 import type { SessionUser } from "../lib/session-user.js";
@@ -428,10 +429,6 @@ function snapshot(row: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(row)) as Prisma.InputJsonValue;
 }
 
-function isUniqueViolation(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
-}
-
 interface FindOrCreateSpec<T extends { id: string }> {
   actor: SessionUser;
   entity: string;
@@ -463,6 +460,7 @@ async function findOrCreateRow<T extends { id: string }>(spec: FindOrCreateSpec<
     if (isUniqueViolation(error)) {
       const winner = await spec.find(getPrisma());
       if (winner) return winner;
+      throw new ServiceError("CONFLICT", "That name is already in use.", { name: "Name already in use" });
     }
     throw error;
   }
@@ -491,7 +489,7 @@ async function renameRow<Row extends { org_id: string; name: string }, T extends
   const current = await spec.load(getPrisma());
   assertBelongsToOrg(spec.actor.orgId, current, spec.notFoundMessage);
   if (await spec.hasDuplicate(getPrisma(), current)) {
-    throw new ServiceError("CONFLICT", spec.conflictMessage);
+    throw new ServiceError("CONFLICT", spec.conflictMessage, { name: "Name already in use" });
   }
 
   try {
@@ -511,6 +509,8 @@ async function renameRow<Row extends { org_id: string; name: string }, T extends
   } catch (error) {
     // The update's own where carries org_id: no row of THIS org matched, so nothing was written.
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") throw new ServiceError("NOT_FOUND", spec.notFoundMessage);
+    // Two renames to the same name at once: the database lets one through.
+    if (isUniqueViolation(error)) throw new ServiceError("CONFLICT", spec.conflictMessage, { name: "Name already in use" });
     throw error;
   }
 }

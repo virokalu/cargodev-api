@@ -178,6 +178,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { method: "GET", path: "/api/v1/vehicles/:serial", kind: "staff", roles: ANY },
   { method: "GET", path: "/api/v1/vehicles/:serial/status-history", kind: "staff", roles: ANY },
   { method: "GET", path: "/api/v1/vehicles/:serial/milestones", kind: "staff", roles: ANY },
+  { method: "GET", path: "/api/v1/vehicles/:serial/timeline", kind: "staff", roles: ANY },
   { method: "PUT", path: "/api/v1/vehicles/:id/milestones/:type", kind: "staff", roles: AMO },
   { method: "POST", path: "/api/v1/vehicles/:id/mark-arrived", kind: "staff", roles: AMO },
   { method: "POST", path: "/api/v1/vehicles/:id/mark-delivered", kind: "staff", roles: AMO },

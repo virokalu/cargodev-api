@@ -21,6 +21,8 @@ import {
   changePasswordSchema,
 } from "../validation/profile.schema.js";
 import { flattenFieldErrors } from "../validation/shared.js";
+import { changedFields } from "../lib/changed-fields.js";
+import { isUniqueViolation } from "../lib/unique-violation.js";
 import * as activityLog from "./activity-log.service.js";
 import { revokeAllUserTokens } from "./mobile-auth.service.js";
 import { invalidateStaffAuth } from "./staff-auth-state.service.js";
@@ -173,7 +175,7 @@ export async function createStaff(actor: SessionUser, rawInput: unknown): Promis
     return result;
   } catch (error) {
     // @@unique([org_id, email]) — surfaced as a field error rather than a 500.
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+    if (isUniqueViolation(error)) {
       throw new ServiceError("CONFLICT", "A staff account with this email already exists.", {
         email: "Email already in use",
       });
@@ -218,7 +220,7 @@ export async function updateStaff(
       { role: "Only the Administrator account can assign this role" }
     );
   }
-  if (isReservedName(input.name) && !actorIsSuperAdmin) {
+  if (input.name !== undefined && isReservedName(input.name) && !actorIsSuperAdmin) {
     throw new ServiceError(
       "VALIDATION",
       `"${SUPER_ADMIN_NAME}" is reserved for the system super-admin account.`,
@@ -235,12 +237,13 @@ export async function updateStaff(
       // The write carries org_id itself (not only getOwnedStaff above): another org's id changes nothing.
       const written = await tx.user.updateMany({
         where: { id: staffId, org_id: actor.orgId, userType: "STAFF" },
+        // Only the fields that were sent.
         data: {
-          name: input.name,
-          email: input.email,
-          phone: input.phone,
-          role: input.role,
-          loginEnabled: input.active,
+          ...(input.name !== undefined ? { name: input.name } : {}),
+          ...(input.email !== undefined ? { email: input.email } : {}),
+          ...(input.phone !== undefined ? { phone: input.phone } : {}),
+          ...(input.role !== undefined ? { role: input.role } : {}),
+          ...(input.active !== undefined ? { loginEnabled: input.active } : {}),
           ...(passwordHash ? { password: passwordHash } : {}),
         },
       });
@@ -254,21 +257,16 @@ export async function updateStaff(
         action: "UPDATE_STAFF",
         entity: "User",
         entityId: updated.id,
-        before: {
-          name: existing.name,
-          email: existing.email,
-          phone: existing.phone,
-          role: existing.role,
-          loginEnabled: existing.loginEnabled,
-        },
-        after: JSON.parse(JSON.stringify(updated)),
+        // Only what changed (never the password or its hash; a password change is recorded as a flag).
+        before: changedFields(existing, updated, ["name", "email", "phone", "role", "loginEnabled"]).before,
+        after: { ...changedFields(existing, updated, ["name", "email", "phone", "role", "loginEnabled"]).after, ...(passwordHash ? { passwordChanged: true } : {}) },
       });
 
       // An admin-set password, a deactivation or a role change must cut off the
       // account's existing mobile sessions, not wait for them to expire. Same
       // treatment setStaffActive and changeOwnPassword already give.
       const deactivated = existing.loginEnabled && input.active === false;
-      const roleChanged = existing.role !== input.role;
+      const roleChanged = input.role !== undefined && existing.role !== input.role;
       if (passwordHash || deactivated || roleChanged) {
         await revokeAllUserTokens(tx, actor.orgId, staffId);
       }
@@ -279,7 +277,7 @@ export async function updateStaff(
     invalidateStaffAuth(actor.orgId, staffId);
     return result;
   } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+    if (isUniqueViolation(error)) {
       throw new ServiceError("CONFLICT", "A staff account with this email already exists.", {
         email: "Email already in use",
       });
@@ -384,7 +382,7 @@ export async function updateOwnProfileDetails(
 
   // The reserved name IS the super-admin identity (see isSuperAdmin), so a
   // regular account must not be able to take it by renaming itself.
-  if (isReservedName(input.name) && !isSuperAdmin(actor)) {
+  if (input.name !== undefined && isReservedName(input.name) && !isSuperAdmin(actor)) {
     throw new ServiceError(
       "VALIDATION",
       `"${SUPER_ADMIN_NAME}" is reserved for the system super-admin account.`,
@@ -396,7 +394,7 @@ export async function updateOwnProfileDetails(
 
   try {
     return await getPrisma().$transaction(async (tx) => {
-      const written = await tx.user.updateMany({ where: { id: actor.id, org_id: actor.orgId }, data: { name: input.name, email: input.email, phone: input.phone } });
+      const written = await tx.user.updateMany({ where: { id: actor.id, org_id: actor.orgId }, data: { ...(input.name !== undefined ? { name: input.name } : {}), ...(input.email !== undefined ? { email: input.email } : {}), ...(input.phone !== undefined ? { phone: input.phone } : {}) } });
       if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Profile not found.");
       const updated = await tx.user.findFirst({ where: { id: actor.id, org_id: actor.orgId }, select: OWN_PROFILE_SELECT });
       if (!updated) throw new ServiceError("NOT_FOUND", "Profile not found.");
@@ -407,15 +405,15 @@ export async function updateOwnProfileDetails(
         action: "UPDATE_PROFILE",
         entity: "User",
         entityId: actor.id,
-        before: { name: existing.name, email: existing.email, phone: existing.phone },
-        after: { name: updated.name, email: updated.email, phone: updated.phone },
+        // Only what changed.
+        ...changedFields(existing, updated, ["name", "email", "phone"]),
       });
 
       return updated as OwnProfile;
     });
   } catch (error) {
     // @@unique([org_id, email]) — surfaced as a field error rather than a 500.
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+    if (isUniqueViolation(error)) {
       throw new ServiceError("CONFLICT", "An account with this email already exists.", {
         email: "Email already in use",
       });

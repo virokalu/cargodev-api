@@ -9,6 +9,8 @@
 // constraint on name, since people can legitimately share names.
 
 import { Prisma } from "@prisma/client";
+import { isUniqueViolation } from "../lib/unique-violation.js";
+import { changedFields } from "../lib/changed-fields.js";
 import { getPrisma } from "../lib/prisma.js";
 import { ServiceError } from "../lib/errors.js";
 import { buildTrackWhere, type TrackFilter } from "../lib/vehicle-track.js";
@@ -118,7 +120,8 @@ const CUSTOMER_SELECT = {
   country: true,
   address: true,
   createdAt: true,
-  _count: { select: { vehicles: true } },
+  // A soft-deleted vehicle is gone from every read path, so it is not counted either.
+  _count: { select: { vehicles: { where: { deletedAt: null } } } },
 } satisfies Prisma.UserSelect;
 
 function toListItem(row: {
@@ -196,32 +199,40 @@ export async function createCustomerFull(
   }
   const input = parsed.data;
 
-  return getPrisma().$transaction(async (tx) => {
-    const created = await tx.user.create({
-      data: {
-        org_id: actor.orgId,
-        userType: "CUSTOMER",
-        name: input.name,
-        email: input.email,
-        phone: input.phone,
-        country: input.country,
-        address: input.address,
-        loginEnabled: false,
-      },
-      select: CUSTOMER_SELECT,
+  try {
+    return await getPrisma().$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          org_id: actor.orgId,
+          userType: "CUSTOMER",
+          name: input.name,
+          email: input.email,
+          phone: input.phone,
+          country: input.country,
+          address: input.address,
+          loginEnabled: false,
+        },
+        select: CUSTOMER_SELECT,
+      });
+  
+      await activityLog.record(tx, {
+        orgId: actor.orgId,
+        actorId: actor.id,
+        action: "CREATE_CUSTOMER",
+        entity: "User",
+        entityId: created.id,
+        after: JSON.parse(JSON.stringify(created)),
+      });
+  
+      return toListItem(created);
     });
-
-    await activityLog.record(tx, {
-      orgId: actor.orgId,
-      actorId: actor.id,
-      action: "CREATE_CUSTOMER",
-      entity: "User",
-      entityId: created.id,
-      after: JSON.parse(JSON.stringify(created)),
-    });
-
-    return toListItem(created);
-  });
+  } catch (error) {
+    // @@unique([org_id, email]): two saves of the same address at once, or an address another customer or a staff member already uses.
+    if (isUniqueViolation(error)) {
+      throw new ServiceError("CONFLICT", "An account with this email already exists.", { email: "Email already in use" });
+    }
+    throw error;
+  }
 }
 
 export async function updateCustomer(
@@ -240,40 +251,38 @@ export async function updateCustomer(
   const input = parsed.data;
   const existing = await getOwnedCustomer(actor.orgId, customerId);
 
-  return getPrisma().$transaction(async (tx) => {
-    // The write carries org_id itself (not only getOwnedCustomer above): another org's id changes nothing.
-    const written = await tx.user.updateMany({
-      where: { id: customerId, org_id: actor.orgId, userType: "CUSTOMER" },
-      data: {
-        name: input.name,
-        email: input.email,
-        phone: input.phone,
-        country: input.country,
-        address: input.address,
-      },
+  try {
+    return await getPrisma().$transaction(async (tx) => {
+      // The write carries org_id itself (not only getOwnedCustomer above): another org's id changes nothing.
+      // Only the fields that were sent (an absent field is unchanged; an explicit null clears).
+      const data = Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+      const written = await tx.user.updateMany({
+        where: { id: customerId, org_id: actor.orgId, userType: "CUSTOMER" },
+        data,
+      });
+      if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Customer not found.");
+      const updated = await tx.user.findFirst({ where: { id: customerId, org_id: actor.orgId, userType: "CUSTOMER" }, select: CUSTOMER_SELECT });
+      if (!updated) throw new ServiceError("NOT_FOUND", "Customer not found.");
+  
+      await activityLog.record(tx, {
+        orgId: actor.orgId,
+        actorId: actor.id,
+        action: "UPDATE_CUSTOMER",
+        entity: "User",
+        entityId: updated.id,
+        // Only the fields whose value really changed.
+        ...changedFields(existing, updated, Object.keys(data)),
+      });
+  
+      return toListItem(updated);
     });
-    if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Customer not found.");
-    const updated = await tx.user.findFirst({ where: { id: customerId, org_id: actor.orgId, userType: "CUSTOMER" }, select: CUSTOMER_SELECT });
-    if (!updated) throw new ServiceError("NOT_FOUND", "Customer not found.");
-
-    await activityLog.record(tx, {
-      orgId: actor.orgId,
-      actorId: actor.id,
-      action: "UPDATE_CUSTOMER",
-      entity: "User",
-      entityId: updated.id,
-      before: {
-        name: existing.name,
-        email: existing.email,
-        phone: existing.phone,
-        country: existing.country,
-        address: existing.address,
-      },
-      after: JSON.parse(JSON.stringify(updated)),
-    });
-
-    return toListItem(updated);
-  });
+  } catch (error) {
+    // @@unique([org_id, email]): two saves of the same address at once, or an address another customer or a staff member already uses.
+    if (isUniqueViolation(error)) {
+      throw new ServiceError("CONFLICT", "An account with this email already exists.", { email: "Email already in use" });
+    }
+    throw error;
+  }
 }
 
 /** Rename only — unlike the lookup services, this never checks for a

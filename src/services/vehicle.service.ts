@@ -21,8 +21,10 @@ import { Prisma, type SerialPrefix, type ShipmentStatus, type ShippingMethod, ty
 import type { ShipmentStatus as EffectiveShipmentStatus } from "../lib/constants/shipment-status.js";
 import { SHIPMENT_STATUS_ORDER, SHIPMENT_STATUS_META } from "../lib/constants/shipment-status.js";
 import { DOCUMENT_TYPE_META } from "../lib/constants/document-type.js";
+import { buildShipmentMilestones, type ShipmentMilestone } from "../lib/shipment-milestones.js";
 import { SHIPPING_METHODS, TRI_STATE_VALUES, TWO_STATE_VALUES, SOLD_CURRENCIES } from "../lib/vehicle-list-url.js";
 import { getPrisma } from "../lib/prisma.js";
+import { isUniqueViolation } from "../lib/unique-violation.js";
 import { ServiceError } from "../lib/errors.js";
 import type { SessionUser } from "../lib/session-user.js";
 import { safeError } from "../lib/redact.js";
@@ -68,7 +70,12 @@ export interface VehicleDetailData {
   // is how the edit page decides whether to show the "Convert to Local"
   // button (only offered once, to a still-FC, not-yet-converted vehicle).
   convertedToLocal: boolean;
+  /** The status to SHOW: the stored value with the same computed guards the list applies (a past ETD reads SHIPPED, a cancelled row
+   * colour reads CANCELLED on FC). */
   shipmentStatus: EffectiveShipmentStatus;
+  /** The value the database holds (PENDING, BOOKING_RECEIVED or SHIPPED). Differs from shipmentStatus until the daily job catches up
+   * and whenever CANCELLED is computed. */
+  storedShipmentStatus: ShipmentStatus;
 
   auctionItemNo: string | null;
   chassisNo: string | null;
@@ -263,6 +270,7 @@ export async function getVehicleDetail(orgId: string, serial: string): Promise<V
       vehicle.etd,
       effectiveTrack === "FC" && isCancelShipmentRowColour(vehicle.rowColourStatus?.name)
     ),
+    storedShipmentStatus: vehicle.shipmentStatus,
     auctionItemNo: vehicle.auctionItemNo,
     chassisNo: vehicle.chassisNo,
     brand: vehicle.model?.brand ?? null,
@@ -316,6 +324,30 @@ export async function getVehicleDetail(orgId: string, serial: string): Promise<V
     portOfDischarge: vehicle.portOfDischarge,
     voyageNo: vehicle.voyageNo,
   };
+}
+
+/** The staff detail page's Shipment Timeline: the steps derived from fields already on the vehicle (lib/shipment-milestones.ts), the same
+ * derivation the old detail page used. Distinct from the stored milestone rows (GET /vehicles/:serial/milestones). NOT_FOUND for a missing,
+ * other-org or deleted vehicle. */
+export async function getVehicleTimeline(orgId: string, serial: string): Promise<ShipmentMilestone[]> {
+  const vehicle = await getVehicleDetail(orgId, serial);
+  if (!vehicle) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
+  // Documents have no org column: they are scoped through the vehicle, which carries org_id.
+  const earliest = async (documentType: "EC" | "INSPECTION_REPORT") =>
+    (await getPrisma().vehicleDocument.findFirst({ where: { vehicleId: vehicle.id, documentType, vehicle: { org_id: orgId } }, orderBy: { createdAt: "asc" }, select: { createdAt: true } }))?.createdAt ?? null;
+  return buildShipmentMilestones({
+    auctionBillPaid: vehicle.auctionBillPaid,
+    transportBy: vehicle.transportBy,
+    lcNo: vehicle.lcNo,
+    etd: vehicle.etd,
+    bookingReceivedAt: vehicle.bookingReceivedAt,
+    eta: vehicle.eta,
+    destination: vehicle.destination,
+    ecReceivedAt: await earliest("EC"),
+    inspectionCompletedAt: await earliest("INSPECTION_REPORT"),
+    shippingMethod: vehicle.shippingMethod,
+    vanningDate: vehicle.vanningDate,
+  });
 }
 
 /** Resolves a vehicle's serial (the mobile API's URL slug, same as the web
@@ -465,10 +497,6 @@ async function assertNewFileKeys(
 function loggedVehicle(row: { id: string; auctionSheetUrl: string | null }): unknown {
   const { auctionSheetUrl, ...rest } = row;
   return { ...JSON.parse(JSON.stringify(rest)), auctionSheet: auctionSheetUrl ? fileReference("AUCTION_SHEET", row.id, auctionSheetUrl) : null };
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 }
 
 /**
@@ -1205,6 +1233,24 @@ export async function updateVehicle(user: SessionUser, id: string, rawInput: unk
   if (updated.auctionBillPaidNotification) notificationService.notifyRealtime(updated.auctionBillPaidNotification);
 
   return updated.result;
+}
+
+/** What the routes answer after a create or an update: the same detail shape as GET /vehicles/:serial,
+ * never the stored row (which carries org_id and serialPrefix). */
+async function detailAfterWrite(orgId: string, serial: string): Promise<VehicleDetailData> {
+  const detail = await getVehicleDetail(orgId, serial);
+  if (!detail) throw new ServiceError("INTERNAL", "Vehicle could not be read back.");
+  return detail;
+}
+
+export async function createVehicleDetail(user: SessionUser, rawInput: unknown): Promise<VehicleDetailData> {
+  const created = await createVehicle(user, rawInput);
+  return detailAfterWrite(user.orgId, created.serial);
+}
+
+export async function updateVehicleDetail(user: SessionUser, id: string, rawInput: unknown): Promise<VehicleDetailData> {
+  const updated = await updateVehicle(user, id, rawInput);
+  return detailAfterWrite(user.orgId, updated.serial);
 }
 
 /** Soft delete — sets deletedAt instead of removing the row, so the serial

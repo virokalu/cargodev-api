@@ -1,6 +1,6 @@
 # Staff frontend integration contract
 
-**Contract version:** 1.0.0 (2026-11-01). Staff zone: everything under `/api/v1`, plus the signed file links under `/f/v1`.
+**Contract version:** 1.5.0 (2026-11-03). Staff zone: everything under `/api/v1`, plus the signed file links under `/f/v1`.
 **Written for:** a frontend developer who has never seen this repository and is building the staff web app (Next.js) or the iOS staff app against this API.
 **Source of truth:** the code. This file is checked against the running routes by `tests/staff-frontend-contract.test.ts`: every JSON example below (a fenced block marked `example:<id>`) is compared, key for key, with what the real route returns for fake data, and every `/api/v1` route must appear here with the roles the code allows. If the test fails, this file or the code is wrong. `docs/api-contract.md` is the shorter reference for all zones; this file is the complete staff contract.
 
@@ -34,7 +34,7 @@ All values in examples are fake. `https://api.example.test` stands for the API's
 | `UNAUTHENTICATED` | 401 | No usable token, an expired token, or the account is no longer allowed in (deactivated, removed). Refresh once, then sign in again |
 | `FORBIDDEN` | 403 | The role may not do this, or the account is locked, or a refresh token is no good (see section 2) |
 | `NOT_FOUND` | 404 | No such thing, **or it belongs to another organisation** (never 403 for that), or the route does not exist (message `Route not found.`) |
-| `CONFLICT` | 409 | A concurrent or duplicate change (serial taken, a decision already made). Reload and retry |
+| `CONFLICT` | 409 | A concurrent or duplicate change (serial taken, a decision already made, a duplicate email or name). Reload and retry. Where a field is to blame the body carries `fieldErrors` keyed by that field (see below) |
 | `RATE_LIMITED` | 429 | Too many requests. Wait `Retry-After` seconds |
 | `INTERNAL` | 500 | A bug or an outage. The message is always `Something went wrong.`; details are only in the server log |
 
@@ -116,9 +116,9 @@ Example (400):
 
 **Authentication.** `Authorization: Bearer <accessToken>` on every `/api/v1` call except `auth/login`, `auth/refresh` and `auth/logout`. Tokens never go in a URL.
 
-**Request id.** The API sends **no** request-id response header. (A request id exists in the server log only.)
+**Request id.** Every answer carries `X-Request-Id`, a random UUID the server makes for that request (a value you send is ignored). It is the `reqId` in the server log: quote it in a support report. Browsers on an allowed origin can read it (see CORS below). Since 1.1.0.
 
-**Rate limits and 429.** Per client address: 300 requests a minute overall; 10 a minute on each of `auth/login`, `auth/refresh`, `auth/logout`; 20 a minute on each of the two `device-tokens` calls; 60 a minute on `uploads/presign`; 30 a minute on the notification stream; 240 a minute on file links. A limited call answers `429` with `{ "error": { "code": "RATE_LIMITED", ... } }`, `Retry-After: <seconds>` and `X-RateLimit-Limit / -Remaining / -Reset` headers. **A browser on another origin cannot read these headers** (the API does not list them in `Access-Control-Expose-Headers`); treat any 429 as "back off for a minute". The limiter counts per client address, in the memory of one server instance; see section 9 for what that means behind a proxy or from a server-side caller.
+**Rate limits and 429.** Per client address: 300 requests a minute overall; 10 a minute on each of `auth/login`, `auth/refresh`, `auth/logout`; 20 a minute on each of the two `device-tokens` calls; 60 a minute on `uploads/presign`; 30 a minute on the notification stream; 240 a minute on file links. A limited call answers `429` with `{ "error": { "code": "RATE_LIMITED", ... } }`, `Retry-After: <seconds>` and `X-RateLimit-Limit / -Remaining / -Reset` headers. A browser on an allowed origin **can** read these headers, and `X-Request-Id`, because the API lists them in `Access-Control-Expose-Headers` (since 1.1.0). Prefer `Retry-After` over a fixed wait. The limiter counts per client address, in the memory of one server instance; see section 9 for what that means behind a proxy or from a server-side caller.
 
 **Lists, pagination and sorting.** There are three kinds of list:
 - *Plain arrays* (no paging): customers (name order, unlimited), customer search (20), staff (name order), lookups (`?q=`, at most 20, name order), FAQs, status history, milestones, destinations, row colours, active customers (at most 200).
@@ -131,7 +131,7 @@ An out-of-range page returns an empty `rows`, not an error. A `pageSize` above t
 
 **Other organisations.** Every query is limited to the organisation in your token. An id from another organisation behaves exactly like an id that does not exist: `404`, never `403`.
 
-**CORS.** The API answers cross-origin calls only for origins listed by the operator in `CORS_ALLOWED_ORIGINS` (never `*`). For an allowed origin it allows the methods `GET, POST, PATCH, PUT, DELETE, OPTIONS` and the request headers `Authorization` and `Content-Type`; it does not allow credentials (there are no cookies), sets no `Access-Control-Max-Age` (browsers re-send the preflight often) and exposes no extra response headers. **When a browser must call the API directly** (a single-page app, or the upload and notification-stream code in a Next.js client component), the app's origin must be on that list; ask the operator to add it. Calls made from a Next.js server (server actions, route handlers) are not browser calls and need no CORS entry, but see section 9 for the client-address effect. The direct upload to storage (section 6) is a separate CORS configuration on the storage bucket.
+**CORS.** The API answers cross-origin calls only for origins listed by the operator in `CORS_ALLOWED_ORIGINS` (never `*`). For an allowed origin it allows the methods `GET, POST, PATCH, PUT, DELETE, OPTIONS` and the request headers `Authorization` and `Content-Type`; it does not allow credentials (there are no cookies), sets no `Access-Control-Max-Age` (browsers re-send the preflight often) and exposes exactly these response headers to scripts: `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, `X-Request-Id`. **When a browser must call the API directly** (a single-page app, or the upload and notification-stream code in a Next.js client component), the app's origin must be on that list; ask the operator to add it. Calls made from a Next.js server (server actions, route handlers) are not browser calls and need no CORS entry, but see section 9 for the client-address effect. The direct upload to storage (section 6) is a separate CORS configuration on the storage bucket.
 
 **Security headers.** Responses carry the standard helmet set (for example `X-Content-Type-Options: nosniff`, `Strict-Transport-Security`). JSON only; send `Content-Type: application/json` on bodies. Bodies larger than 1 MiB, malformed JSON and unsupported content types answer `400 VALIDATION` (`Invalid request.`).
 
@@ -406,6 +406,7 @@ Roles are exactly `ADMINISTRATOR | MANAGER | OPERATOR | VIEWER`, enforced on the
 | GET | `/api/v1/vehicles/:serial` | yes | yes | yes | yes |
 | GET | `/api/v1/vehicles/:serial/status-history` | yes | yes | yes | yes |
 | GET | `/api/v1/vehicles/:serial/milestones` | yes | yes | yes | yes |
+| GET | `/api/v1/vehicles/:serial/timeline` | yes | yes | yes | yes |
 | PUT | `/api/v1/vehicles/:id/milestones/:type` | yes | yes | yes | — |
 | POST | `/api/v1/vehicles/:id/mark-arrived` | yes | yes | yes | — |
 | POST | `/api/v1/vehicles/:id/mark-delivered` | yes | yes | yes | — |
@@ -461,7 +462,7 @@ Roles are exactly `ADMINISTRATOR | MANAGER | OPERATOR | VIEWER`, enforced on the
 
 **Tracks.** Every vehicle is **FC** (export) or **FL** (local). The serial prefix (`FC101`, `FL201`) is only where the vehicle started. **The track you display and filter on is the *effective* track**, returned as `track`: a local vehicle converted to export (`convertedToExport: true`) is FC, an export vehicle converted to local (`convertedToLocal: true`) is FL. Never decide FC versus FL from the serial's letters. The list default `track=FC` therefore includes converted vehicles. **FL vehicles never store shipping fields** (ETD, ETA, BL number, vessel, freight agent, shipping method, packing agent, vanning date, container number): the server strips them on create and update, and they come back `null`. Hide those inputs for an FL vehicle. FL vehicles get no shipment status history rows.
 
-**Shipment status.** Stored values are `PENDING`, `BOOKING_RECEIVED` and `SHIPPED` (`shipmentStatus`). A fourth value, `CANCELLED`, is **computed only** and never stored: an export vehicle whose row colour is "Unit Canceled" or "Resold in Auction" is shown as cancelled. The list row gives both: `shipmentStatus` (stored) and `effectiveShipmentStatus` (what to show and filter by). The `status` filter and the reports use the effective value. A `BOOKING_RECEIVED` vehicle whose ETD has passed is shown as `SHIPPED` by the same computation (and the daily job stores it). The detail endpoint's `shipmentStatus` is the stored value; compute the display value from the list row, or from the row colour name and ETD.
+**Shipment status.** Stored values are `PENDING`, `BOOKING_RECEIVED` and `SHIPPED`. A fourth value, `CANCELLED`, is **computed only** and never stored: an export vehicle whose row colour is "Unit Canceled" or "Resold in Auction" is shown as cancelled. A `BOOKING_RECEIVED` vehicle whose ETD has passed is shown as `SHIPPED` by the same computation (and the daily job stores it). **Two shapes name the two values differently, on purpose:** a **list row** has `shipmentStatus` (the stored value) and `effectiveShipmentStatus` (what to show and filter by); the **vehicle detail** (and the answers of create and update) has `shipmentStatus` = **the effective value, what to show**, and `storedShipmentStatus` = the value the database holds (since 1.4.0 the detail carries both; before, the documentation wrongly called the detail's `shipmentStatus` the stored value). The `status` filter and the reports use the effective value. Show `shipmentStatus` from the detail and `effectiveShipmentStatus` from a list row.
 
 **Tri-state flags.** `auctionBillPaid`, `logBook`, `extraKey` and `paidByCustomer` are `true`, `false` or **`null`, meaning "not entered"**. `null` is a real value: show it as blank, never as "No", and never send `false` for "not entered". In list filters the three states are `YES`, `NO`, `BLANK`. In `PUT /vehicles/:id` an omitted tri-state field becomes `null`.
 
@@ -511,7 +512,7 @@ Example (200):
 
 **Roles:** ADMINISTRATOR, MANAGER, OPERATOR, VIEWER
 
-Body: `{ "name": string (1-150), "email": string (valid, max 150, stored lower case), "phone"?: string|null (max 30) }`. All three are the whole new state: an omitted `phone` becomes `null`. Answers the same as `GET /profile`. `409 CONFLICT` with `fieldErrors.email` if another account has that email.
+Body (a real PATCH, since 1.3.0): any of `{ "name": string (1-150), "email": string (valid, max 150, stored lower case), "phone": string|null (max 30) }`, at least one. **Only the fields you send change**; an absent field is left alone, and `phone: null` (or a blank string) clears the phone. Unknown fields and an empty body are `400`. Answers the same as `GET /profile`. `409 CONFLICT` with `fieldErrors.email` if another account has that email.
 
 Example (200):
 
@@ -531,7 +532,7 @@ Example (200):
 
 **Roles:** ADMINISTRATOR, MANAGER, OPERATOR, VIEWER
 
-Body: `{ "currentPassword": string, "newPassword": string (12 to 72 bytes), "confirmPassword": string (must equal newPassword) }`. Answers `{ "data": { "changed": true } }`. A wrong current password is `400` with `fieldErrors.currentPassword`. **All refresh tokens of this person are revoked** (section 2): sign in again afterwards.
+Body: `{ "currentPassword": string, "newPassword": string (12 to 72 bytes), "confirmPassword": string (must equal newPassword) }`. Answers `{ "data": { "changed": true } }`. A wrong current password is `400` with `fieldErrors.currentPassword`. **All refresh tokens of this person are revoked, including the refresh token of the device that made this call** (section 2). The app must therefore send the person back to sign in after a successful change; do not try to refresh with the stored token.
 
 Example (200):
 
@@ -741,7 +742,7 @@ Example (200):
 
 **Roles:** ADMINISTRATOR, MANAGER, OPERATOR, VIEWER
 
-One vehicle by **serial** (the serial is unique within the organisation). Unknown, deleted or another organisation's serial: `404`. The detail uses **objects** (`{ id, name }`) for lookups so an edit form can preselect them.
+One vehicle by **serial** (the serial is unique within the organisation). Unknown, deleted or another organisation's serial: `404`. The detail uses **objects** (`{ id, name }`) for lookups so an edit form can preselect them. `shipmentStatus` is the **effective** status to display (stored value with the ETD and cancelled-row-colour rules applied, `CANCELLED` computed on FC); `storedShipmentStatus` is the stored value (`PENDING`, `BOOKING_RECEIVED` or `SHIPPED`). Use `storedShipmentStatus` only to explain a difference.
 
 Example (200):
 
@@ -754,6 +755,7 @@ Example (200):
     "convertedToExport": false,
     "convertedToLocal": false,
     "shipmentStatus": "BOOKING_RECEIVED",
+    "storedShipmentStatus": "BOOKING_RECEIVED",
     "auctionItemNo": null,
     "chassisNo": "CHASSIS-AAA-2",
     "brand": {
@@ -832,6 +834,7 @@ Example (200):
     "convertedToExport": false,
     "convertedToLocal": false,
     "shipmentStatus": "PENDING",
+    "storedShipmentStatus": "PENDING",
     "auctionItemNo": null,
     "chassisNo": "CHASSIS-LLL-1",
     "brand": {
@@ -1023,7 +1026,7 @@ Create. Body fields (type; optional unless marked; empty strings and `null` clea
 
 Cross-field rules (each a `400` with a `fieldErrors` entry on the named field): a shipping method needs a `freightAgentId`; `CONTAINER` also needs a `packingAgentId`; `eta` must be after `etd`; not both `auctionHallId` and `supplierId`; `hasPartnership` needs `partnerName`; legacy entry needs `legacySerialNumber`. Every id must belong to your organisation. File keys are checked (they must be inside your organisation's staging folder and the object must exist, section 6). On FL the shipping fields are dropped.
 
-Answers **201 with the stored row as the database holds it** (including `org_id`, `serialPrefix`, `serialNumber`, `createdAt` and foreign-key ids rather than names). **This is not the detail shape.** Use it only for `id` and `serial`; load `GET /vehicles/:serial` to display the new vehicle. A `409 CONFLICT` means the serial was taken by a concurrent save: retry.
+Answers **201 with the new vehicle in the detail shape**, exactly what `GET /vehicles/:serial` returns (section 5.3): names and nested objects, the effective `track`, no `org_id` and no `serialPrefix`. A `409 CONFLICT` means the serial was taken by a concurrent save: retry.
 
 Example (201):
 
@@ -1031,41 +1034,54 @@ Example (201):
 {
   "data": {
     "id": "vehicle_1",
-    "createdAt": "2026-11-01T14:11:48.517Z",
-    "org_id": "org_test_a",
-    "serialPrefix": "FC",
-    "serialNumber": 110,
     "serial": "FC110",
+    "track": "FC",
+    "convertedToExport": null,
+    "convertedToLocal": null,
     "shipmentStatus": "PENDING",
-    "auctionSheetUrl": null,
+    "storedShipmentStatus": "PENDING",
     "auctionItemNo": null,
     "chassisNo": "CHASSIS-NEW-1",
-    "modelId": "model_a1",
-    "gradeId": "grade_a1",
+    "brand": {
+      "id": "brand_a1",
+      "name": "Alpha Motors"
+    },
+    "model": {
+      "id": "model_a1",
+      "name": "Zeta One"
+    },
+    "grade": {
+      "id": "grade_a1",
+      "name": "Base"
+    },
     "yom": 2021,
-    "auctionHallId": null,
-    "supplierId": null,
+    "auctionHall": null,
+    "supplier": null,
     "purchaseDate": "2026-10-15T00:00:00.000Z",
     "auctionLotNo": null,
-    "customerId": "cust_a1",
+    "customer": {
+      "id": "cust_a1",
+      "name": "Iota Buyer"
+    },
     "destination": "Country One",
     "hasPartnership": false,
     "partnerName": null,
     "etd": null,
+    "bookingReceivedAt": null,
     "eta": null,
     "blNo": null,
     "vesselName": null,
-    "freightAgentId": null,
+    "freightAgent": null,
     "shippingMethod": null,
-    "packingAgentId": null,
+    "packingAgent": null,
     "vanningDate": null,
     "containerNumber": null,
     "hasInspection": false,
     "inspectionDate": null,
-    "inspectionCompanyId": null,
-    "inspectionById": null,
-    "transportById": null,
-    "vehicleLocationId": null,
+    "inspectionCompany": null,
+    "inspectionBy": null,
+    "transportBy": null,
+    "vehicleLocation": null,
     "massoDate": null,
     "trackingNumber": null,
     "lcNo": null,
@@ -1074,7 +1090,7 @@ Example (201):
     "logBook": null,
     "extraKey": null,
     "nameChangeDeadline": null,
-    "rowColourStatusId": null,
+    "rowColourStatus": null,
     "docSentDate": null,
     "docSentComment": null,
     "recycleDate": null,
@@ -1083,7 +1099,11 @@ Example (201):
     "deliveryDate": null,
     "paidByCustomer": null,
     "sellingPrice": null,
-    "sellingPriceCurrency": null
+    "sellingPriceCurrency": null,
+    "customerVisible": null,
+    "portOfLoading": null,
+    "portOfDischarge": null,
+    "voyageNo": null
   }
 }
 ```
@@ -1108,40 +1128,62 @@ Example (400):
 
 **Roles:** ADMINISTRATOR, MANAGER
 
-**Full replace, not a patch.** Send every field again (same fields as create, without `track`, `isLegacyEntry`, `legacySerialNumber`, `shipmentStatus` and the file keys): an optional field you leave out is **cleared**, and a tri-state field you leave out becomes `null`. The serial and the track cannot be changed here. Answers `200` with the stored row (the same raw shape as create plus `deletedAt`, `convertedToExport`, `convertedToLocal`); re-fetch the detail to display it. Changing the ETD, the status or the bill can add status history, milestones and notifications on the server.
+**Full replace, not a patch.** Send every field again (same fields as create, without `track`, `isLegacyEntry`, `legacySerialNumber`, `shipmentStatus` and the file keys): an optional field you leave out is **cleared**, and a tri-state field you leave out becomes `null`. The serial and the track cannot be changed here. Answers `200` with the vehicle in the detail shape, the same as `GET /vehicles/:serial` (no re-fetch needed). Changing the ETD, the status or the bill can add status history, milestones and notifications on the server.
 
 Example (200):
 
 ```json example:vehicles.update 200
 {
   "data": {
-    "createdAt": "2026-11-01T14:11:48.520Z",
-    "serialNumber": 102,
+    "id": "v_fc_booked_future",
+    "serial": "FC102",
+    "track": "FC",
     "convertedToExport": false,
     "convertedToLocal": false,
-    "deletedAt": null,
     "shipmentStatus": "PENDING",
+    "storedShipmentStatus": "PENDING",
     "auctionItemNo": null,
     "chassisNo": "CHASSIS-AAA-2",
+    "brand": {
+      "id": "brand_a1",
+      "name": "Alpha Motors"
+    },
+    "model": {
+      "id": "model_a1",
+      "name": "Zeta One"
+    },
+    "grade": {
+      "id": "grade_a1",
+      "name": "Base"
+    },
     "yom": 2021,
+    "auctionHall": null,
+    "supplier": null,
     "purchaseDate": "2026-10-15T00:00:00.000Z",
     "auctionLotNo": null,
+    "customer": {
+      "id": "cust_a1",
+      "name": "Iota Buyer"
+    },
     "destination": "Country One",
     "hasPartnership": false,
     "partnerName": null,
-    "deliveryDate": null,
-    "paidByCustomer": null,
-    "sellingPrice": null,
-    "sellingPriceCurrency": null,
     "etd": null,
+    "bookingReceivedAt": null,
     "eta": null,
     "blNo": null,
     "vesselName": null,
+    "freightAgent": null,
     "shippingMethod": null,
+    "packingAgent": null,
     "vanningDate": null,
     "containerNumber": null,
     "hasInspection": false,
     "inspectionDate": null,
+    "inspectionCompany": null,
+    "inspectionBy": null,
+    "transportBy": null,
+    "vehicleLocation": null,
     "massoDate": null,
     "trackingNumber": null,
     "lcNo": null,
@@ -1150,27 +1192,20 @@ Example (200):
     "logBook": null,
     "extraKey": null,
     "nameChangeDeadline": null,
+    "rowColourStatus": null,
     "docSentDate": null,
     "docSentComment": null,
     "recycleDate": null,
     "jibaishake": null,
     "vehicleRemark": "Example remark",
-    "modelId": "model_a1",
-    "gradeId": "grade_a1",
-    "auctionHallId": null,
-    "supplierId": null,
-    "customerId": "cust_a1",
-    "freightAgentId": null,
-    "packingAgentId": null,
-    "transportById": null,
-    "vehicleLocationId": null,
-    "rowColourStatusId": null,
-    "inspectionCompanyId": null,
-    "inspectionById": null,
-    "id": "v_fc_booked_future",
-    "org_id": "org_test_a",
-    "serial": "FC102",
-    "serialPrefix": "FC"
+    "deliveryDate": null,
+    "paidByCustomer": null,
+    "sellingPrice": null,
+    "sellingPriceCurrency": null,
+    "customerVisible": null,
+    "portOfLoading": null,
+    "portOfDischarge": null,
+    "voyageNo": null
   }
 }
 ```
@@ -1323,6 +1358,70 @@ Example (200):
 }
 ```
 
+#### GET /api/v1/vehicles/:serial/timeline
+
+**Roles:** ADMINISTRATOR, MANAGER, OPERATOR, VIEWER
+
+The **Shipment Timeline** of the vehicle detail screen (since 1.4.0): the steps of the physical process, **derived** from fields already on the vehicle. Nothing is stored for it and it is not the same thing as the recorded milestones above. The same derivation the old detail page used. Unknown, deleted or another organisation's serial: `404`. Not paged; ordered as the process runs.
+
+Each step is `{ key, label, completed, date }`; `date` is `null` while not completed, and always `null` for the two flag-based steps. The list is **not fixed**:
+
+| `key` | Shown | `completed` when | `date` |
+|---|---|---|---|
+| `AUCTION_BILL_PAID` | always | `auctionBillPaid` is `true` (`false` and `null` both show not completed here) | `null` |
+| `TRANSPORT_ASSIGNED` (label "Rikso Given") | always | a transport company is set | `null` |
+| `EC_RECEIVED` | always | an `EC` document exists | when the earliest EC document was added |
+| `INSPECTION_COMPLETED` | only once an `INSPECTION_REPORT` document exists | always | when the earliest report was added |
+| `LC_OPEN` | only when the destination is Sri Lanka or Bangladesh | an LC number is set | `null` |
+| `BOOKING_RECEIVED` | always | an ETD is set | when the ETD was saved (falls back to the ETD) |
+| `LOADED` | only for `CONTAINER` shipments | the vanning date has passed | the vanning date |
+| `SHIPPED` | always | the ETD has passed | the ETD |
+| `DELIVERED` | always | the ETA has passed | the ETA |
+
+Example (200):
+
+```json example:vehicles.timeline 200
+{
+  "data": [
+    {
+      "key": "AUCTION_BILL_PAID",
+      "label": "Auction Bill Paid",
+      "completed": true,
+      "date": null
+    },
+    {
+      "key": "TRANSPORT_ASSIGNED",
+      "label": "Rikso Given",
+      "completed": false,
+      "date": null
+    },
+    {
+      "key": "EC_RECEIVED",
+      "label": "EC Received",
+      "completed": false,
+      "date": null
+    },
+    {
+      "key": "BOOKING_RECEIVED",
+      "label": "Booking Received",
+      "completed": true,
+      "date": "2026-01-03T18:30:00.000Z"
+    },
+    {
+      "key": "SHIPPED",
+      "label": "Shipped",
+      "completed": false,
+      "date": null
+    },
+    {
+      "key": "DELIVERED",
+      "label": "Delivered",
+      "completed": false,
+      "date": null
+    }
+  ]
+}
+```
 #### PUT /api/v1/vehicles/:id/milestones/:type
 
 **Roles:** ADMINISTRATOR, MANAGER, OPERATOR
@@ -1806,7 +1905,7 @@ Example (200):
 
 **Roles:** ADMINISTRATOR, MANAGER
 
-Body: `{ "name": string (1-150), "email"?: string|null (valid, stored lower case), "phone"?: string|null (max 30), "country"?: string|null (max 100), "address"?: string|null (max 300) }`. `201` with the full customer row (same keys as `GET /customers` for a non-VIEWER).
+Body: `{ "name": string (1-150), "email"?: string|null (valid, stored lower case), "phone"?: string|null (max 30), "country"?: string|null (max 100), "address"?: string|null (max 300) }`. `201` with the full customer row (same keys as `GET /customers` for a non-VIEWER). `409` with `fieldErrors.email` if another account in the organisation already has that email (since 1.5.0 this includes two saves at the same moment; before, the loser got a `500`).
 
 Example (201):
 
@@ -1829,7 +1928,7 @@ Example (201):
 
 **Roles:** ADMINISTRATOR, MANAGER
 
-Same body as create (the whole new state; omitted optional fields become `null`). Answers the full row.
+Body (a real PATCH, since 1.3.0): any of `name` (1-150, cannot be cleared), `email`, `phone`, `country`, `address` (the limits of create); at least one. **Only the fields you send change**; an absent field is unchanged, and an explicit `null` or a blank string clears an optional field. Unknown fields (including `orgId`) and an empty body are `400`; another organisation's customer is `404`. Answers the full row. The activity log records only the fields that changed.
 
 Example (200):
 
@@ -1855,7 +1954,7 @@ Resources: `brands`, `auction-halls`, `suppliers`, `transport-companies`, `inspe
 - `GET /lookups/X?q=` , every role: case-insensitive partial match on the name, **at most 20 rows**, name order. `models` also requires `?brandId=`, `grades` requires `?modelId=` (`400` without it).
 - `GET /lookups/X/:id`, every role: one row (use it to label a stored id).
 - `POST /lookups/X`, ADMINISTRATOR or MANAGER: body `{ "name": string }` (trimmed, 1-150). **Find-or-create:** a name that exists (case-insensitive) returns the existing row; the answer is `200` in both cases. `models` takes `{ "brandId", "name" }`, `grades` `{ "modelId", "name" }` (the parent must be yours, else `404`), `freight-agents` `{ "name", "offersRoro": boolean, "offersContainer": boolean }` (at least one flag true).
-- `PATCH /lookups/X/:id`, ADMINISTRATOR or MANAGER: same body; renames. `409` if another row already has that name.
+- `PATCH /lookups/X/:id`, ADMINISTRATOR or MANAGER: same body; renames. `409` with `fieldErrors.name` if another row already has that name, including two renames to the same name at the same moment (since 1.5.0 the loser gets this `409`, not a `500`). Names are compared without regard to case when checking, so "Toyota" and "toyota" are the same name.
 
 `GET /lookups/freight-agents/search?q=&method=RORO|CONTAINER` returns the agents whose name matches and who offer that shipping method (omit `method` for all). Use it for the freight-agent picker once a shipping method is chosen.
 
@@ -2092,7 +2191,7 @@ Example (201):
 
 **Roles:** ADMINISTRATOR
 
-Body: `{ "name", "email", "phone"?, "role", "active": boolean, "password"?: string|null }`: the whole new state; an empty or missing `password` leaves the password unchanged. A new password, a deactivation or a role change **revokes that person's sessions**.
+Body (a real PATCH, since 1.3.0): any of `{ "name", "email", "phone": string|null, "role", "active": boolean, "password": string }`, at least one. **Only the fields you send change**: an absent field is unchanged (it does not reset the role or switch the account off), `phone: null` (or blank) clears the phone, and an empty, blank or `null` `password` leaves the password unchanged. Unknown fields and an empty body are `400`. A new password, a deactivation or a role change **revokes that person's sessions**. The activity log records only the fields that changed (a password change is recorded as a flag, never the value).
 
 Example (200):
 
@@ -3808,7 +3907,7 @@ This section is built from this repository's own documents (`docs/implementation
 | Failed sign-in | Web form collapsed every failure into a generic message | `400 VALIDATION` for a wrong password, `403 FORBIDDEN` for a locked account, both as JSON |
 | Refresh failures | n/a | `403`, not 401 (section 2) |
 | Vehicle list default order | The old web screen opened sorted by purchase date, newest first (this is what `docs/implementation-plan.md` calls "the code default") | **`serial` descending**, default track `FC`. An older line in `docs/api-contract.md` that said `purchaseDate desc` was wrong and has been corrected. If the new screen should open by purchase date, send `sort=purchaseDate&dir=desc` explicitly |
-| Create and update answers | *Unknown* (the old server actions' return values are not recorded here) | `POST /vehicles` and `PUT /vehicles/:id` return the stored database row, not the detail shape (5.3). Re-fetch the detail |
+| Create and update answers | *Unknown* (the old server actions' return values are not recorded here) | `POST /vehicles` and `PUT /vehicles/:id` return the detail shape of `GET /vehicles/:serial` (since 1.1.0) |
 | File addresses | A stored public address, later a presigned storage address, in `url` | A short-lived link on the API's own domain (section 6). Never stored |
 | Upload registration | The client sent the file's public address | The client sends the `key` the presign returned; the server builds the address |
 | Upload answer | Included a public address | `{ uploadUrl, key, expiresInSeconds, headers }`; no public address (stock-image uploads keep `publicUrl`) |
@@ -3836,7 +3935,7 @@ This section is built from this repository's own documents (`docs/implementation
 | Cursor pagination, `Last-Event-ID` replay on the stream, WebSockets | Not built |
 | Reserving a vehicle, a cost / CIF estimator, phone or OTP login, WhatsApp sending | Deliberately out of scope for now |
 | An OpenAPI description or generated client | Not built (this document and its test are the contract) |
-| A trusted way for a server-side caller to pass the real end-user address (section 9) | Not built |
+| A trusted way for a server-side caller to pass the real end-user address (section 9) | Built in 1.2.0, optional (off until the operator sets a secret) |
 | Amounts for customers | Never: customers see no price or total anywhere |
 | A global search endpoint across customers, vehicles and stock | Not built; use `q` on the list endpoints |
 
@@ -3866,11 +3965,54 @@ Names only. Values come from the operator; nothing here is a secret.
 | `hops` | The `X-Forwarded-For` entry added by exactly `TRUST_PROXY_HOPS` trusted proxies | The number of proxies in front is known and the API is reachable only through them |
 | `header` | The one header named by `CLIENT_IP_HEADER`, which the host's edge overwrites on every request | The hosting edge provides such a header |
 
-**What this means for a Next.js server that calls the API for many users.** The API sees **the Next server's address**, the same for every user. A forwarding header you add yourself (`X-Forwarded-For` and similar) is ignored in `socket` mode and cannot be trusted from you in the other modes (the edge overwrites it). **No trusted-forwarding mechanism exists yet**: there is no way for a server-side caller to say "this request is on behalf of address X" that the API will believe. Consequences:
+**What this means for a server-side caller (the Next.js server).** The API sees **the caller's address**, the same for every user, unless the caller proves itself and passes the visitor's address (next subsection). Ordinary forwarding headers (`X-Forwarded-For` and similar) are ignored in `socket` mode and cannot be trusted from you in the other modes. **Without the trusted forwarder**:
 - All users of the web app share one 300 a minute overall bucket, one 10 a minute `auth/login` bucket, one 10 a minute `auth/refresh` bucket, one 20 a minute `device-tokens` bucket, one 60 a minute `uploads/presign` bucket and one 30 a minute stream bucket. **Signing every user in through the Next server will hit 429 as soon as more than ten sign-ins or refreshes happen in a minute across the whole company.**
 - Account lockout (5 wrong passwords) is per account, so it still works.
-- Ways to cope today, in order of preference: (1) let **the browser call the API directly** for `auth/login`, `auth/refresh`, uploads presign and the notification stream (each browser has its own address; add the app's origin to `CORS_ALLOWED_ORIGINS`); (2) refresh once per session and as late as possible; (3) cache nothing sensitive in a shared cache, but do batch reads; (4) ask the operator to raise the limits or to add a trusted-forwarding option, which is a code change in this API. Do not try to forward addresses yourself.
 - Requests answered from a browser or CDN cache never reach the API and use no limit (but this API sends `no-store`).
+
+### Server-side callers: passing the real visitor address
+
+Since contract 1.2.0 the API supports a **trusted forwarder** (decision record: `docs/adr/adr-0008-trusted-forwarder-for-server-side-callers.md`). It is **optional and off** until the operator sets `TRUSTED_FORWARDER_SECRET`. Ask the operator whether it is on before you rely on it. When it is on, a server-side caller signs the visitor's address and the API uses that address for the rate limits, the sign-in lockout keys and its logs. The secret stays on your server; **never put it in browser code**.
+
+Send these three request headers on every call you make on behalf of one visitor (on any route, staff, customer or public):
+
+| Header | Value |
+|---|---|
+| `X-Client-IP` | The visitor's address: exactly one IPv4 or IPv6 address. No list, no port, no brackets, no spaces, no zone id (`%eth0`) |
+| `X-Forwarder-Timestamp` | The time you signed, in unix seconds, digits only |
+| `X-Forwarder-Signature` | `base64url(HMAC-SHA256(secret, "v1|<ip>|<timestamp>"))`: the text is the three parts joined by `|`; the secret is the shared secret used as the key (UTF-8 bytes); the result is base64url **without** padding, always 43 characters |
+
+How the API decides (anything else and it **ignores the three headers entirely**, answers the request normally as if you had not sent them, and logs one masked warning a minute; it never rejects the request for this reason):
+
+1. The three headers are present once each, the address is one valid IP address, the timestamp is digits, the signature is 43 canonical base64url characters.
+2. The timestamp is at most **60 seconds old** and at most **30 seconds in the future** (clock skew). Sign each call, or sign once and reuse for under a minute.
+3. The signature matches the current secret, or the previous secret while the operator is rotating. Compared in constant time.
+
+A fake worked example (the secret, address and time are made up; the signature below is the real result for them, and the contract test recomputes it):
+
+```json forwarder-example
+{
+  "secret": "example-only-forwarder-key-0123456789-abcdef",
+  "ip": "203.0.113.7",
+  "timestamp": 1800000000,
+  "signedText": "v1|203.0.113.7|1800000000",
+  "signature": "eNY2Avo-w-pxT0KwcCwoxEkLZ8TDMnr-WC1XiFrTc_w",
+  "headers": {
+    "X-Client-IP": "203.0.113.7",
+    "X-Forwarder-Timestamp": "1800000000",
+    "X-Forwarder-Signature": "eNY2Avo-w-pxT0KwcCwoxEkLZ8TDMnr-WC1XiFrTc_w"
+  }
+}
+```
+
+In words, for any language: build the text `v1|` + address + `|` + timestamp; compute HMAC with SHA-256 using the secret as the key; encode the 32 result bytes as base64url and drop any `=` padding; send the address, the timestamp and that string in the three headers. Node's `crypto.createHmac("sha256", secret).update(text).digest("base64url")`, .NET's `HMACSHA256`, and PowerShell's `[System.Security.Cryptography.HMACSHA256]` all produce the same bytes; only the final encoding step (base64url, no padding) needs care.
+
+Things to know:
+- **Sign the real visitor.** Take the address from the connection your own server accepted (or from your host's own trusted header), never from a header the visitor can set. A caller that signs a constant gets the shared-bucket behaviour back.
+- **The ordinary headers still do nothing.** `X-Forwarded-For`, `X-Real-IP` and the like never change the address; only a valid signature does. A wrong, expired or tampered signature is not an error you can detect from the answer: the request just counts against your own address. Watch for unexpected `429` and ask the operator to check the warnings.
+- **Rotation.** The operator can accept the old and the new secret at once. Switch your signer to the new secret whenever the operator says the new one is current.
+- **Browsers can still call the API directly** for sign-in, refresh, upload presign and the stream (each browser has its own address; add the app's origin to `CORS_ALLOWED_ORIGINS`). Use whichever suits the app; the two can be mixed.
+- If the forwarder is off, the options in order of preference are: let the browser call the API directly for those routes; refresh once per session and as late as possible; ask the operator to turn the forwarder on.
 
 **Storage.** Photos and documents live in object storage the browser never reads from; uploads go direct to storage with a presigned `PUT` (section 6). Public stock images live in a separate public bucket.
 
@@ -3892,6 +4034,11 @@ Breaking changes are announced here before they ship. The test `tests/staff-fron
 
 | Version | Date | Change |
 |---|---|---|
+| 1.5.0 | 2026-11-03 | **Compatible fix:** every create or update with a unique key answers `409 CONFLICT` with a field error when two requests collide, never `500`: customer create and update (`fieldErrors.email`), staff create, update and own profile (`email`), lookup create and rename (`name`), vehicle create with a legacy serial (`legacySerialNumber`) and serial correction (`serialNumber`). Verified with concurrent requests against a real database |
+| 1.4.0 | 2026-11-01 | **Additive:** the vehicle detail (and the answers of `POST /vehicles` and `PUT /vehicles/:id`) gains `storedShipmentStatus`; its `shipmentStatus` is, and always was in the code, the effective value. New `GET /vehicles/:serial/timeline` (the derived Shipment Timeline of the detail screen). Documentation fix: 1.0.0 to 1.3.0 wrongly called the detail's `shipmentStatus` the stored value |
+| 1.3.0 | 2026-11-01 | **Behaviour change (PATCH semantics):** `PATCH /customers/:id`, `PATCH /staff/:id` and `PATCH /profile` now change only the fields sent. Before, they replaced the whole record, so an omitted field was cleared (customer, profile phone) or required (`role` and `active` on staff). Full bodies still work. Unknown fields and empty bodies are now `400`. A password change keeps revoking the caller's own refresh token |
+| 1.2.0 | 2026-11-01 | New, optional and compatible: the **trusted forwarder** (`X-Client-IP`, `X-Forwarder-Timestamp`, `X-Forwarder-Signature`, section 9). No response changes. Off unless the operator sets `TRUSTED_FORWARDER_SECRET` |
+| 1.1.0 | 2026-11-01 | **Breaking for create and update:** `POST /vehicles` and `PUT /vehicles/:id` now answer with the detail shape of `GET /vehicles/:serial` instead of the stored row (no `org_id`, no `serialPrefix`, no `serialNumber`). A client that read those keys from the 1.0.0 answer must be updated. Also: every answer has `X-Request-Id`, and `Access-Control-Expose-Headers` lists `Retry-After`, `X-RateLimit-*` and `X-Request-Id` |
 | 1.0.0 | 2026-11-01 | First complete staff contract. Describes the API as it stands: **own-domain signed file links** in every staff `url` (before: presigned storage addresses), file registration **by `key`** (before: by address), the key-only presign answer, the 20-minute access token with rotating refresh, database-checked roles, the VIEWER contact-detail rule, and the default vehicle sort `serial desc` |
 
 ---
@@ -3916,6 +4063,8 @@ The numbers below are asserted by the contract test against the constants in the
   "maxImagesPerStockListing": 20,
   "maxChatMessageLength": 2000,
   "streamRecheckSeconds": 60,
+  "forwarderMaxAgeSeconds": 60,
+  "forwarderMaxFutureSeconds": 30,
   "defaultVehicleSort": "serial",
   "defaultVehicleSortDirection": "desc",
   "defaultVehicleTrack": "FC",

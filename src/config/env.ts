@@ -73,6 +73,11 @@ const baseSchema = z.object({
   FILE_LINK_SECRET: z.string().refine((v) => Buffer.byteLength(v, "utf8") >= 32, "FILE_LINK_SECRET must be at least 32 bytes").optional(),
   FILE_LINK_SECRET_PREVIOUS: z.string().refine((v) => Buffer.byteLength(v, "utf8") >= 32, "FILE_LINK_SECRET_PREVIOUS must be at least 32 bytes").optional(),
   FILE_LINK_BASE_URL: z.string().url().optional(),
+  // Trusted forwarder (ADR 0008): a server-side caller (for example the Next app) proves it with a signature and may then tell this
+  // API the real visitor address. Unset means the feature is off and the X-Client-IP / X-Forwarder-* headers are ignored. The previous
+  // secret is accepted during a rotation.
+  TRUSTED_FORWARDER_SECRET: z.string().refine((v) => Buffer.byteLength(v, "utf8") >= 32, "TRUSTED_FORWARDER_SECRET must be at least 32 bytes").optional(),
+  TRUSTED_FORWARDER_SECRET_PREVIOUS: z.string().refine((v) => Buffer.byteLength(v, "utf8") >= 32, "TRUSTED_FORWARDER_SECRET_PREVIOUS must be at least 32 bytes").optional(),
   // How long a link lives (seconds), and the longest any link may be accepted for (a hard cap, also against a stolen secret).
   FILE_LINK_TTL_SECONDS: z.coerce.number().int().min(30).max(900).default(300),
   FILE_LINK_MAX_TTL_SECONDS: z.coerce.number().int().min(30).max(900).default(900),
@@ -195,6 +200,22 @@ function validateEmailSafety(env: { APP_ENV: string; RESEND_API_KEY?: string | u
   }
 }
 
+/** The trusted-forwarder settings: a previous secret needs a current one, and every forwarder secret differs from every other secret (and from each other). */
+function validateTrustedForwarder(env: { [key: string]: unknown }, ctx: z.RefinementCtx): void {
+  const add = (path: string, message: string) => ctx.addIssue({ code: "custom", path: [path], message });
+  const current = env["TRUSTED_FORWARDER_SECRET"];
+  const previous = env["TRUSTED_FORWARDER_SECRET_PREVIOUS"];
+  if (typeof previous === "string" && typeof current !== "string") add("TRUSTED_FORWARDER_SECRET_PREVIOUS", "TRUSTED_FORWARDER_SECRET_PREVIOUS needs TRUSTED_FORWARDER_SECRET");
+  const others = ["MOBILE_JWT_SECRET", "CUSTOMER_JWT_SECRET", "OTP_PEPPER", "R2_SECRET_ACCESS_KEY", "TURNSTILE_SECRET", "RESEND_API_KEY", "EXPO_ACCESS_TOKEN", "FILE_LINK_SECRET", "FILE_LINK_SECRET_PREVIOUS"]
+    .map((name) => env[name])
+    .filter((v): v is string => typeof v === "string" && v !== "");
+  if (typeof current === "string" && others.includes(current)) add("TRUSTED_FORWARDER_SECRET", "TRUSTED_FORWARDER_SECRET must differ from every other secret");
+  if (typeof previous === "string") {
+    if (others.includes(previous)) add("TRUSTED_FORWARDER_SECRET_PREVIOUS", "TRUSTED_FORWARDER_SECRET_PREVIOUS must differ from every other secret");
+    if (previous === current) add("TRUSTED_FORWARDER_SECRET_PREVIOUS", "TRUSTED_FORWARDER_SECRET_PREVIOUS must differ from TRUSTED_FORWARDER_SECRET");
+  }
+}
+
 /** The file-link settings: both or none (both in production), a strong secret that differs from every other secret, TTL within the cap. */
 function validateFileLinks(
   env: {
@@ -220,7 +241,7 @@ function validateFileLinks(
     const problem = fileLinkBaseUrlProblem(env.FILE_LINK_BASE_URL);
     if (problem) add("FILE_LINK_BASE_URL", problem);
   }
-  const others = ["MOBILE_JWT_SECRET", "CUSTOMER_JWT_SECRET", "OTP_PEPPER", "R2_SECRET_ACCESS_KEY", "TURNSTILE_SECRET", "RESEND_API_KEY", "EXPO_ACCESS_TOKEN"]
+  const others = ["MOBILE_JWT_SECRET", "CUSTOMER_JWT_SECRET", "OTP_PEPPER", "R2_SECRET_ACCESS_KEY", "TURNSTILE_SECRET", "RESEND_API_KEY", "EXPO_ACCESS_TOKEN", "TRUSTED_FORWARDER_SECRET", "TRUSTED_FORWARDER_SECRET_PREVIOUS"]
     .map((name) => env[name])
     .filter((v): v is string => typeof v === "string" && v !== "");
   if (env.FILE_LINK_SECRET !== undefined && others.includes(env.FILE_LINK_SECRET)) add("FILE_LINK_SECRET", "FILE_LINK_SECRET must differ from every other secret");
@@ -234,6 +255,7 @@ function validateFileLinks(
 const R2_CREDENTIALS = ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME"] as const;
 
 const envSchema = baseSchema.superRefine((env, ctx) => {
+  validateTrustedForwarder(env, ctx);
   const set = R2_CREDENTIALS.filter((name) => env[name] !== undefined);
   if (set.length > 0 && set.length < R2_CREDENTIALS.length) {
     for (const name of R2_CREDENTIALS) {

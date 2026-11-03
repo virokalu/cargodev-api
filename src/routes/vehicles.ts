@@ -9,6 +9,7 @@ import { success } from "../lib/response.js";
 import {
   getVehicleDetail,
   getVehicleFilterOptions,
+  getVehicleTimeline,
   listDistinctDestinations,
   listVehicles,
   listVehicleStatusHistory,
@@ -39,12 +40,12 @@ import {
   convertVehicleToExport,
   convertVehicleToLocal,
   correctVehicleSerialNumber,
-  createVehicle,
+  createVehicleDetail,
   deleteVehicle,
   hasDuplicateChassisNo,
   revertVehicleToExport,
   revertVehicleToLocal,
-  updateVehicle,
+  updateVehicleDetail,
   updateVehicleAuctionBillPaid,
   updateVehicleRowColourStatus,
 } from "../services/vehicle.service.js";
@@ -86,12 +87,12 @@ export function registerVehicleRoutes(app: FastifyInstance) {
   type IdParams = { Params: { id: string } };
 
   app.post("/vehicles", manage, async (request, reply) =>
-    reply.status(201).send(success(await createVehicle(currentUser(request), request.body)))
+    reply.status(201).send(success(await createVehicleDetail(currentUser(request), request.body)))
   );
 
   // Full replace (PUT), not a partial patch: omitted optional fields are cleared.
   app.put<IdParams>("/vehicles/:id", manage, async (request) =>
-    success(await updateVehicle(currentUser(request), request.params.id, request.body))
+    success(await updateVehicleDetail(currentUser(request), request.params.id, request.body))
   );
 
   app.delete<IdParams>("/vehicles/:id", manage, async (request) => {
@@ -200,6 +201,10 @@ export function registerVehicleRoutes(app: FastifyInstance) {
     if (!vehicle) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
     return success(vehicle);
   });
+
+  app.get<{ Params: { serial: string } }>("/vehicles/:serial/timeline", auth, async (request) =>
+    success(await getVehicleTimeline(currentUser(request).orgId, request.params.serial))
+  );
 
   app.get<{ Params: { serial: string } }>("/vehicles/:serial/status-history", auth, async (request) => {
     const { orgId } = currentUser(request);

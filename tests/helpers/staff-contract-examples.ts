@@ -240,6 +240,7 @@ export const EXAMPLES: Example[] = [
 
   // ---- milestones
   get("milestones.list", "VIEWER", "/api/v1/vehicles/FC102/milestones"),
+  get("vehicles.timeline", "VIEWER", "/api/v1/vehicles/FC102/timeline"),
   send("milestones.set", "OPERATOR", "PUT", "/api/v1/vehicles/v_fc_booked_future/milestones/AT_EXPORT_YARD", { occurredAt: "2026-10-20" }),
   send("milestones.delete", "OPERATOR", "DELETE", "/api/v1/vehicles/v_fc_booked_future/milestones/BOUGHT", undefined),
   send("milestones.mark-arrived", "OPERATOR", "POST", "/api/v1/vehicles/v_fc_booked_future/mark-arrived", {}),

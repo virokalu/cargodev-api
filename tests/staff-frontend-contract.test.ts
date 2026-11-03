@@ -280,3 +280,51 @@ describe("the document itself", () => {
     expect(hosts.filter((h) => !h.endsWith("example.test") && h !== "localhost"), "hosts that are not placeholders").toEqual([]);
   });
 });
+
+describe("vehicle create and update answer with the detail shape", () => {
+  const FORBIDDEN_KEYS = ["org_id", "orgId", "serialPrefix", "serialNumber", "deletedAt", "createdAt", "updatedAt"];
+
+  async function detailKeys(fake: FakePrisma, serial: string): Promise<string[]> {
+    const reply = await makeCtx(app, fake).call("MANAGER", "GET", `/api/v1/vehicles/${serial}`);
+    expect(reply.status).toBe(200);
+    return Object.keys((reply.body as { data: object }).data).sort();
+  }
+
+  it.each(["vehicles.create", "vehicles.update"])("%s returns exactly the keys of GET /vehicles/:serial", async (id) => {
+    const fake = newContractWorld();
+    state.fake = fake;
+    clearStaffAuthCache();
+    const reply = await EXAMPLES.find((e) => e.id === id)!.run(makeCtx(app, fake));
+    const data = (reply.body as { data: Record<string, unknown> }).data;
+    expect(Object.keys(data).sort()).toEqual(await detailKeys(fake, String(data["serial"])));
+    for (const key of FORBIDDEN_KEYS) expect(data, `${id} leaks ${key}`).not.toHaveProperty(key);
+  });
+});
+
+describe("exposed response headers", () => {
+  it("the doc names exactly the headers the API exposes to browsers", async () => {
+    const { CORS_EXPOSED_HEADERS } = await import("../src/app.js");
+    const line = DOC.split(/\r?\n/).find((l) => l.startsWith("**CORS.**")) ?? "";
+    for (const header of CORS_EXPOSED_HEADERS) expect(line, header).toContain(`\`${header}\``);
+    expect(DOC).toContain("`X-Request-Id`");
+  });
+});
+
+describe("the trusted forwarder section", () => {
+  it("its worked example is the real signature for its fake secret, address and time", async () => {
+    const { signForwardedAddress } = await import("../src/lib/trusted-forwarder.js");
+    const match = /```json forwarder-example\r?\n([\s\S]*?)\r?\n```/.exec(DOC);
+    expect(match, "the doc has no `json forwarder-example` block").not.toBeNull();
+    const ex = JSON.parse(match![1]!) as { secret: string; ip: string; timestamp: number; signedText: string; signature: string; headers: Record<string, string> };
+    expect(ex.signedText).toBe(`v1|${ex.ip}|${ex.timestamp}`);
+    expect(ex.signature).toBe(signForwardedAddress(ex.secret, ex.ip, ex.timestamp));
+    expect(ex.headers).toEqual({ "X-Client-IP": ex.ip, "X-Forwarder-Timestamp": String(ex.timestamp), "X-Forwarder-Signature": ex.signature });
+  });
+
+  it("the facts block carries the time windows the code enforces", async () => {
+    const { FORWARDER_MAX_AGE_SECONDS, FORWARDER_MAX_FUTURE_SECONDS } = await import("../src/lib/trusted-forwarder.js");
+    const facts = docFacts();
+    expect(facts["forwarderMaxAgeSeconds"]).toBe(FORWARDER_MAX_AGE_SECONDS);
+    expect(facts["forwarderMaxFutureSeconds"]).toBe(FORWARDER_MAX_FUTURE_SECONDS);
+  });
+});

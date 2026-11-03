@@ -130,7 +130,8 @@ function handmade(parts: Partial<FileLinkParts> & { secret?: string }): string {
 
 const header = (res: { headers: Record<string, unknown> }, name: string) => String(res.headers[name] ?? "");
 const withoutDate = (headers: Record<string, unknown>) => {
-  const { date: _date, ...rest } = headers;
+  // The request id is random per request and says nothing about why a link was refused.
+  const { date: _date, "x-request-id": _id, ...rest } = headers;
   return rest;
 };
 

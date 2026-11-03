@@ -1,4 +1,7 @@
 // Environment for the real-database tests.
+if (Number(process.versions.node.split(".")[0]) < 24) {
+  throw new Error("CargoDev API needs Node 24 or newer; this is Node " + process.versions.node + ". Run nvm use (see .nvmrc).");
+}
 process.env["NODE_ENV"] = "test";
 process.env["MOBILE_JWT_SECRET"] = "test-only-dummy-value-0123456789abcdef";
 process.env["ORG_ID"] = "org_test_a";

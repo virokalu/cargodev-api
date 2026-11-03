@@ -100,6 +100,17 @@ If you see "The database test harness refused to run", read the message: it says
 - `tests/patch-semantics.test.ts`, `tests/vehicle-detail-status.test.ts`, `tests/cors-expose.test.ts`: PATCH semantics, the effective and stored status and the derived timeline, and the exposed response headers.
 - Real Postgres (`npm run test:db`): `tests/db/customer-list.db.test.ts` (vehicleCount excludes soft-deleted vehicles) and `tests/db/unique-violation.db.test.ts` (concurrent saves end in exactly one success and a 409).
 
+## Mutation checks: how to run them without hurting the repo
+
+A mutation check changes one rule on purpose and expects a test to fail. It must never change the real files, so it runs in a **mirror**, a separate copy of the project outside the repo. Rules (a stray `prisma generate` once replaced the repo's client because the mirror shared its `node_modules`):
+
+- The mirror has its **own copy of `node_modules`**, never a link or junction to the repo's. The runner refuses to start if it is a link.
+- **Never run `prisma generate`, `npm install` or any command that writes to `node_modules` from the repo's folder while pointing at the mirror, and never run `prisma generate` in the mirror at all.** The mirror's client was copied from the repo's; the schema is not mutated.
+- Only one rule is mutated at a time, the file is restored in a `finally`, and a mutant counts as killed only when the runner prints a failing test count. A run that prints no result counts as NOT killed.
+- Real-database mutants use a throwaway local database only (`TEST_DATABASE_URL`), and one batch at a time, because those tests reset the tables.
+- **After every mutation run, check the repo:** `npm run check:prisma-client` (it compares the schema copy inside the generated client with `prisma/schema.prisma`; exit 1 and a message if they differ, fixed by `npx prisma generate` in the repo). The runner does this itself and prints the result; also run `npm run typecheck`.
+
+
 ## Slice 7 tests
 
 - `tests/public-stock.test.ts`: the flag (off means none of the routes exist), what the public sees (only PUBLISHED of the default org; exact key sets; the same 404 for draft, sold, other-org, malformed and unknown slugs; filters, sorts, the 24 cap and strict parameters), cache and CORS headers (per-route allow-lists, preflight, no `*`), the enquiry form (validation, honeypot, body limit, per-IP and per-email limits, Turnstile on/off/fails closed, nothing typed in logs), the staff inbox, the staff access matrix (401, 403 for OPERATOR and VIEWER on all 15 routes), stock management (draft, edit, explicit publish, sold, unpublish, new-stock alerts), and images (presign, registration, order, delete, limits).

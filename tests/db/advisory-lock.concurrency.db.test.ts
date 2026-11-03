@@ -65,25 +65,33 @@ describe("only one session holds a job's lock at a time", () => {
   });
 
   it("many simultaneous attempts: exactly one runs", async () => {
-    const gate = deferred();
-    setTimeout(() => gate.resolve(), 400); // the winner finishes after every other attempt was refused
+    // A barrier, not a timer: whoever wins the lock keeps it until every other attempt has tried and been refused. So the outcome
+    // does not depend on how long connecting takes (a fixed window was too short on a cold start, and a late attempt then got the
+    // lock after the winner had finished). If the lock ever let two sessions in, they would wait for refusals that never come and
+    // the test fails on its timeout.
+    const ATTEMPTS = 8;
+    const everyoneElseTried = deferred();
+    let refused = 0;
     let running = 0;
     let maxRunning = 0;
     const attempts = await Promise.all(
-      Array.from({ length: 8 }, () =>
+      Array.from({ length: ATTEMPTS }, () =>
         withAdvisoryLock("contended-job", async () => {
           running += 1;
           maxRunning = Math.max(maxRunning, running);
-          await gate.promise;
+          await everyoneElseTried.promise;
           running -= 1;
           return "ran";
+        }).then((result) => {
+          if (!result.acquired && (refused += 1) === ATTEMPTS - 1) everyoneElseTried.resolve();
+          return result;
         })
       )
     );
     expect(attempts.filter((a) => a.acquired)).toHaveLength(1);
-    expect(attempts.filter((a) => !a.acquired)).toHaveLength(7);
+    expect(attempts.filter((a) => !a.acquired)).toHaveLength(ATTEMPTS - 1);
     expect(maxRunning).toBe(1);
-  });
+  }, 30_000);
 
   it("different jobs do not block each other", async () => {
     const first = await holdLock("job-one");

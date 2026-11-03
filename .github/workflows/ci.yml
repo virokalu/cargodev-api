@@ -68,8 +68,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          # Vitest 5 needs Node 22.12 or newer.
-          node-version: 24
+          # One Node for the whole project: the major in .nvmrc (also the Dockerfile's).
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       # Generates the typed Prisma client; typecheck and tests need it. Does not touch a database.
@@ -111,7 +111,7 @@ jobs:
           docker run --rm --entrypoint sh cargodev-api:ci -c 'for p in tests docs src scripts .git; do [ -e "/app/$p" ] && { echo "unexpected /app/$p"; exit 1; }; done; exit 0'
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci --ignore-scripts
       # Blocking, like the ci job: a high or critical finding in a runtime dependency fails the build.
@@ -136,7 +136,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm audit

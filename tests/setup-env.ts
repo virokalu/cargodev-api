@@ -1,4 +1,8 @@
 // Dummy environment for unit tests. Fake values only; nothing here is real.
+// An older Node fails here with a clear message (scripts/check-node.cjs does the same before the runner starts).
+if (Number(process.versions.node.split(".")[0]) < 24) {
+  throw new Error("CargoDev API needs Node 24 or newer; this is Node " + process.versions.node + ". Run nvm use (see .nvmrc).");
+}
 process.env["NODE_ENV"] = "test";
 process.env["DATABASE_URL"] = "postgresql://user:password@localhost:5432/test_dummy";
 process.env["MOBILE_JWT_SECRET"] = "test-only-dummy-value-0123456789abcdef";

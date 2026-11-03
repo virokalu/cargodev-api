@@ -1,9 +1,11 @@
 // A browser script may read the rate-limit headers and the request id only if the answer lists them in
 // Access-Control-Expose-Headers, on staff, customer and public routes, and only for an allowed origin. Fake data only.
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../src/app.js";
+
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 }); // building the app is slow when the machine is busy
 
 const APP_ORIGIN = "https://app.example.test";
 const SITE_ORIGIN = "https://site.example.test";

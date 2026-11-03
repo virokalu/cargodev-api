@@ -115,6 +115,10 @@ socket address is used and a masked warning is logged (the header name only, at 
 runbook after every host or setting change. Behind a load balancer with `socket`, every request shares the balancer's address and one
 rate-limit bucket: set the mode before go-live.
 
+### Node version
+
+The whole project uses **Node 24**: `.nvmrc` says `24`, the Dockerfile pins `node:24.x` (an exact patch version, so a deploy cannot change the runtime), CI reads its Node from `.nvmrc`, and `package.json` `engines.node` is `>=24.0.0` (a floor, not a ceiling: a newer Node on a developer machine still works). `npm test` and `npm run test:db` first run `scripts/check-node.cjs`, which stops with a plain message on an older Node, and the test setup files refuse to start on one too. To change the version, change `.nvmrc`, the Dockerfile image and `engines` together; `tests/node-version.test.ts` fails if they disagree.
+
 ### Server-side callers: the trusted forwarder (optional)
 
 A web front end that runs on a server (the Next app) makes every visitor look like one address. Set `TRUSTED_FORWARDER_SECRET` (and give the same value to that server, and only to that server) to let it pass the real visitor address in three signed headers; the API believes the address only when the signature verifies and is under a minute old. Without the secret the feature is off and the headers are ignored. It overrides the address only for requests that carry a valid signature; it does not replace `CLIENT_IP_SOURCE`. Rotate: set the new value as `TRUSTED_FORWARDER_SECRET` and the old one as `TRUSTED_FORWARDER_SECRET_PREVIOUS`, switch the caller, then remove the previous one. A refused signature logs one masked warning a minute (reason and header names only). Details and the signing recipe: docs/staff-frontend-integration.md, section 9; decision: docs/adr/adr-0008-trusted-forwarder-for-server-side-callers.md.
@@ -158,6 +162,8 @@ A new consumer is added to this list before it is given access.
 `docs/render.yaml.example` is a minimal, secret-free definition for a Docker host (names of variables, no values): Docker runtime, region singapore, health check `/health`, `maxShutdownDelaySeconds: 45`, one instance, no persistent disk, `sync: false` for every secret. Keep it equivalent to what is deployed.
 
 ## First-deploy checklist
+
+Before step 1: every variable, how to get its value, and which to leave unset on staging are in [render-env-checklist.md](render-env-checklist.md).
 
 Do these in order; stop at the first failure.
 

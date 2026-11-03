@@ -4,9 +4,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "check:node": "node scripts/check-node.cjs",
+    "check:prisma-client": "node scripts/check-prisma-client.mjs",
+    "pretest": "node scripts/check-node.cjs",
     "test": "vitest run",
     "prepare": "husky",
     "typecheck": "tsc --noEmit",
+    "pretest:db": "node scripts/check-node.cjs",
     "test:db": "vitest run --config vitest.db.config.ts",
     "migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
     "backfill:milestones": "tsx --env-file-if-exists=.env scripts/backfill-milestones.ts",
@@ -52,6 +56,6 @@
     "vitest": "^5.0.5"
   },
   "engines": {
-    "node": "^22.12.0 || ^24.0.0 || >=26.0.0"
+    "node": ">=24.0.0"
   }
 }

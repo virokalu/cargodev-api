@@ -576,6 +576,12 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
     });
   }
   const legacySerialNumber = input.legacySerialNumber;
+  // Only an administrator may ask to reuse a deleted vehicle's serial; anyone else who sends the flag is refused outright.
+  if (input.reuseDeletedSerial === true && user.role !== "ADMINISTRATOR") {
+    throw new ServiceError("FORBIDDEN", "Only an administrator can reuse the serial number of a deleted vehicle.", {
+      reuseDeletedSerial: "Only an administrator can set this",
+    });
+  }
 
   // FL vehicles never carry shipping fields — strip regardless of what was
   // posted (never trust the UI alone to have hidden them). Tech Doc §1 line 16.
@@ -653,7 +659,7 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
   const vehicle = await mapSerialConflict(input.track, input.isLegacyEntry ? legacySerialNumber : null, () =>
     getPrisma().$transaction(async (tx) => {
     const { serialNumber, serial } = input.isLegacyEntry
-      ? await assignLegacySerial(tx, user.orgId, input.track, legacySerialNumber!)
+      ? await assignLegacySerial(tx, user.orgId, input.track, legacySerialNumber!, input.reuseDeletedSerial === true)
       : await assignNextSerial(tx, user.orgId, input.track);
 
     // Shipment status is derived, never set manually (Tech Doc §1) — with one
@@ -1516,7 +1522,8 @@ export async function correctVehicleSerialNumber(
   orgId: string,
   actorId: string,
   id: string,
-  newNumber: number
+  newNumber: number,
+  reuseDeleted = false
 ): Promise<{ serial: string }> {
   const existing = await assertVehicleInOrg(orgId, id);
 
@@ -1530,7 +1537,7 @@ export async function correctVehicleSerialNumber(
   }
 
   return mapCorrectionConflict(existing.serialPrefix, newNumber, () => getPrisma().$transaction(async (tx) => {
-    const { serial } = await correctSerialNumber(tx, orgId, existing.serialPrefix, newNumber, id);
+    const { serial } = await correctSerialNumber(tx, orgId, existing.serialPrefix, newNumber, id, reuseDeleted);
 
     await writeVehicle(tx, orgId, id, { serialNumber: newNumber, serial });
 
@@ -2221,6 +2228,14 @@ export async function listDistinctDestinations(
  * above. A vehicle only ever has a partnerName when hasPartnership is true
  * (see createVehicle/updateVehicle), so this list is implicitly already
  * scoped to partnered vehicles. */
+/** At most this many partner names are returned. */
+export const PARTNER_NAMES_CAP = 500;
+
+/**
+ * The distinct partner names (Vehicle.partnerName) of the org's non-deleted vehicles, optionally of one EFFECTIVE track: trimmed, blanks
+ * dropped, the same name once, sorted without regard to case, at most PARTNER_NAMES_CAP. One query (distinct on the column); the trimming,
+ * sorting and cap happen on the distinct values only.
+ */
 export async function listDistinctPartnerNames(
   orgId: string,
   track?: TrackFilter
@@ -2234,9 +2249,15 @@ export async function listDistinctPartnerNames(
     },
     select: { partnerName: true },
     distinct: ["partnerName"],
-    orderBy: { partnerName: "asc" },
   });
-  return rows.map((row) => row.partnerName).filter((p): p is string => p !== null);
+  const names = new Set<string>();
+  for (const row of rows) {
+    const trimmed = row.partnerName?.trim() ?? "";
+    if (trimmed !== "") names.add(trimmed);
+  }
+  return [...names]
+    .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) || (a < b ? -1 : a > b ? 1 : 0))
+    .slice(0, PARTNER_NAMES_CAP);
 }
 
 export interface VehicleFilterOptions {

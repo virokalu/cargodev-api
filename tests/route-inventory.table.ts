@@ -174,6 +174,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { method: "DELETE", path: "/api/v1/vehicles/:id/photos/:photoId", kind: "staff", roles: AM },
   { method: "DELETE", path: "/api/v1/vehicles/:id/documents/:docId", kind: "staff", roles: AM },
   { method: "GET", path: "/api/v1/vehicles/filter-options", kind: "staff", roles: ANY },
+  { method: "GET", path: "/api/v1/vehicles/partner-names", kind: "staff", roles: ANY },
   { method: "GET", path: "/api/v1/vehicles/destinations", kind: "staff", roles: ANY },
   { method: "GET", path: "/api/v1/vehicles/:serial", kind: "staff", roles: ANY },
   { method: "GET", path: "/api/v1/vehicles/:serial/status-history", kind: "staff", roles: ANY },

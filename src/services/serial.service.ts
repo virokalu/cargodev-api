@@ -40,6 +40,22 @@ async function bumpCounterTo(tx: TxClient, orgId: string, prefix: SerialPrefix, 
   });
 }
 
+/**
+ * The 409 for a serial that is already on a vehicle. A live vehicle: a plain conflict. A DELETED vehicle's serial is never handed out
+ * again by accident: without the administrator's explicit flag the conflict carries reason SERIAL_PREVIOUSLY_USED; with the flag it
+ * carries SERIAL_REUSE_NOT_ENABLED, because the database still holds the old unique key (reuse needs the approved partial-index
+ * migration, which has not been applied). Auto-generated serials never come through here: the counter only goes up.
+ */
+function serialTaken(serial: string, field: string, deletedAt: Date | null, reuseDeleted: boolean): ServiceError {
+  if (deletedAt === null) return new ServiceError("CONFLICT", `Serial ${serial} already exists.`, { [field]: `Serial ${serial} already exists.` });
+  if (!reuseDeleted) {
+    const message = `Serial ${serial} belonged to a deleted vehicle and is not reused.`;
+    return new ServiceError("CONFLICT", message, { [field]: message }, "SERIAL_PREVIOUSLY_USED");
+  }
+  const message = `Serial ${serial} belongs to a deleted vehicle; reusing it is not enabled yet.`;
+  return new ServiceError("CONFLICT", message, { [field]: message }, "SERIAL_REUSE_NOT_ENABLED");
+}
+
 /** Normal entry: atomically increment the counter and assign the next number. */
 export async function assignNextSerial(
   tx: TxClient,
@@ -63,21 +79,16 @@ export async function assignLegacySerial(
   tx: TxClient,
   orgId: string,
   prefix: SerialPrefix,
-  manualNumber: number
+  manualNumber: number,
+  reuseDeleted = false
 ): Promise<AssignedSerial> {
   const serial = `${prefix}${manualNumber}`;
 
   const existing = await tx.vehicle.findUnique({
     where: { org_id_serial: { org_id: orgId, serial } },
-    select: { id: true },
+    select: { id: true, deletedAt: true },
   });
-  if (existing) {
-    throw new ServiceError(
-      "CONFLICT",
-      `Serial ${serial} already exists.`,
-      { legacySerialNumber: `Serial ${serial} already exists.` }
-    );
-  }
+  if (existing) throw serialTaken(serial, "legacySerialNumber", existing.deletedAt, reuseDeleted);
 
   const counter = await tx.serialCounter.findUniqueOrThrow({
     where: { org_id_prefix: { org_id: orgId, prefix } },
@@ -104,21 +115,16 @@ export async function correctSerialNumber(
   orgId: string,
   prefix: SerialPrefix,
   newNumber: number,
-  excludeVehicleId: string
+  excludeVehicleId: string,
+  reuseDeleted = false
 ): Promise<AssignedSerial> {
   const serial = `${prefix}${newNumber}`;
 
   const existing = await tx.vehicle.findUnique({
     where: { org_id_serial: { org_id: orgId, serial } },
-    select: { id: true },
+    select: { id: true, deletedAt: true },
   });
-  if (existing && existing.id !== excludeVehicleId) {
-    throw new ServiceError(
-      "CONFLICT",
-      `Serial ${serial} already exists.`,
-      { serialNumber: `Serial ${serial} already exists.` }
-    );
-  }
+  if (existing && existing.id !== excludeVehicleId) throw serialTaken(serial, "serialNumber", existing.deletedAt, reuseDeleted);
 
   const counter = await tx.serialCounter.findUniqueOrThrow({
     where: { org_id_prefix: { org_id: orgId, prefix } },

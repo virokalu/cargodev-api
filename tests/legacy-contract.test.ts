@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type { FakePrisma } from "./helpers/fake-prisma.js";
 import { STAFF_PASSWORD, installFakeStorage, makeCtx, newContractWorld, removeFakeStorage, type Ctx } from "./helpers/staff-contract-examples.js";
 
-vi.setConfig({ testTimeout: 60_000 });
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 const state = vi.hoisted(() => {
   process.env["R2_PUBLIC_URL"] = "https://files.example.test";
   return { fake: undefined as unknown, sent: [] as Array<Array<Record<string, unknown>>> };
@@ -292,6 +292,13 @@ describe("pagination and list defaults (legacy lines 115-137, 253, 342)", () => 
     }
   });
 
+  it("exactly 17 sort keys are accepted (the 14 of the legacy document plus vesselName, deliveryDate and sellingPrice), nothing else", () => {
+    const expected = ["serial", "chassisNo", "model", "yom", "shipmentStatus", "purchaseDate", "etd", "eta", "destination", "docsArrivedDate", "nameChangeDeadline", "massoDate", "docSentDate", "recycleDate", "vesselName", "deliveryDate", "sellingPrice"];
+    expect([...SORT_KEYS].sort()).toEqual([...expected].sort());
+    for (const key of expected) expect(() => vehicleListQuerySchema.parse({ sort: key }), key).not.toThrow();
+    for (const bad of ["price", "id", "createdAt", "SERIAL", ""]) expect(() => vehicleListQuerySchema.parse({ sort: bad }), bad).toThrow();
+  });
+
   it("the notification and activity-log lists paginate the same way (default 1 and 50; 1 to 100)", async () => {
     const notifications = await call("MANAGER", "GET", "/api/v1/notifications");
     expect([notifications.body.data!["page"], notifications.body.data!["pageSize"]]).toEqual([1, 50]);
@@ -430,7 +437,7 @@ describe("device tokens (legacy lines 272-282)", () => {
 
 describe("the push payload `data` (legacy lines 289-307)", () => {
   const TOKEN = "ExponentPushToken[bbbbbbbbbbbbbbbbbbbbbb]";
-  const params = (over: Record<string, unknown> = {}) => ({ orgId: "org_test_a", event: "BOOKING_RECEIVED" as const, title: "Push check title", body: "FC102 now has a booking.", vehicleId: "v_fc_booked_future" as string | null, recipientUserIds: ["staff_mgr"], ...over });
+  const params = (over: Record<string, unknown> = {}) => ({ orgId: "org_test_a", event: "BOOKING_RECEIVED" as const, title: "Push check title", body: "FC102 now has a booking.", vehicleId: "v_fc_booked_future", recipientUserIds: ["staff_mgr"], ...over });
 
   beforeEach(() => {
     fake.seed("deviceToken", { id: "dt_1", org_id: "org_test_a", userId: "staff_mgr", expoPushToken: TOKEN });
@@ -456,7 +463,7 @@ describe("the push payload `data` (legacy lines 289-307)", () => {
   });
 
   it("a notification with no vehicle carries null vehicleId and null vehicleSerial (the keys stay)", async () => {
-    const p = params({ vehicleId: null });
+    const { vehicleId: _none, ...p } = params(); // no vehicle at all
     await emit(fake.client, p);
     notifyRealtime(p);
     await vi.waitFor(() => expect(state.sent).toHaveLength(1));

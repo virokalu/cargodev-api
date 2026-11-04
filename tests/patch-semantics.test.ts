@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type { FakePrisma } from "./helpers/fake-prisma.js";
 import { installFakeStorage, makeCtx, newContractWorld, removeFakeStorage, type Ctx } from "./helpers/staff-contract-examples.js";
 
-vi.setConfig({ testTimeout: 60_000 });
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 const state = vi.hoisted(() => {
   process.env["R2_PUBLIC_URL"] = "https://files.example.test";
   return { fake: undefined as unknown };

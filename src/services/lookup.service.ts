@@ -221,9 +221,9 @@ export async function getTransportCompanyById(orgId: string, id: string): Promis
 
 // ── Inspection Company (FC only) ────────────────────────────────────────
 
-export async function searchInspectionCompanies(orgId: string, query: string): Promise<LookupOption[]> {
+export async function searchInspectionCompanies(orgId: string, query: string, track?: TrackFilter): Promise<LookupOption[]> {
   return getPrisma().inspectionCompany.findMany({
-    where: { org_id: orgId, name: { contains: query, mode: "insensitive" } },
+    where: { org_id: orgId, name: { contains: query, mode: "insensitive" }, ...(track && { vehicles: usedByVehiclesIn(orgId, track) }) },
     select: { id: true, name: true },
     orderBy: { name: "asc" },
     take: SEARCH_LIMIT,
@@ -243,9 +243,9 @@ export async function getInspectionCompanyById(orgId: string, id: string): Promi
 
 // ── Inspection By (FC only) ──────────────────────────────────────────────
 
-export async function searchInspectionBy(orgId: string, query: string): Promise<LookupOption[]> {
+export async function searchInspectionBy(orgId: string, query: string, track?: TrackFilter): Promise<LookupOption[]> {
   return getPrisma().inspectionBy.findMany({
-    where: { org_id: orgId, name: { contains: query, mode: "insensitive" } },
+    where: { org_id: orgId, name: { contains: query, mode: "insensitive" }, ...(track && { vehicles: usedByVehiclesIn(orgId, track) }) },
     select: { id: true, name: true },
     orderBy: { name: "asc" },
     take: SEARCH_LIMIT,
@@ -334,9 +334,9 @@ export interface FreightAgentOption extends LookupOption {
 
 const FREIGHT_AGENT_SELECT = { id: true, name: true, offersRoro: true, offersContainer: true } as const;
 
-export async function listFreightAgents(orgId: string): Promise<FreightAgentOption[]> {
+export async function listFreightAgents(orgId: string, track?: TrackFilter): Promise<FreightAgentOption[]> {
   return getPrisma().freightAgent.findMany({
-    where: { org_id: orgId },
+    where: { org_id: orgId, ...(track && { vehicles: usedByVehiclesIn(orgId, track) }) },
     select: FREIGHT_AGENT_SELECT,
     orderBy: { name: "asc" },
   });
@@ -396,11 +396,11 @@ export async function listRowColourStatusesInUse(
   });
 }
 
-export async function listRowColourStatuses(orgId: string): Promise<
+export async function listRowColourStatuses(orgId: string, track?: TrackFilter): Promise<
   (LookupOption & { colour: string; transportCellOnly: boolean })[]
 > {
   return getPrisma().rowColourStatus.findMany({
-    where: { org_id: orgId },
+    where: { org_id: orgId, ...(track && { vehicles: usedByVehiclesIn(orgId, track) }) },
     select: { id: true, name: true, colour: true, transportCellOnly: true },
     orderBy: { name: "asc" },
   });

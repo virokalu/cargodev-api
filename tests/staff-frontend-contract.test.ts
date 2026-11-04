@@ -13,7 +13,7 @@ import type { FakePrisma } from "./helpers/fake-prisma.js";
 import { EXAMPLES, installFakeStorage, makeCtx, newContractWorld, removeFakeStorage } from "./helpers/staff-contract-examples.js";
 import { ROUTE_TABLE } from "./route-inventory.table.js";
 
-vi.setConfig({ testTimeout: 60_000 });
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 const state = vi.hoisted(() => {
   process.env["R2_PUBLIC_URL"] = "https://files.example.test";
@@ -307,6 +307,8 @@ describe("exposed response headers", () => {
     const line = DOC.split(/\r?\n/).find((l) => l.startsWith("**CORS.**")) ?? "";
     for (const header of CORS_EXPOSED_HEADERS) expect(line, header).toContain(`\`${header}\``);
     expect(DOC).toContain("`X-Request-Id`");
+    // written out on purpose: the expectation must not be derived from the code it checks
+    expect([...CORS_EXPOSED_HEADERS].sort()).toEqual(["Retry-After", "X-Contract-Version", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "X-Request-Id"]);
   });
 });
 

@@ -12,6 +12,7 @@ vi.mock("../src/lib/prisma.js", () => ({
 import { buildApp } from "../src/app.js";
 import { InMemoryEventBus, getEventBus, setEventBus, type EventBus } from "../src/lib/events.js";
 import { signAccessToken } from "../src/lib/mobile-jwt.js";
+import { CONTRACT_VERSION } from "../src/config/contract-version.js";
 
 type Role = "ADMINISTRATOR" | "MANAGER" | "OPERATOR" | "VIEWER";
 
@@ -159,6 +160,7 @@ describe("GET /notifications/stream: stream behaviour", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/event-stream");
     expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-contract-version")).toBe(CONTRACT_VERSION); // the stream carries the contract version too
     expect(res.headers.get("connection")).toBe("keep-alive");
     expect(res.headers.get("x-accel-buffering")).toBe("no");
     // Headers set before the stream was taken over (security headers) still arrive.

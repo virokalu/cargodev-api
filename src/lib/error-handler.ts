@@ -8,7 +8,7 @@ import { safeError } from "./redact.js";
 
 export function errorHandler(error: FastifyError | Error, request: FastifyRequest, reply: FastifyReply) {
   if (error instanceof ServiceError) {
-    return reply.status(HTTP_STATUS[error.code]).send(errorBody(error.code, error.message, error.fieldErrors));
+    return reply.status(HTTP_STATUS[error.code]).send(errorBody(error.code, error.message, error.fieldErrors, error.reason));
   }
 
   const statusCode = (error as FastifyError).statusCode;

@@ -223,6 +223,7 @@ export const EXAMPLES: Example[] = [
   get("vehicles.status-history", "VIEWER", "/api/v1/vehicles/FC102/status-history"),
   get("vehicles.filter-options", "VIEWER", "/api/v1/vehicles/filter-options"),
   get("vehicles.destinations", "VIEWER", "/api/v1/vehicles/destinations"),
+  get("vehicles.partner-names", "VIEWER", "/api/v1/vehicles/partner-names"),
   get("vehicles.check-chassis", "VIEWER", "/api/v1/vehicles/check-chassis?chassisNo=CHASSIS-AAA-1"),
   get("vehicles.next-serial", "VIEWER", "/api/v1/vehicles/next-serial?track=FC"),
 
@@ -237,6 +238,7 @@ export const EXAMPLES: Example[] = [
   send("vehicles.revert-to-local", "MANAGER", "POST", "/api/v1/vehicles/v_fl_to_export/revert-to-local", undefined),
   send("vehicles.serial", "ADMINISTRATOR", "PATCH", "/api/v1/vehicles/v_fc_pending/serial", { serialNumber: 150 }),
   send("vehicles.serial.conflict", "ADMINISTRATOR", "PATCH", "/api/v1/vehicles/v_fc_pending/serial", { serialNumber: 102 }, 409),
+  send("vehicles.serial.reused", "ADMINISTRATOR", "PATCH", "/api/v1/vehicles/v_fc_pending/serial", { serialNumber: 106 }, 409),
 
   // ---- milestones
   get("milestones.list", "VIEWER", "/api/v1/vehicles/FC102/milestones"),

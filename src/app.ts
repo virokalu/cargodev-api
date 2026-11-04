@@ -7,6 +7,7 @@ import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { effectiveClientIpSource, loadEnv } from "./config/env.js";
 import { registerTrustedForwarder } from "./lib/trusted-forwarder.js";
+import { CONTRACT_VERSION, CONTRACT_VERSION_HEADER } from "./config/contract-version.js";
 import { registerClientIpHeader, registerForwardingHeaderWarning } from "./lib/client-ip.js";
 import { errorHandler, notFoundHandler } from "./lib/error-handler.js";
 import { registerPostResponse } from "./lib/post-response.js";
@@ -101,7 +102,7 @@ export const GLOBAL_RATE_LIMIT = { max: 300, timeWindow: "1 minute" } as const;
 
 /** Response headers a browser script may read from a cross-origin answer (Access-Control-Expose-Headers). The rate limiter sends the
  * X-RateLimit-* trio on every answer and Retry-After on a 429; X-Request-Id names the request in the server log. */
-export const CORS_EXPOSED_HEADERS = ["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "X-Request-Id"] as const;
+export const CORS_EXPOSED_HEADERS = ["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "X-Request-Id", CONTRACT_VERSION_HEADER] as const;
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const env = loadEnv();
@@ -166,6 +167,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // Every response, success or error, carries no-store: the data is authenticated and org-scoped.
   app.addHook("onRequest", async (_request, reply) => {
     reply.header("Cache-Control", "no-store");
+  });
+  // The staff contract version on EVERY /api/v1 answer: success, error, 401, 404 and 429 (this hook runs before the rate limiter and
+  // the authentication, and also for an unknown route under the prefix).
+  app.addHook("onRequest", async (request, reply) => {
+    const path = request.url.split("?")[0] ?? "";
+    if (path === "/api/v1" || path.startsWith("/api/v1/")) reply.header(CONTRACT_VERSION_HEADER, CONTRACT_VERSION);
   });
   // The request id (the same value as reqId in the server log), so a support report can quote it.
   app.addHook("onRequest", async (request, reply) => {

@@ -23,7 +23,9 @@ export class ServiceError extends Error {
   constructor(
     public code: ServiceErrorCode,
     message: string,
-    public fieldErrors?: Record<string, string>
+    public fieldErrors?: Record<string, string>,
+    /** A machine-readable reason, sent ONLY on a 409 CONFLICT (for example SERIAL_PREVIOUSLY_USED). Ignored for every other code. */
+    public reason?: string
   ) {
     super(message);
     this.name = "ServiceError";

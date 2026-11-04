@@ -15,6 +15,8 @@ interface VehicleRow {
   id: string;
   org_id: string;
   serial: string;
+  /** Like the real column: null for a live vehicle, a date for a deleted one. */
+  deletedAt: Date | null;
 }
 
 type CounterKey = { org_id_prefix: { org_id: string; prefix: Prefix } };
@@ -63,7 +65,7 @@ export function createFakeSerialDb() {
     async findUnique(args: { where: VehicleKey; select?: { id: true } }) {
       const k = args.where.org_id_serial;
       const row = vehicles.find((v) => v.org_id === k.org_id && v.serial === k.serial);
-      return row ? { id: row.id } : null;
+      return row ? { id: row.id, deletedAt: row.deletedAt } : null;
     },
   };
 
@@ -74,8 +76,8 @@ export function createFakeSerialDb() {
     seedCounter(org_id: string, prefix: Prefix, lastNumber: number) {
       counters.push({ org_id, prefix, lastNumber });
     },
-    seedVehicle(org_id: string, id: string, serial: string) {
-      vehicles.push({ id, org_id, serial });
+    seedVehicle(org_id: string, id: string, serial: string, deletedAt: Date | null = null) {
+      vehicles.push({ id, org_id, serial, deletedAt });
     },
     lastNumber(org_id: string, prefix: Prefix): number | undefined {
       return counters.find((c) => c.org_id === org_id && c.prefix === prefix)?.lastNumber;

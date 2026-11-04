@@ -1,6 +1,6 @@
 # Staff frontend integration contract
 
-**Contract version:** 1.5.1 (2026-11-03). Staff zone: everything under `/api/v1`, plus the signed file links under `/f/v1`.
+**Contract version:** 1.7.0 (2026-11-04). Staff zone: everything under `/api/v1`, plus the signed file links under `/f/v1`.
 **Written for:** a frontend developer who has never seen this repository and is building the staff web app (Next.js) or the iOS staff app against this API.
 **Source of truth:** the code. This file is checked against the running routes by `tests/staff-frontend-contract.test.ts`: every JSON example below (a fenced block marked `example:<id>`) is compared, key for key, with what the real route returns for fake data, and every `/api/v1` route must appear here with the roles the code allows. If the test fails, this file or the code is wrong. `docs/api-contract.md` is the shorter reference for all zones; this file is the complete staff contract.
 
@@ -26,7 +26,7 @@ All values in examples are fake. `https://api.example.test` stands for the API's
 
 **Base address.** `https://api.example.test` (placeholder). Every path below starts with `/api/v1` unless stated.
 
-**Envelope.** Success: `{ "data": <payload> }`. Error: `{ "error": { "code", "message", "fieldErrors"? } }`. `fieldErrors` is an object of `field name -> one message`, present on validation problems and some conflicts. `message` is safe to show to a person; do not parse it, use `code` and the HTTP status.
+**Envelope.** Success: `{ "data": <payload> }`. Error: `{ "error": { "code", "message", "fieldErrors"? } }`. `fieldErrors` is an object of `field name -> one message`, present on validation problems and some conflicts. `message` is safe to show to a person; do not parse it, use `code` and the HTTP status. **`fieldErrors` values are always one string per field, never an array** (the same shape as the original mobile contract). A `409 CONFLICT` may also carry an optional `reason` string, a stable machine-readable cause (`SERIAL_PREVIOUSLY_USED`, `SERIAL_REUSE_NOT_ENABLED`; more may be added): it exists on a `409` only, and every other error is exactly `{ code, message, fieldErrors? }`. Show `message`; branch on `reason` only if you need to.
 
 | `code` | HTTP | Meaning for the UI |
 |---|---|---|
@@ -34,7 +34,7 @@ All values in examples are fake. `https://api.example.test` stands for the API's
 | `UNAUTHENTICATED` | 401 | No usable token, an expired token, or the account is no longer allowed in (deactivated, removed). Refresh once, then sign in again |
 | `FORBIDDEN` | 403 | The role may not do this, or the account is locked, or a refresh token is no good (see section 2) |
 | `NOT_FOUND` | 404 | No such thing, **or it belongs to another organisation** (never 403 for that), or the route does not exist (message `Route not found.`) |
-| `CONFLICT` | 409 | A concurrent or duplicate change (serial taken, a decision already made, a duplicate email or name). Reload and retry. Where a field is to blame the body carries `fieldErrors` keyed by that field (see below) |
+| `CONFLICT` | 409 | A concurrent or duplicate change (serial taken, a decision already made, a duplicate email or name). Reload and retry. May carry a `reason` (below). Where a field is to blame the body carries `fieldErrors` keyed by that field (see below) |
 | `RATE_LIMITED` | 429 | Too many requests. Wait `Retry-After` seconds |
 | `INTERNAL` | 500 | A bug or an outage. The message is always `Something went wrong.`; details are only in the server log |
 
@@ -116,6 +116,8 @@ Example (400):
 
 **Authentication.** `Authorization: Bearer <accessToken>` on every `/api/v1` call except `auth/login`, `auth/refresh` and `auth/logout`. Tokens never go in a URL.
 
+**Contract version.** Every answer under `/api/v1` (success, error, `401`, `404`, `429`) carries `X-Contract-Version: <version>`, the version at the top of this document (since 1.7.0). Compare it with the version your client was built for and warn or reload when it is newer. Browsers on an allowed origin can read it (see CORS below). The file links (`/f/v1`), the customer zone and the public website API do not send it.
+
 **Request id.** Every answer carries `X-Request-Id`, a random UUID the server makes for that request (a value you send is ignored). It is the `reqId` in the server log: quote it in a support report. Browsers on an allowed origin can read it (see CORS below). Since 1.1.0.
 
 **Rate limits and 429.** Per client address: 300 requests a minute overall; 10 a minute on each of `auth/login`, `auth/refresh`, `auth/logout`; 20 a minute on each of the two `device-tokens` calls; 60 a minute on `uploads/presign`; 30 a minute on the notification stream; 240 a minute on file links. A limited call answers `429` with `{ "error": { "code": "RATE_LIMITED", ... } }`, `Retry-After: <seconds>` and `X-RateLimit-Limit / -Remaining / -Reset` headers. A browser on an allowed origin **can** read these headers, and `X-Request-Id`, because the API lists them in `Access-Control-Expose-Headers` (since 1.1.0). Prefer `Retry-After` over a fixed wait. The limiter counts per client address, in the memory of one server instance; see section 9 for what that means behind a proxy or from a server-side caller.
@@ -131,7 +133,7 @@ An out-of-range page returns an empty `rows`, not an error. A `pageSize` above t
 
 **Other organisations.** Every query is limited to the organisation in your token. An id from another organisation behaves exactly like an id that does not exist: `404`, never `403`.
 
-**CORS.** The API answers cross-origin calls only for origins listed by the operator in `CORS_ALLOWED_ORIGINS` (never `*`). For an allowed origin it allows the methods `GET, POST, PATCH, PUT, DELETE, OPTIONS` and the request headers `Authorization` and `Content-Type`; it does not allow credentials (there are no cookies), sets no `Access-Control-Max-Age` (browsers re-send the preflight often) and exposes exactly these response headers to scripts: `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, `X-Request-Id`. **When a browser must call the API directly** (a single-page app, or the upload and notification-stream code in a Next.js client component), the app's origin must be on that list; ask the operator to add it. Calls made from a Next.js server (server actions, route handlers) are not browser calls and need no CORS entry, but see section 9 for the client-address effect. The direct upload to storage (section 6) is a separate CORS configuration on the storage bucket.
+**CORS.** The API answers cross-origin calls only for origins listed by the operator in `CORS_ALLOWED_ORIGINS` (never `*`). For an allowed origin it allows the methods `GET, POST, PATCH, PUT, DELETE, OPTIONS` and the request headers `Authorization` and `Content-Type`; it does not allow credentials (there are no cookies), sets no `Access-Control-Max-Age` (browsers re-send the preflight often) and exposes exactly these response headers to scripts: `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, `X-Request-Id`, `X-Contract-Version`. **When a browser must call the API directly** (a single-page app, or the upload and notification-stream code in a Next.js client component), the app's origin must be on that list; ask the operator to add it. Calls made from a Next.js server (server actions, route handlers) are not browser calls and need no CORS entry, but see section 9 for the client-address effect. The direct upload to storage (section 6) is a separate CORS configuration on the storage bucket.
 
 **Security headers.** Responses carry the standard helmet set (for example `X-Content-Type-Options: nosniff`, `Strict-Transport-Security`). JSON only; send `Content-Type: application/json` on bodies. Bodies larger than 1 MiB, malformed JSON and unsupported content types answer `400 VALIDATION` (`Invalid request.`).
 
@@ -245,7 +247,8 @@ Rules that matter for your client:
    - within **10 seconds** of the rotation it is treated as a client retry (for example a lost response): the call is refused with the `403` above and the live session is **left alone**;
    - after 10 seconds it is treated as theft: the call is refused and **every refresh token of that user is revoked** (all of the user's devices must sign in again).
 4. **Two refreshes at the same moment with the same token:** exactly one succeeds. The other answers the same `403`, and because it is inside the 10 seconds the session is not revoked. If your second request was a duplicate, discard its failure; the first one's new pair is the live one. (If your client lost the first response, sign in again.)
-5. Each refresh re-reads the user from the database: a deactivated account, or one without a role, is refused with the same `403`. The new access token carries the **current** role; the `user.role` in the answer is the one to show.
+5. **Use single-flight refresh.** Keep at most one refresh in flight per app (or per browser, across tabs): when an access token expires, the first request starts the refresh, every other request waits for that one and reuses its answer, and a retry never sends the same refresh token twice. The API deliberately does **not** answer a repeated refresh with the same new pair (that would make a stolen token safe to replay), so the client is responsible for not repeating it.
+6. Each refresh re-reads the user from the database: a deactivated account, or one without a role, is refused with the same `403`. The new access token carries the **current** role; the `user.role` in the answer is the one to show.
 
 Example (403):
 
@@ -403,6 +406,7 @@ Roles are exactly `ADMINISTRATOR | MANAGER | OPERATOR | VIEWER`, enforced on the
 | DELETE | `/api/v1/vehicles/:id/documents/:docId` | yes | yes | — | — |
 | GET | `/api/v1/vehicles/filter-options` | yes | yes | yes | yes |
 | GET | `/api/v1/vehicles/destinations` | yes | yes | yes | yes |
+| GET | `/api/v1/vehicles/partner-names` | yes | yes | yes | yes |
 | GET | `/api/v1/vehicles/:serial` | yes | yes | yes | yes |
 | GET | `/api/v1/vehicles/:serial/status-history` | yes | yes | yes | yes |
 | GET | `/api/v1/vehicles/:serial/milestones` | yes | yes | yes | yes |
@@ -492,7 +496,7 @@ Every endpoint below shows its allowed roles (from the code), its request, and i
 
 **Roles:** ADMINISTRATOR, MANAGER, OPERATOR, VIEWER
 
-The signed-in person. Use it to read the current role.
+The signed-in person. Use it to read the current role. `isSuperAdmin` (since 1.7.0) is `true` only for the account named exactly `Administrator` with the ADMINISTRATOR role: use it to show or hide the controls only that account may use (section 3). It is computed by the same server function that enforces the reserved-name rule. **It is for display only: every action is checked on the server again**, so never rely on it for security.
 
 Example (200):
 
@@ -503,7 +507,8 @@ Example (200):
     "name": "Example Manager",
     "email": "manager@example.test",
     "phone": "0770000000",
-    "role": "MANAGER"
+    "role": "MANAGER",
+    "isSuperAdmin": false
   }
 }
 ```
@@ -512,7 +517,7 @@ Example (200):
 
 **Roles:** ADMINISTRATOR, MANAGER, OPERATOR, VIEWER
 
-Body (a real PATCH, since 1.3.0): any of `{ "name": string (1-150), "email": string (valid, max 150, stored lower case), "phone": string|null (max 30) }`, at least one. **Only the fields you send change**; an absent field is left alone, and `phone: null` (or a blank string) clears the phone. Unknown fields and an empty body are `400`. Answers the same as `GET /profile`. `409 CONFLICT` with `fieldErrors.email` if another account has that email.
+Body (a real PATCH, since 1.3.0): any of `{ "name": string (1-150), "email": string (valid, max 150, stored lower case), "phone": string|null (max 30) }`, at least one. **Only the fields you send change**; an absent field is left alone, and `phone: null` (or a blank string) clears the phone. Unknown fields and an empty body are `400`. Answers the same as `GET /profile` (including `isSuperAdmin`). `409 CONFLICT` with `fieldErrors.email` if another account has that email.
 
 Example (200):
 
@@ -523,7 +528,8 @@ Example (200):
     "name": "Example Manager",
     "email": "manager@example.test",
     "phone": "0770000000",
-    "role": "MANAGER"
+    "role": "MANAGER",
+    "isSuperAdmin": false
   }
 }
 ```
@@ -724,7 +730,7 @@ Example (200):
 
 **Roles:** ADMINISTRATOR, MANAGER, OPERATOR, VIEWER
 
-Distinct destinations in use, alphabetical, for the destination filter. `{ "data": ["Country One", ...] }`.
+Distinct destinations in use, alphabetical, for the destination filter. `{ "data": ["Country One", ...] }`. Optional `track=FC|FL` (section 5.9): only destinations of non-deleted vehicles of that effective track; any other value is `400`.
 
 Example (200):
 
@@ -734,6 +740,23 @@ Example (200):
     "Country One",
     "Country Two",
     "Local Town"
+  ]
+}
+```
+
+#### GET /api/v1/vehicles/partner-names
+
+**Roles:** ADMINISTRATOR, MANAGER, OPERATOR, VIEWER
+
+The partner names for the partner filter (since 1.7.0). The "partner" is the vehicle field `partnerName` (text, up to 200 characters; set on FL vehicles that have a partnership). Distinct values from **non-deleted vehicles of your organisation** of the given **effective** track, trimmed of surrounding spaces, blanks dropped, sorted **without regard to case**, at most **500**. Query `track=FC|FL`, optional, **default `FL`**; any other value is `400 VALIDATION` with `fieldErrors.track`. Answer `{ "data": string[] }`; an empty list is `[]`. Another organisation's names are never returned.
+
+Example (200; the second name belongs to an FC vehicle converted to local, which behaves as FL):
+
+```json example:vehicles.partner-names 200
+{
+  "data": [
+    "Partner One",
+    "Partner Two"
   ]
 }
 ```
@@ -1003,7 +1026,8 @@ Create. Body fields (type; optional unless marked; empty strings and `null` clea
 |---|---|
 | `track` (required) | `"FC"` or `"FL"` |
 | `isLegacyEntry` (required) | boolean; `true` means you supply the serial number yourself |
-| `legacySerialNumber` | positive integer; required when `isLegacyEntry` is true |
+| `legacySerialNumber` | positive integer; required when `isLegacyEntry` is true. A serial that belongs to a **live** vehicle is `409` with `fieldErrors.legacySerialNumber`; one that belonged to a **deleted** vehicle is `409` with `reason: "SERIAL_PREVIOUSLY_USED"` (deleted serials are not handed out again) |
+| `reuseDeletedSerial` | boolean, optional, **administrator only**. A MANAGER who sends `true` gets `403 FORBIDDEN` (`fieldErrors.reuseDeletedSerial`) and nothing is created. For an administrator it asks to reuse a deleted vehicle's serial; **that is not enabled yet** (the database still forbids it until a migration is approved), so the answer is `409` with `reason: "SERIAL_REUSE_NOT_ENABLED"`. With a free serial the flag changes nothing. Automatically assigned serials never reuse a number |
 | `shipmentStatus` | `PENDING`, `BOOKING_RECEIVED` or `SHIPPED` (otherwise the server decides from the ETD) |
 | `chassisNo` (required) | string, 1-100 |
 | `brandId`, `modelId` (required) | ids |
@@ -1308,7 +1332,7 @@ See `revert-to-local`.
 
 **Roles:** ADMINISTRATOR
 
-Administrator correction. Body `{ "serialNumber": positive integer (max 999999999) }`; the prefix stays. Answers `{ "data": { "serial": "FC150" } }`. `409` with `fieldErrors.serialNumber` if another vehicle has that number.
+Administrator correction. Body `{ "serialNumber": positive integer (max 999999999), "reuseDeletedSerial"?: boolean }`; the prefix stays. Answers `{ "data": { "serial": "FC150" } }`. `409` with `fieldErrors.serialNumber` if another vehicle has that number. If the number belonged to a **deleted** vehicle the `409` also carries `reason: "SERIAL_PREVIOUSLY_USED"`; with `reuseDeletedSerial: true` it carries `reason: "SERIAL_REUSE_NOT_ENABLED"` (reuse is not enabled yet). A MANAGER cannot call this route at all (`403`).
 
 Example (200):
 
@@ -1333,6 +1357,20 @@ Example (409):
 }
 ```
 
+Example (409, the number belonged to a deleted vehicle):
+
+```json example:vehicles.serial.reused 409
+{
+  "error": {
+    "code": "CONFLICT",
+    "message": "Serial FC106 belonged to a deleted vehicle and is not reused.",
+    "fieldErrors": {
+      "serialNumber": "Serial FC106 belonged to a deleted vehicle and is not reused."
+    },
+    "reason": "SERIAL_PREVIOUSLY_USED"
+  }
+}
+```
 ### 5.5 Milestones
 
 #### GET /api/v1/vehicles/:serial/milestones
@@ -1366,17 +1404,17 @@ The **Shipment Timeline** of the vehicle detail screen (since 1.4.0): the steps 
 
 Each step is `{ key, label, completed, date }`; `date` is `null` while not completed, and always `null` for the two flag-based steps. The list is **not fixed**:
 
-| `key` | Shown | `completed` when | `date` |
-|---|---|---|---|
-| `AUCTION_BILL_PAID` | always | `auctionBillPaid` is `true` (`false` and `null` both show not completed here) | `null` |
-| `TRANSPORT_ASSIGNED` (label "Rikso Given") | always | a transport company is set | `null` |
-| `EC_RECEIVED` | always | an `EC` document exists | when the earliest EC document was added |
-| `INSPECTION_COMPLETED` | only once an `INSPECTION_REPORT` document exists | always | when the earliest report was added |
-| `LC_OPEN` | only when the destination is Sri Lanka or Bangladesh | an LC number is set | `null` |
-| `BOOKING_RECEIVED` | always | an ETD is set | when the ETD was saved (falls back to the ETD) |
-| `LOADED` | only for `CONTAINER` shipments | the vanning date has passed | the vanning date |
-| `SHIPPED` | always | the ETD has passed | the ETD |
-| `DELIVERED` | always | the ETA has passed | the ETA |
+| `key` | `label` | Shown | `completed` when | `date` |
+|---|---|---|---|---|
+| `AUCTION_BILL_PAID` | Auction Bill Paid | always | `auctionBillPaid` is `true` (`false` and `null` both show not completed here) | `null` |
+| `TRANSPORT_ASSIGNED` | Rikso Given | always | a transport company is set | `null` |
+| `EC_RECEIVED` | EC Received | always | an `EC` document exists | when the earliest EC document was added |
+| `INSPECTION_COMPLETED` | Inspection Completed | only once an `INSPECTION_REPORT` document exists | always | when the earliest report was added |
+| `LC_OPEN` | LC Open | only when the destination is Sri Lanka or Bangladesh | an LC number is set | `null` |
+| `BOOKING_RECEIVED` | Booking Received | always | an ETD is set | when the ETD was saved (falls back to the ETD) |
+| `LOADED` | Loaded | only for `CONTAINER` shipments | the vanning date has passed | the vanning date |
+| `SHIPPED` | Shipped | always | the ETD has passed | the ETD |
+| `DELIVERED` | Delivered | always | the ETA has passed | the ETA |
 
 Example (200):
 
@@ -1871,7 +1909,7 @@ Example (200):
 
 **Roles:** ADMINISTRATOR, MANAGER, OPERATOR, VIEWER
 
-Query `q` (max 200, default empty). At most 20 results, name order, for a customer picker. Same for every role.
+Query `q` (max 200, default empty) and the optional `track=FC|FL` of section 5.9 (customers who own a non-deleted vehicle of that effective track; `400` for any other value). At most 20 results, name order, for a customer picker. Same for every role.
 
 Example (200):
 
@@ -1952,6 +1990,7 @@ Example (200):
 Resources: `brands`, `auction-halls`, `suppliers`, `transport-companies`, `inspection-companies`, `inspection-by`, `packing-agents`, `vehicle-locations` (all `{ id, name }`), `models` (needs `brandId`), `grades` (needs `modelId`), `freight-agents` (`{ id, name, offersRoro, offersContainer }`) and the read-only `row-colour-statuses`. For each resource `X`:
 
 - `GET /lookups/X?q=` , every role: case-insensitive partial match on the name, **at most 20 rows**, name order. `models` also requires `?brandId=`, `grades` requires `?modelId=` (`400` without it).
+- **Optional `track=FC|FL`** (since 1.7.0), on every `GET /lookups/X?q=` search above, on `GET /lookups/freight-agents`, `GET /lookups/freight-agents/search` and `GET /lookups/row-colour-statuses`, and also on `GET /customers/search` and `GET /vehicles/destinations`: when present, only values that at least one **non-deleted vehicle of that effective track** in your organisation actually uses are returned, so a filter never offers a value that would show an empty table. The track is the one the vehicle behaves as: an FL vehicle converted to export counts as FC, an FC vehicle converted to local counts as FL (the serial prefix is not used). `models` and `grades` still need their `brandId` / `modelId`, `q` and the 20-row limit apply as before, and the shape of every answer is unchanged. **Without `track` nothing changes: use that for forms, which need the full lists. Use `track` only in the filter bar.** Any other value (`ALL`, lower case, empty, `FC,FL`) is `400 VALIDATION` with `fieldErrors.track`.
 - `GET /lookups/X/:id`, every role: one row (use it to label a stored id).
 - `POST /lookups/X`, ADMINISTRATOR or MANAGER: body `{ "name": string }` (trimmed, 1-150). **Find-or-create:** a name that exists (case-insensitive) returns the existing row; the answer is `200` in both cases. `models` takes `{ "brandId", "name" }`, `grades` `{ "modelId", "name" }` (the parent must be yours, else `404`), `freight-agents` `{ "name", "offersRoro": boolean, "offersContainer": boolean }` (at least one flag true).
 - `PATCH /lookups/X/:id`, ADMINISTRATOR or MANAGER: same body; renames. `409` with `fieldErrors.name` if another row already has that name, including two renames to the same name at the same moment (since 1.5.0 the loser gets this `409`, not a `500`). Names are compared without regard to case when checking, so "Toyota" and "toyota" are the same name.
@@ -3906,7 +3945,7 @@ This section is built from this repository's own documents (`docs/implementation
 | Sessions | NextAuth cookie session in the browser | Bearer access token (20 minutes) plus a rotating refresh token (30 days). No cookies. Changing a password here revokes the API's refresh tokens but does **not** touch a separate old-app cookie session |
 | Failed sign-in | Web form collapsed every failure into a generic message | `400 VALIDATION` for a wrong password, `403 FORBIDDEN` for a locked account, both as JSON. **The original mobile API contract says the same** (`docs/legacy/mobile-api-reference.md`, lines 54-56) |
 | Refresh failures | `403` "Session expired. Please sign in again." for an unknown, expired, used or revoked token or a deactivated account (original contract, lines 67-69) | The same (section 2) |
-| Vehicle list default order | The original **mobile** contract says `serial` descending, track `FC` (`docs/legacy/mobile-api-reference.md` lines 126, 134-135). The old **web** screen is said to have opened by purchase date, newest first (`docs/implementation-plan.md`; that code is not in this repository) | **`serial` descending**, default track `FC`: the same as the original mobile contract. If the new screen should open by purchase date, send `sort=purchaseDate&dir=desc` explicitly. The default is held until the old route handler's behaviour is checked |
+| Vehicle list default order | The original **mobile** contract says `serial` descending, track `FC` (`docs/legacy/mobile-api-reference.md` lines 126, 134-135). The old **web** screen is said to have opened by purchase date, newest first (`docs/implementation-plan.md`; that code is not in this repository) | **`serial` descending**, default track `FC`, 17 sort keys: the same as the original mobile contract (decided; no change). If the new screen should open by purchase date, send `sort=purchaseDate&dir=desc` explicitly |
 | Create and update answers | *Unknown* (the old server actions' return values are not recorded here) | `POST /vehicles` and `PUT /vehicles/:id` return the detail shape of `GET /vehicles/:serial` (since 1.1.0) |
 | File addresses | A stored public address, later a presigned storage address, in `url` | A short-lived link on the API's own domain (section 6). Never stored |
 | Upload registration | The client sent the file's public address | The client sends the `key` the presign returned; the server builds the address |
@@ -4034,6 +4073,8 @@ Breaking changes are announced here before they ship. The test `tests/staff-fron
 
 | Version | Date | Change |
 |---|---|---|
+| 1.7.0 | 2026-11-04 | **Additive; with no new query parameter every existing answer is byte-for-byte the same** (except the new `isSuperAdmin` key of the profile): optional `track=FC\|FL` on the filter-bar lookups, `GET /customers/search`, `GET /vehicles/destinations` and `GET /lookups/row-colour-statuses` (only values used by non-deleted vehicles of that effective track; other values are `400`); new `GET /vehicles/partner-names`; `isSuperAdmin` on `GET` and `PATCH /profile`; the `X-Contract-Version` header on every `/api/v1` answer (also exposed to browsers). The timeline steps are listed in full (section 5.5) |
+| 1.6.0 | 2026-11-04 | **Additive:** an optional `reason` string on `409` errors only (`SERIAL_PREVIOUSLY_USED`, `SERIAL_REUSE_NOT_ENABLED`); an optional `reuseDeletedSerial` flag on `POST /vehicles` and `PATCH /vehicles/:id/serial` (a MANAGER who sends `true` gets `403`; reuse of a deleted serial is not enabled yet, so an administrator gets `409`); a deleted vehicle's serial is now reported as such instead of "already exists". `fieldErrors` is documented as one string per field. The default list order is confirmed as `serial` descending, track `FC` |
 | 1.5.1 | 2026-11-03 | Wording only: section 8 now cites the original mobile contract (`docs/legacy/mobile-api-reference.md`) for the sign-in and refresh statuses and the default list order, and `docs/legacy-parity-report.md` compares every legacy endpoint with this API. No behaviour changed |
 | 1.5.0 | 2026-11-03 | **Compatible fix:** every create or update with a unique key answers `409 CONFLICT` with a field error when two requests collide, never `500`: customer create and update (`fieldErrors.email`), staff create, update and own profile (`email`), lookup create and rename (`name`), vehicle create with a legacy serial (`legacySerialNumber`) and serial correction (`serialNumber`). Verified with concurrent requests against a real database |
 | 1.4.0 | 2026-11-01 | **Additive:** the vehicle detail (and the answers of `POST /vehicles` and `PUT /vehicles/:id`) gains `storedShipmentStatus`; its `shipmentStatus` is, and always was in the code, the effective value. New `GET /vehicles/:serial/timeline` (the derived Shipment Timeline of the detail screen). Documentation fix: 1.0.0 to 1.3.0 wrongly called the detail's `shipmentStatus` the stored value |

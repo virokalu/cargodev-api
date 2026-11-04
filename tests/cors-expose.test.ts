@@ -22,7 +22,7 @@ afterAll(async () => {
 const exposed = (headers: Record<string, unknown>) =>
   String(headers["access-control-expose-headers"] ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
 // Written out on purpose: the test must not derive its expectation from the code it checks.
-const WANTED = ["retry-after", "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset", "x-request-id"];
+const WANTED = ["retry-after", "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset", "x-request-id", "x-contract-version"];
 
 describe("Access-Control-Expose-Headers", () => {
   it.each([

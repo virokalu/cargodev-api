@@ -77,4 +77,6 @@ export const customerListQuerySchema = z.object({
 
 export const customerSearchQuerySchema = z.object({
   q: z.string().trim().max(200).default(""),
+  // Optional filter-bar parameter (FC or FL only); see validation/lookup.schema.ts trackQueryParam.
+  track: z.enum(["FC", "FL"], { error: "track must be FC or FL" }).optional(),
 });

@@ -223,6 +223,8 @@ export const vehicleCreateSchema = z
     track: z.enum(["FC", "FL"]),
     isLegacyEntry: z.boolean(),
     legacySerialNumber: z.number().int().positive().nullable().optional(),
+    // Administrator only (a MANAGER sending true is a 403): allow the legacy serial of a DELETED vehicle. See serial.service.ts serialTaken.
+    reuseDeletedSerial: z.boolean().optional(),
     // Only honoured by the service when isLegacyEntry && track === "FC" —
     // otherwise status stays derived from ETD (Tech Doc §1).
     shipmentStatus: z.enum(["PENDING", "BOOKING_RECEIVED", "SHIPPED"]).nullable().optional(),
@@ -412,12 +414,18 @@ export const convertToExportBodySchema = z.object({
   destination: z.string("destination is required").trim().min(1, "destination is required").max(200),
 });
 
+// GET /vehicles/partner-names: track is FC or FL and defaults to FL (partnerships are an FL thing); anything else is a 400.
+export const partnerNamesQuerySchema = z.object({
+  track: z.enum(["FC", "FL"], { error: "track must be FC or FL" }).default("FL"),
+});
+
 export const serialCorrectionBodySchema = z.object({
   serialNumber: z
     .number("serialNumber must be a number")
     .int("serialNumber must be a whole number")
     .positive("serialNumber must be positive")
     .max(999_999_999),
+  reuseDeletedSerial: z.boolean().optional(),
 });
 
 export const checkChassisQuerySchema = z.object({

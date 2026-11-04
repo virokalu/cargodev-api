@@ -9,6 +9,7 @@ import { ServiceError } from "../lib/errors.js";
 import { parseInput } from "../lib/parse.js";
 import { success } from "../lib/response.js";
 import * as lookups from "../services/lookup.service.js";
+import type { TrackFilter } from "../lib/vehicle-track.js";
 import {
   freightAgentBodySchema,
   gradeCreateBodySchema,
@@ -20,6 +21,7 @@ import {
   gradeSearchQuerySchema,
   lookupSearchQuerySchema,
   modelSearchQuerySchema,
+  trackOnlyQuerySchema,
 } from "../validation/lookup.schema.js";
 
 const CAN_WRITE_LOOKUPS = ["ADMINISTRATOR", "MANAGER"] as const;
@@ -27,7 +29,7 @@ const CAN_WRITE_LOOKUPS = ["ADMINISTRATOR", "MANAGER"] as const;
 interface SimpleLookup {
   path: string;
   label: string;
-  search: (orgId: string, query: string) => Promise<unknown[]>;
+  search: (orgId: string, query: string, track?: TrackFilter) => Promise<unknown[]>;
   byId: (orgId: string, id: string) => Promise<unknown | null>;
   create: (actor: SessionUser, name: string) => Promise<unknown>;
   rename: (actor: SessionUser, id: string, name: string) => Promise<unknown>;
@@ -106,8 +108,8 @@ export function registerLookupRoutes(app: FastifyInstance) {
 
   for (const lookup of SIMPLE_LOOKUPS) {
     app.get(`/lookups/${lookup.path}`, auth, async (request) => {
-      const { q } = parseInput(lookupSearchQuerySchema, request.query);
-      return success(await lookup.search(currentUser(request).orgId, q));
+      const { q, track } = parseInput(lookupSearchQuerySchema, request.query);
+      return success(await lookup.search(currentUser(request).orgId, q, track));
     });
 
     app.get<{ Params: { id: string } }>(`/lookups/${lookup.path}/:id`, auth, async (request) => {
@@ -129,8 +131,8 @@ export function registerLookupRoutes(app: FastifyInstance) {
 
   // Models belong to a brand, grades to a model.
   app.get("/lookups/models", auth, async (request) => {
-    const { brandId, q } = parseInput(modelSearchQuerySchema, request.query);
-    return success(await lookups.searchModels(currentUser(request).orgId, brandId, q));
+    const { brandId, q, track } = parseInput(modelSearchQuerySchema, request.query);
+    return success(await lookups.searchModels(currentUser(request).orgId, brandId, q, track));
   });
   app.get<{ Params: { id: string } }>("/lookups/models/:id", auth, async (request) => {
     const row = await lookups.getModelById(currentUser(request).orgId, request.params.id);
@@ -148,8 +150,8 @@ export function registerLookupRoutes(app: FastifyInstance) {
   });
 
   app.get("/lookups/grades", auth, async (request) => {
-    const { modelId, q } = parseInput(gradeSearchQuerySchema, request.query);
-    return success(await lookups.searchGrades(currentUser(request).orgId, modelId, q));
+    const { modelId, q, track } = parseInput(gradeSearchQuerySchema, request.query);
+    return success(await lookups.searchGrades(currentUser(request).orgId, modelId, q, track));
   });
   app.get<{ Params: { id: string } }>("/lookups/grades/:id", auth, async (request) => {
     const row = await lookups.getGradeById(currentUser(request).orgId, request.params.id);
@@ -178,12 +180,13 @@ export function registerLookupRoutes(app: FastifyInstance) {
   });
 
   // Freight agents: full list, search with an optional shipping-method filter, and by id.
-  app.get("/lookups/freight-agents", auth, async (request) =>
-    success(await lookups.listFreightAgents(currentUser(request).orgId))
-  );
+  app.get("/lookups/freight-agents", auth, async (request) => {
+    const { track } = parseInput(trackOnlyQuerySchema, request.query);
+    return success(await lookups.listFreightAgents(currentUser(request).orgId, track));
+  });
   app.get("/lookups/freight-agents/search", auth, async (request) => {
-    const { q, method } = parseInput(freightAgentSearchQuerySchema, request.query);
-    return success(await lookups.searchFreightAgents(currentUser(request).orgId, q, method));
+    const { q, method, track } = parseInput(freightAgentSearchQuerySchema, request.query);
+    return success(await lookups.searchFreightAgents(currentUser(request).orgId, q, method, track));
   });
   app.get<{ Params: { id: string } }>("/lookups/freight-agents/:id", auth, async (request) => {
     const row = await lookups.getFreightAgentById(currentUser(request).orgId, request.params.id);
@@ -191,7 +194,8 @@ export function registerLookupRoutes(app: FastifyInstance) {
     return success(row);
   });
 
-  app.get("/lookups/row-colour-statuses", auth, async (request) =>
-    success(await lookups.listRowColourStatuses(currentUser(request).orgId))
-  );
+  app.get("/lookups/row-colour-statuses", auth, async (request) => {
+    const { track } = parseInput(trackOnlyQuerySchema, request.query);
+    return success(await lookups.listRowColourStatuses(currentUser(request).orgId, track));
+  });
 }

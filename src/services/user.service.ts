@@ -343,6 +343,9 @@ export interface OwnProfile {
   email: string | null;
   phone: string | null;
   role: StaffRole;
+  /** For UI gating only (show or hide the controls only the super-admin account may use). Computed by isSuperAdmin(), the SAME function
+   * that enforces the reserved name rule; every authorization is still decided on the server. */
+  isSuperAdmin: boolean;
 }
 
 const OWN_PROFILE_SELECT = {
@@ -352,6 +355,10 @@ const OWN_PROFILE_SELECT = {
   phone: true,
   role: true,
 } satisfies Prisma.UserSelect;
+
+function withSuperAdminFlag(profile: Omit<OwnProfile, "isSuperAdmin">): OwnProfile {
+  return { ...profile, isSuperAdmin: isSuperAdmin(profile) };
+}
 
 export async function getOwnProfile(orgId: string, userId: string): Promise<OwnProfile> {
   const profile = await getPrisma().user.findFirst({
@@ -363,7 +370,7 @@ export async function getOwnProfile(orgId: string, userId: string): Promise<OwnP
   }
   // role is non-null here — every STAFF row has one; only customers don't,
   // and only STAFF users hold a session that can call this.
-  return profile as OwnProfile;
+  return withSuperAdminFlag(profile as Omit<OwnProfile, "isSuperAdmin">);
 }
 
 export async function updateOwnProfileDetails(
@@ -393,7 +400,7 @@ export async function updateOwnProfileDetails(
   const existing = await getOwnProfile(actor.orgId, actor.id);
 
   try {
-    return await getPrisma().$transaction(async (tx) => {
+    const result = await getPrisma().$transaction(async (tx) => {
       const written = await tx.user.updateMany({ where: { id: actor.id, org_id: actor.orgId }, data: { ...(input.name !== undefined ? { name: input.name } : {}), ...(input.email !== undefined ? { email: input.email } : {}), ...(input.phone !== undefined ? { phone: input.phone } : {}) } });
       if (written.count !== 1) throw new ServiceError("NOT_FOUND", "Profile not found.");
       const updated = await tx.user.findFirst({ where: { id: actor.id, org_id: actor.orgId }, select: OWN_PROFILE_SELECT });
@@ -409,8 +416,13 @@ export async function updateOwnProfileDetails(
         ...changedFields(existing, updated, ["name", "email", "phone"]),
       });
 
-      return updated as OwnProfile;
+      return withSuperAdminFlag(updated as Omit<OwnProfile, "isSuperAdmin">);
     });
+    // After the commit: the server's authorization reads the name (the super-admin rule is by name), so a rename applies on the very next
+    // request in this process instead of after the cache time. Without this the profile could say isSuperAdmin: false while the server
+    // still let the account act as the super-admin.
+    invalidateStaffAuth(actor.orgId, actor.id);
+    return result;
   } catch (error) {
     // @@unique([org_id, email]) — surfaced as a field error rather than a 500.
     if (isUniqueViolation(error)) {

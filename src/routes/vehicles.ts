@@ -11,6 +11,7 @@ import {
   getVehicleFilterOptions,
   getVehicleTimeline,
   listDistinctDestinations,
+  listDistinctPartnerNames,
   listVehicles,
   listVehicleStatusHistory,
   resolveVehicleIdBySerial,
@@ -26,6 +27,8 @@ import {
   setAuctionSheet,
 } from "../services/file.service.js";
 import { previewNextSerial } from "../services/serial.service.js";
+import { partnerNamesQuerySchema } from "../validation/vehicle.schema.js";
+import { trackOnlyQuerySchema } from "../validation/lookup.schema.js";
 import type { StaffRole } from "@prisma/client";
 import {
   auctionBillPaidBodySchema,
@@ -137,8 +140,8 @@ export function registerVehicleRoutes(app: FastifyInstance) {
 
   app.patch<IdParams>("/vehicles/:id/serial", { preHandler: authenticate(CAN_CORRECT_SERIAL) }, async (request) => {
     const user = currentUser(request);
-    const { serialNumber } = parseInput(serialCorrectionBodySchema, request.body, "Invalid request body.");
-    return success(await correctVehicleSerialNumber(user.orgId, user.id, request.params.id, serialNumber));
+    const { serialNumber, reuseDeletedSerial } = parseInput(serialCorrectionBodySchema, request.body, "Invalid request body.");
+    return success(await correctVehicleSerialNumber(user.orgId, user.id, request.params.id, serialNumber, reuseDeletedSerial === true));
   });
 
   app.get("/vehicles/check-chassis", auth, async (request) => {
@@ -192,9 +195,16 @@ export function registerVehicleRoutes(app: FastifyInstance) {
 
   app.get("/vehicles/filter-options", auth, async () => success(getVehicleFilterOptions()));
 
-  app.get("/vehicles/destinations", auth, async (request) =>
-    success(await listDistinctDestinations(currentUser(request).orgId))
-  );
+  app.get("/vehicles/destinations", auth, async (request) => {
+    const { track } = parseInput(trackOnlyQuerySchema, request.query);
+    return success(await listDistinctDestinations(currentUser(request).orgId, track));
+  });
+
+  // The partner behind "partnership" is Vehicle.partnerName (text, FL vehicles). Distinct, trimmed, sorted without regard to case, at most 500.
+  app.get("/vehicles/partner-names", auth, async (request) => {
+    const { track } = parseInput(partnerNamesQuerySchema, request.query);
+    return success(await listDistinctPartnerNames(currentUser(request).orgId, track));
+  });
 
   app.get<{ Params: { serial: string } }>("/vehicles/:serial", auth, async (request) => {
     const vehicle = await getVehicleDetail(currentUser(request).orgId, request.params.serial);

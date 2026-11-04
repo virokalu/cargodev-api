@@ -80,6 +80,16 @@ describe("assignLegacySerial", () => {
       fieldErrors: { legacySerialNumber: "Serial FC40 already exists." },
     });
     expect(fake.lastNumber(ORG_A, "FC")).toBe(100);
+    expect((error as ServiceError).reason).toBeUndefined(); // a live vehicle: a plain conflict
+  });
+
+  it("a deleted vehicle's serial: reason SERIAL_PREVIOUSLY_USED, or SERIAL_REUSE_NOT_ENABLED with the flag; the counter does not move", async () => {
+    fake.seedVehicle(ORG_A, "veh_gone", "FC41", new Date("2026-10-01T00:00:00Z"));
+    const plain = await assignLegacySerial(fake.tx, ORG_A, "FC", 41).catch((e: unknown) => e);
+    expect(plain).toMatchObject({ code: "CONFLICT", reason: "SERIAL_PREVIOUSLY_USED", fieldErrors: { legacySerialNumber: expect.any(String) } });
+    const flagged = await assignLegacySerial(fake.tx, ORG_A, "FC", 41, true).catch((e: unknown) => e);
+    expect(flagged).toMatchObject({ code: "CONFLICT", reason: "SERIAL_REUSE_NOT_ENABLED" });
+    expect(fake.lastNumber(ORG_A, "FC")).toBe(100);
   });
 });
 

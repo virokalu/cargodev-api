@@ -10,7 +10,7 @@ Compares the **original mobile API contract** (`docs/legacy/mobile-api-reference
 |---|---|
 | SAME | The current API does what the legacy document says |
 | ADDITIVE | The current API does more (a new endpoint, key, parameter or code); a client built to the legacy document is not broken by it, unless noted |
-| CHANGED | The current API behaves differently from what the legacy document says or implies; the effect on an old client is stated |
+| CHANGED (intentional) | The current API behaves differently from what the legacy document says or implies; the effect on an old client is stated |
 | MISSING | The legacy document describes it and the current API does not have it |
 | UNKNOWN | The legacy document does not say, so nothing can be compared; what is needed to settle it is stated |
 
@@ -26,7 +26,7 @@ The legacy document describes **response shapes only in outline**: it names a fe
 ## Summary
 
 - **Every legacy endpoint exists** under the same method and path: 54 of 54 (3 public auth routes, 51 staff routes). **MISSING: none.** Roles match the legacy document where it states them. [T] [C]
-- **CHANGED (5):** file `url` values; customer contact details for a VIEWER (two endpoints); role and deactivation checks on every request; `vehicleCount`; redaction in the activity log.
+- **CHANGED (intentional) (5), all kept by decision (2026-11-04):** file `url` values; customer contact details for a VIEWER (two endpoints); role and deactivation checks on every request; `vehicleCount`; redaction in the activity log.
 - **ADDITIVE:** the whole write side (the legacy API was read-only apart from notifications and device tokens), rate limits with a new `RATE_LIMITED` 429, `X-Request-Id`, exposed CORS headers, the notification stream, 409 now in use, and some extra keys and parameters.
 - **UNKNOWN:** most response key sets (the legacy document does not list them), a few messages, and whether the original refresh rotation revoked every session on reuse.
 
@@ -53,7 +53,7 @@ The legacy document describes **response shapes only in outline**: it names a fe
 | Logout | Body `{ refreshToken }`, `200 { loggedOut: true }`, idempotent (unknown or revoked token is still success) | The same, plus an optional `expoPushToken` in the body that also removes that device | SAME [T]; the extra field is ADDITIVE [C] `mobile-auth.service.ts:218` | |
 | Revoked when | Admin deactivation, or the password changed by the user or an admin | Both, and **also a role change** | SAME [T]; role change ADDITIVE [C] `user.service.ts:271` | An old client is signed out slightly more often |
 | The next refresh after either event | `403 FORBIDDEN` | `403 FORBIDDEN` | SAME [T] | |
-| Authorization checked against | A JWT verified locally, no database read per request ([P] section 4.2) | The role and the active flag are read from the database on every request (cached 30 seconds, cleared at once in the same process) | **CHANGED** [C] `staff-auth-state.service.ts` | A deactivated person, or one whose role was lowered, is stopped on the next request instead of when the access token expires (up to 20 minutes). Only stricter. A client sees `401` or `403` sooner |
+| Authorization checked against | A JWT verified locally, no database read per request ([P] section 4.2) | The role and the active flag are read from the database on every request (cached 30 seconds, cleared at once in the same process) | **CHANGED (intentional)** [C] `staff-auth-state.service.ts` | A deactivated person, or one whose role was lowered, is stopped on the next request instead of when the access token expires (up to 20 minutes). Only stricter. A client sees `401` or `403` sooner |
 | Customers | Cannot use this API | A customer token is refused with `401` on every staff route | SAME [T] (route inventory) | |
 
 ## 2. Envelope, error codes, caching (legacy lines 85-109, 349-359)
@@ -78,7 +78,7 @@ The legacy document describes **response shapes only in outline**: it names a fe
 |---|---|---|---|---|
 | `GET /vehicles` roles | Any staff role | Any staff role | SAME [T] | |
 | Parameters | `page`, `pageSize`, `track`, `q`, `status` (repeatable), `destination`, `customer`, `rowColour`, `rowColourNot`, `brand`, `model`, `grade`, `hall`, `supplier`, `agent`, `packingAgent`, `location`, `transport`, `currency`, `method`, `billPaid`, `logBook`, `extraKey`, `paidByCustomer`, `partnership`, `converted`, `etdFrom/To`, `etaFrom/To`, `sort`, `dir` | Every one is still accepted with the legacy values | SAME [T] | One extra parameter exists (`convertedLocal`): ADDITIVE [C] `vehicle.schema.ts` |
-| Defaults | `page` 1, `pageSize` 50, `track` `FC`, `sort` `serial`, `dir` `desc`, no filters | The same | SAME [T] | **Held** by decision: the default sort and track are not to change until the old route handler is checked. `docs/implementation-plan.md` says the old web code defaulted to `purchaseDate desc`; that is not what the legacy mobile document says |
+| Defaults | `page` 1, `pageSize` 50, `track` `FC`, `sort` `serial`, `dir` `desc`, no filters | The same | SAME [T] | **Decided: keep.** The default sort and track do not change, and all 17 sort keys are accepted (the 14 of the legacy document plus `vesselName`, `deliveryDate`, `sellingPrice`). `docs/implementation-plan.md` says the old *web* code defaulted to `purchaseDate desc`; that is not what the legacy mobile document says |
 | `pageSize` | 1 to 100 | 1 to 100; `0` and `101` are `400`, never clamped | SAME [T] | |
 | Invalid filter value | `400 VALIDATION` (not a silent fallback) | `400 VALIDATION` | SAME [T] | |
 | `status` values | `PENDING`, `BOOKING_RECEIVED`, `SHIPPED`, `CANCELLED` | The same, repeatable | SAME [T] | |
@@ -92,7 +92,7 @@ The legacy document describes **response shapes only in outline**: it names a fe
 | Detail keys | Not listed | 59 keys [D] | UNKNOWN | Needs the old detail type or one real old response |
 | **(a) Detail `shipmentStatus`: stored or effective?** | Not stated in the legacy document | Effective (a past ETD reads `SHIPPED`; a cancelled row colour reads `CANCELLED` on FC). New key `storedShipmentStatus` carries the stored value | Value: **UNKNOWN in the document**, and the ported service comment says the old detail already used the effective value ("Same computed guard on read the vehicles table uses", `vehicle.service.ts` in the first port commit, `f4837b8`), so SAME is the best reading. `storedShipmentStatus`: ADDITIVE [C] [T] | Needs the old route handler or one old response to be certain. A client reading only `shipmentStatus` is unaffected either way |
 | `GET /vehicles/:serial/status-history` | Chronological transitions; always empty for FL | Same path; FL returns `[]` | SAME [T] | Row keys UNKNOWN (current: `id`, `fromStatus`, `toStatus`, `triggerLabel`, `triggeredByName`, `createdAt` [D]) |
-| **(b) `GET /vehicles/:serial/files`** | `{ auctionSheetUrl, photos, documents }`, **"plain public R2 URLs (not presigned)"** | Same three top keys. **Every `url` is now a short-lived link on this API's own domain** (`/f/v1/...`, signed, 5 minutes by default, 15 at most). Each item gains `expiresAt`; the sheet gains `auctionSheetExpiresAt`; items also carry `uploaderName`, `createdAt` (documents also `name`, `documentType`) | **CHANGED** (values), ADDITIVE (keys) [D] | A client that stores or caches the `url`, or loads it after 5 minutes, gets a `404` (every failure is one identical `404`). It must refetch the list (cheap) and use the link right away. A client that only displays the link works. Nothing in the link reveals the storage host. See section 9 |
+| **(b) `GET /vehicles/:serial/files`** | `{ auctionSheetUrl, photos, documents }`, **"plain public R2 URLs (not presigned)"** | Same three top keys. **Every `url` is now a short-lived link on this API's own domain** (`/f/v1/...`, signed, 5 minutes by default, 15 at most). Each item gains `expiresAt`; the sheet gains `auctionSheetExpiresAt`; items also carry `uploaderName`, `createdAt` (documents also `name`, `documentType`) | **CHANGED (intentional)** (values), ADDITIVE (keys) [D] | A client that stores or caches the `url`, or loads it after 5 minutes, gets a `404` (every failure is one identical `404`). It must refetch the list (cheap) and use the link right away. A client that only displays the link works. Nothing in the link reveals the storage host. See section 9 |
 | `GET /vehicles/:serial/pdf-images` | Auction sheet and photos as base64 data URLs; "for parity with the web PDF export" | Same path; `{ auctionSheetDataUrl, photoDataUrls }` | UNKNOWN [D] | The legacy document gives no key names |
 
 ## 4. Customers (legacy lines 201-207)
@@ -100,8 +100,8 @@ The legacy document describes **response shapes only in outline**: it names a fe
 | Aspect | Legacy | Current | Mark | Effect / needed |
 |---|---|---|---|---|
 | `GET /customers?q=` | Full list with `vehicleCount`, "optionally filtered by name/email/phone"; any staff role | Same path; any staff role; rows `id, name, email, phone, country, address, createdAt, vehicleCount` | SAME for ADMINISTRATOR, MANAGER, OPERATOR [D] | Row keys beyond `vehicleCount` UNKNOWN in the legacy document |
-| **(d) Same, as a VIEWER** | Same as every other role (not stated otherwise) | **No `email`, `phone` or `address` keys at all** (absent, not null), and `q` matches the name only | **CHANGED** [T] [D] | A viewer client that shows or searches email and phone gets nothing: the column is empty and the search finds fewer people. By decision (a viewer must not see contact details). See section 9 |
-| `vehicleCount` | Not defined | Counts vehicles that are **not soft-deleted** | **CHANGED** (probably): the ported code counted soft-deleted vehicles [C] before this API's fix; the legacy document does not say | Counts can be lower than an old client showed. UNKNOWN whether the original counted deleted ones; needs the old query |
+| **(d) Same, as a VIEWER** | Same as every other role (not stated otherwise) | **No `email`, `phone` or `address` keys at all** (absent, not null), and `q` matches the name only | **CHANGED (intentional)** [T] [D] | A viewer client that shows or searches email and phone gets nothing: the column is empty and the search finds fewer people. By decision (a viewer must not see contact details). See section 9 |
+| `vehicleCount` | Not defined | Counts vehicles that are **not soft-deleted** | **CHANGED (intentional)**, confirmed: the first port commit (`fed2350`, 2026-10-24) counted every linked vehicle with `_count: { select: { vehicles: true } }` and no `deletedAt` filter, so the old query counted soft-deleted vehicles [C] | A customer's count is lower than an old client showed whenever some of their vehicles are deleted. It now equals the number of vehicles the customer can actually be shown elsewhere |
 | `GET /customers/search?q=` | `{ id, name }` results | Exactly `{ id, name }` | SAME [T] | |
 | `GET /customers/:id` | `{ id, name }`; `404` if not found | Exactly `{ id, name }`; `404` | SAME [T] | |
 | Write side | None | Create, update (now a real PATCH), login access, agent assignment | ADDITIVE | |
@@ -125,7 +125,7 @@ The legacy document describes **response shapes only in outline**: it names a fe
 | `GET /reports/by-customer`, `/by-auction-hall`, `/by-destination` | `track` is `FC` or `FL`, no `ALL`, default `FC` | The same; `ALL` is `400` | SAME [T] | |
 | `GET /reports/by-freight-agent` | No `track` | No `track` | SAME [T] | |
 | Report keys | Not listed | See [D] | UNKNOWN | Needs the old report types |
-| **(d) `by-customer` as a VIEWER** | Not stated | Groups have **no `email` or `phone`** keys | **CHANGED** [D] | As for customers: a viewer client expecting contact details gets none |
+| **(d) `by-customer` as a VIEWER** | Not stated | Groups have **no `email` or `phone`** keys | **CHANGED (intentional)** [D] | As for customers: a viewer client expecting contact details gets none |
 | `GET /dashboard/stats`, `/dashboard/trends` | No query params; KPI cards and breakdowns; four trend series (bookings vs arrivals, vehicles entered, cumulative growth, docs turnaround) | Four series present under `bookingsVsArrivals`, `vehiclesEntered`, `cumulativeGrowth`, `docsTurnaround` | SAME in substance [D]; exact keys UNKNOWN | |
 
 ## 7. Notifications, device tokens, push (legacy lines 247-307)
@@ -146,7 +146,7 @@ The legacy document describes **response shapes only in outline**: it names a fe
 
 | Aspect | Legacy | Current | Mark | Effect / needed |
 |---|---|---|---|---|
-| `GET /profile` | The caller's own profile, any role | Same; keys `id, name, email, phone, role` [D] | SAME; keys UNKNOWN in the legacy document | |
+| `GET /profile` | The caller's own profile, any role | Same; keys `id, name, email, phone, role` and, since contract 1.7.0, `isSuperAdmin` (display only) [D] | SAME; keys UNKNOWN in the legacy document; `isSuperAdmin` ADDITIVE | A client that ignores unknown keys is unaffected |
 | Profile write side | None | `PATCH /profile`, `POST /profile/password` | ADDITIVE | |
 | `GET /staff?q=` | Administrator or Manager only; `403` for Operator and Viewer | The same | SAME [T] | Row keys UNKNOWN (current: `id, name, email, phone, role, loginEnabled, lastActiveAt`) |
 | The `Administrator` row in the list | Not stated | Hidden from everyone except that account itself | UNKNOWN [C] | Needs the old Users page behaviour; a manager's list is one row shorter |
@@ -155,20 +155,20 @@ The legacy document describes **response shapes only in outline**: it names a fe
 | Filters response | `{ entities, actions }` | Exactly those keys | SAME [T] | |
 | List parameters | `page`, `pageSize` (1-100, 50), `entity`, `action` (partial, case-insensitive), `entityId`, `actorId`, `dateFrom`, `dateTo` | All accepted | SAME [T] | |
 | Row keys | `id, actorId, actorName, action, entity, entityId, before, after, createdAt` | Exactly those nine | SAME [T] | |
-| **Values of `before` and `after`** | The stored values | Any storage address, object key or file name is **redacted** on read; new entries about files hold only the file id, kind and name | **CHANGED** [C] `storage-redaction.ts` | An old client that showed a file address from the log shows a placeholder; the log is for who did what, not for fetching files |
+| **Values of `before` and `after`** | The stored values | Any storage address, object key or file name is **redacted** on read; new entries about files hold only the file id, kind and name | **CHANGED (intentional)** [C] `storage-redaction.ts` | An old client that showed a file address from the log shows a placeholder; the log is for who did what, not for fetching files |
 | `dateTo` | "Inclusive range" | Compared with `<=` at the instant given, so `dateTo=2026-11-03` stops at the start of that day | UNKNOWN [C] | The legacy wording could mean the whole day; needs the old query |
 
-## 9. The CHANGED rows, and what I recommend
+## 9. The CHANGED rows: decided, all kept (2026-11-04)
 
-None of these was changed back. Each needs your decision.
+All five are **CHANGED (intentional)**. Each is kept; none was restored.
 
-| # | What changed | Who it affects | Recommendation |
+| # | What changed | Decision | Effect on a client built to the legacy contract |
 |---|---|---|---|
-| 1 | File `url` values are short-lived signed links on this API's own domain (legacy: plain public R2 URLs) | Any mobile client that stores or reuses a file URL | **Version.** This is deliberate (ADR 0007) and closes public access to the bucket. Keep it, and tell the iOS app: load a link straight after fetching it and never persist it; the keys (`id`) are stable, the `url` is not. Do not restore public URLs |
-| 2 | A VIEWER gets no contact details in `GET /customers` and `GET /reports/by-customer`, and cannot search by them | A client with a viewer role | **Keep.** It is a decision about privacy, applied on the server. Tell the iOS app that the keys are absent for the VIEWER role and not to render those columns |
-| 3 | Role and active flag are checked against the database on every request (legacy: token only) | Everyone | **Keep.** It only makes access end sooner; nothing a legacy client did can now succeed that failed before. Expect a `401` or `403` earlier than the 20-minute token expiry |
-| 4 | `vehicleCount` excludes soft-deleted vehicles | Customer list screens | **Keep** (deleted vehicles are hidden everywhere else). Confirm with the old query whether the original counted them; if it did, this is a bug fix |
-| 5 | Activity log `before` and `after` are redacted for storage addresses | Anyone showing log details | **Keep.** Restoring raw values would put storage addresses back into a response |
+| 1 | File `url` values are short-lived signed links on this API's own domain (legacy: plain public R2 URLs) | **Keep, versioned** (ADR 0007; the staff contract is versioned and documents it). Clients must never store a `url` | A client that stores or reuses a file URL, or opens it after about 5 minutes (15 at most), gets one identical `404`. It must refetch `GET /vehicles/:serial/files` and use the link straight away. A client that only displays a link right after fetching it is unaffected. The ids are stable; the `url` is not |
+| 2 | A VIEWER gets no contact details in `GET /customers` and `GET /reports/by-customer`, and cannot search by them | **Keep** (privacy decision, enforced on the server) | For the VIEWER role the `email`, `phone` and `address` keys are **absent** (not null); `q` matches the name only. A client that renders those columns shows them empty or must hide them for that role. Other roles are unchanged |
+| 3 | Role and active flag are checked against the database on every request (legacy: token only) | **Keep** | Access ends on the next request after a deactivation or a role change instead of when the 20-minute token expires. An old client sees `401` or `403` earlier, never later. Nothing that failed before now succeeds |
+| 4 | `vehicleCount` excludes soft-deleted vehicles (the first port commit counted them) | **Keep** | The count shown for a customer can be lower than before whenever they have deleted vehicles |
+| 5 | Activity log `before` and `after` are redacted for storage addresses, keys and names **at read time** | **Keep** (redaction stays at read time, so old rows are covered too) | A client that showed a file address from the log shows a placeholder. The log tells who did what; it is not a way to fetch files |
 
 **MISSING:** none.
 
@@ -176,9 +176,9 @@ None of these was changed back. Each needs your decision.
 
 - Response key sets for the vehicle row, the detail, status history, files items, reports, dashboard, notification items, staff rows, device-token and profile answers: the old TypeScript types, or one old response of each. Until then these are treated as unchanged.
 - Detail `shipmentStatus` (stored or effective): the old route handler or one old response; the port comment suggests effective.
-- Refresh with a missing body (message and status), a deactivated account at sign-in, reuse of a rotated token later than 10 seconds (does the original revoke every session?), `vehicleCount`, the hidden `Administrator` row, and `dateTo` in the activity log: the old route handlers and services.
-- The default sort and track of the old **web** code (the legacy mobile document and this API agree on `serial` descending and `FC`): `lib/vehicle-list-url.ts` `VEHICLE_LIST_DEFAULTS` and the old `GET /vehicles` handler. Held by decision.
+- Refresh with a missing body (message and status), a deactivated account at sign-in, reuse of a rotated token later than 10 seconds (does the original revoke every session?), the hidden `Administrator` row, and `dateTo` in the activity log: the old route handlers and services.
+- Nothing about the default sort and track is open any more: the legacy mobile document and this API agree on `serial` descending and `FC`, and the decision is to keep them.
 
 ## 10. ADDITIVE, in one place
 
-The write side (create, update, delete and their routes for vehicles, files, milestones, customers, lookups, staff, profile, organization, FAQs, chat, stock, enquiries, release flags, link requests, admin job), the notification stream, rate limits and `RATE_LIMITED`, `X-Request-Id`, exposed CORS headers, `409` in use, `storedShipmentStatus`, `GET /vehicles/:serial/timeline`, `expiresAt` on file items, the optional `expoPushToken` on logout, the trusted forwarder headers, and the customer and public zones (separate prefixes, separate tokens). None of them changes a legacy route.
+The write side (create, update, delete and their routes for vehicles, files, milestones, customers, lookups, staff, profile, organization, FAQs, chat, stock, enquiries, release flags, link requests, admin job), the notification stream, rate limits and `RATE_LIMITED`, `X-Request-Id`, exposed CORS headers, `409` in use, `storedShipmentStatus`, `GET /vehicles/:serial/timeline`, `expiresAt` on file items, the optional `expoPushToken` on logout, the optional `reason` on `409` errors and the optional `reuseDeletedSerial` flag, the optional `track=FC|FL` on the filter-bar endpoints, `GET /vehicles/partner-names`, `isSuperAdmin` on the profile, the `X-Contract-Version` header on every answer, the trusted forwarder headers, and the customer and public zones (separate prefixes, separate tokens). None of them changes a legacy route.

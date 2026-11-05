@@ -488,15 +488,12 @@ async function assertNewFileKeys(
   if (input.auctionSheetKey) await check("auctionSheetKey", input.auctionSheetKey, "AUCTION_SHEET");
   for (const [i, key] of input.photoKeys.entries()) await check(`photoKeys.${i}`, key, "VEHICLE_PHOTO");
   for (const [i, doc] of input.documents.entries()) await check(`documents.${i}.key`, doc.key, "VEHICLE_DOCUMENT");
+  if (input.auctionSheetKey) await check("auctionSheetKey", input.auctionSheetKey, "AUCTION_SHEET");
+  for (const [i, key] of input.photoKeys.entries()) await check(`photoKeys.${i}`, key, "VEHICLE_PHOTO");
+  for (const [i, doc] of input.documents.entries()) await check(`documents.${i}.key`, doc.key, "VEHICLE_DOCUMENT");
   if (Object.keys(fieldErrors).length > 0) {
     throw new ServiceError("VALIDATION", "One or more files are not valid uploads.", fieldErrors);
   }
-}
-
-/** The vehicle as the activity log keeps it: the auction sheet is a file reference (id, kind, name), never the stored address. */
-function loggedVehicle(row: { id: string; auctionSheetUrl: string | null }): unknown {
-  const { auctionSheetUrl, ...rest } = row;
-  return { ...JSON.parse(JSON.stringify(rest)), auctionSheet: auctionSheetUrl ? fileReference("AUCTION_SHEET", row.id, auctionSheetUrl) : null };
 }
 
 /**

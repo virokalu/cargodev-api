@@ -4,6 +4,7 @@
 
 import { z } from "zod";
 import { hasInvalidAllowListEntry, parseAllowList } from "../lib/email-allow-list.js";
+import { hasInvalidAllowListEntry, parseAllowList } from "../lib/email-allow-list.js";
 
 // Not addresses: a client address is never read from these.
 const FORBIDDEN_IP_HEADERS = new Set(["authorization", "cookie", "set-cookie", "host", "content-type", "content-length", "user-agent", "origin", "referer", "accept"]);

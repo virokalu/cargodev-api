@@ -69,6 +69,8 @@ Read only by `npm run migrate` (`scripts/migrate.ts`), never by the app. See `do
 
 | Variable | Purpose |
 |---|---|
+| MIGRATION_EXPECTED_TARGET | Optional (tooling only, not read by the API). The project ref (or host) `npm run migrate -- deploy` may change; `deploy` stops on any other target. Set as a variable of the GitHub Environment `production` |
+| MIGRATION_REQUIRE_EXPECTED_TARGET | Optional (tooling only). `true` makes `deploy` stop when `MIGRATION_EXPECTED_TARGET` is not set. The production workflow sets it |
 | MIGRATION_DATABASE_URL | Optional. The database migrations run against, **direct (non-pooled)** connection. If unset, `DIRECT_URL` is used |
 | DIRECT_URL | Same name as in CargoDev: the direct connection used for migrations when `MIGRATION_DATABASE_URL` is not set. The app itself never reads it |
 

@@ -15,8 +15,7 @@ import {
   withReadOnlyOption,
   projectRefFromUrl,
   resolveMigrationTarget,
-  scanMigrationSql,
-} from "../scripts/migrate-tools.js";
+  scanMigrationSql, expectedTargetProblem } from "../scripts/migrate-tools.js";
 
 const root = path.resolve(import.meta.dirname, "..");
 const HOST = "db.test.example";
@@ -331,5 +330,25 @@ describe("drift helpers (fake data only)", () => {
     const drift = source.slice(source.indexOf('case "drift"'), source.indexOf('case "create"'));
     expect(drift).not.toMatch(/console\.\w+\([^;]*\burl\b/);
     expect(drift).toContain("redactConnectionStrings");
+  });
+});
+
+describe("expectedTargetProblem (the automated production run pins its database)", () => {
+  const supabase = resolveMigrationTarget({ MIGRATION_DATABASE_URL: "postgresql://user:password@db.exampleprojectref001.supabase.co:5432/postgres" });
+  const plain = resolveMigrationTarget({ MIGRATION_DATABASE_URL: "postgresql://user:password@db.example.test:5432/app" });
+  it("passes when nothing is named and nothing is required", () => {
+    expect(expectedTargetProblem({}, plain)).toBeNull();
+  });
+  it("stops when it is required and nothing is named", () => {
+    expect(expectedTargetProblem({ MIGRATION_REQUIRE_EXPECTED_TARGET: "true" }, plain)).toMatch(/not set/);
+  });
+  it("matches the project ref of a Supabase URL, else the host, ignoring case", () => {
+    expect(expectedTargetProblem({ MIGRATION_EXPECTED_TARGET: "EXAMPLEPROJECTREF001" }, supabase)).toBeNull();
+    expect(expectedTargetProblem({ MIGRATION_EXPECTED_TARGET: "db.example.test" }, plain)).toBeNull();
+  });
+  it("stops on any other database, and the message carries no URL or password", () => {
+    const problem = expectedTargetProblem({ MIGRATION_EXPECTED_TARGET: "someotherprojectref" }, supabase);
+    expect(problem).toMatch(/not the one/);
+    expect(problem).not.toMatch(/postgres|:password@/);
   });
 });

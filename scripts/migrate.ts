@@ -4,6 +4,7 @@
 //   diff-script <name>  same, without a shadow database: diffs the database against schema.prisma (read-only)
 //   scan                print the SQL of every migration and scan it for unsafe changes
 //   deploy              scan, then apply pending migrations. NEVER run without the maintainer's approval for that run
+//                       (the GitHub Environment `production` is that approval; MIGRATION_EXPECTED_TARGET pins the database)
 //   status              read-only: target, what _prisma_migrations holds, pending migrations, scan result
 //   drift               read-only: compare the live database with prisma/schema.prisma (names only, no data)
 //
@@ -19,6 +20,7 @@ import pg from "pg";
 import {
   UnsafeMigrationTargetError,
   analyzeHistory,
+  expectedTargetProblem,
   buildPrismaEnv,
   parseApprovals,
   parseMigrateCommand,
@@ -203,6 +205,12 @@ async function main(): Promise<number> {
     }
 
     case "deploy": {
+      const wrongTarget = expectedTargetProblem(process.env, target);
+      if (wrongTarget) {
+        console.error(`
+STOPPED. ${wrongTarget}`);
+        return 1;
+      }
       const all = migrationNames();
       const { pending, stops } = reportTarget(await inspectTarget(target), all);
       if (stops.length > 0) {

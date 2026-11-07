@@ -1,0 +1,132 @@
+name: Migrate production
+
+# Release to PRODUCTION: on every push to `main` it applies new database migrations (after a human approval) and then starts the API deploy.
+# It can also be started by hand (workflow_dispatch). The Render service must keep `autoDeploy: false`; this workflow starts the deploy, so
+# the order is always: migration first, API second.
+#
+#   push to main, no new migration  -> API deploy starts at once (same as autoDeploy did before)
+#   push to main, new migration     -> waits for the reviewer of the Environment `production`, applies the migration, then API deploy
+#
+# The approval is the GitHub Environment `production` (Settings > Environments): it must have a REQUIRED REVIEWER, and its deployment
+# branches must be limited to `main`. The migrate job does not start until the reviewer approves THIS run. By approving, the reviewer also
+# confirms that a backup of the production database exists (docs/runbook.md). The direct database address lives in that environment only.
+#
+# Environment `production` needs:
+#   secret    MIGRATION_DATABASE_URL     the direct (non-pooled) address of the production database
+#   variable  MIGRATION_EXPECTED_TARGET  the production project ref (or host); the run stops if the address points anywhere else
+# Repository secret (Settings > Secrets and variables > Actions):
+#   RENDER_DEPLOY_HOOK_URL               the deploy hook of the API service (a repository secret so that runs without a migration need no approval)
+#
+# A migration that the scan flags (DROP, RENAME, ...) is refused by `deploy` unless the maintainer listed it in
+# prisma/migrations/scan-approved.txt in a reviewed commit. The contract migration (docs/runbook.md) is such a case.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      backup_taken:
+        description: "I took a backup of the production database for this run (required for a manual run)"
+        type: boolean
+        required: true
+        default: false
+      deploy_api:
+        description: "After a successful migration, start the API deploy"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+# Never two runs at once, and a running migration is never cancelled half way. (GitHub keeps only the newest waiting run; the detect job
+# below compares with the last SUCCESSFUL run, so a skipped waiting run never hides a migration.)
+concurrency:
+  group: release-production
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: new migrations?
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      migrations: ${{ steps.diff.outputs.migrations }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual run: the migrate job always runs (deploy applies only what is pending)."
+            echo "migrations=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          base=$(gh api "repos/$REPO/actions/workflows/migrate-production.yml/runs?branch=main&status=success&per_page=1" --jq '.workflow_runs[0].head_sha // empty' || true)
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "No earlier successful run to compare with: treating this as a run with migrations (safe: it needs the approval)."
+            echo "migrations=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git diff --name-only "$base" "${{ github.sha }}" -- prisma/migrations | grep -q .; then
+            echo "Changed under prisma/migrations since $base:"; git diff --name-only "$base" "${{ github.sha }}" -- prisma/migrations
+            echo "migrations=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No change under prisma/migrations since the last successful run ($base)."
+            echo "migrations=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  migrate:
+    name: migrate production
+    needs: detect
+    if: github.ref == 'refs/heads/main' && needs.detect.outputs.migrations == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    env:
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      MIGRATION_EXPECTED_TARGET: ${{ vars.MIGRATION_EXPECTED_TARGET }}
+      MIGRATION_REQUIRE_EXPECTED_TARGET: "true"
+    steps:
+      - name: Backup confirmation (manual run)
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.backup_taken }}
+        run: |
+          echo "Stopped: tick 'backup_taken' when you start this workflow (docs/runbook.md, before any deploy)."
+          exit 1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # Read-only. Prints the target (host and project ref, never the password), what is applied, what is pending and the scan result.
+      - name: Status
+        run: npm run migrate -- status
+      - name: Drift (read-only)
+        run: npm run migrate -- drift
+      # Stops by itself on a wrong target, a broken history, or an unapproved scan finding. Prints the SQL of every pending migration.
+      - name: Deploy pending migrations
+        run: npm run migrate -- deploy
+      - name: Status after
+        run: npm run migrate -- status
+
+  deploy:
+    name: start the API deploy
+    needs: [detect, migrate]
+    # Runs when the migrate job succeeded or was not needed. Never after a failed, rejected or cancelled migration.
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.detect.result == 'success' && (needs.migrate.result == 'success' || needs.migrate.result == 'skipped') && (github.event_name == 'push' || inputs.deploy_api) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+    steps:
+      - run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then echo "RENDER_DEPLOY_HOOK_URL is not set as a repository secret; nothing started."; exit 1; fi
+          curl --fail --silent --show-error --max-time 30 -X POST "$RENDER_DEPLOY_HOOK_URL" > /dev/null
+          echo "API deploy requested."

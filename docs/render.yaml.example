@@ -15,7 +15,8 @@ services:
     healthCheckPath: /health
     # At least SHUTDOWN_TIMEOUT_MS (30 s) plus a margin for open streams, so SIGTERM is not followed by SIGKILL too early.
     maxShutdownDelaySeconds: 45
-    # Deploy on purpose (after the additive migration has been applied from the maintainer's laptop).
+    # Must stay false: the GitHub workflow "Migrate production" (docs/runbook.md) runs on every push to main, applies a new
+    # migration after the reviewer approves, and then calls this service's deploy hook. Auto-deploy would deploy before the migration.
     autoDeploy: false
     # No persistent disk: nothing is written locally (files live in object storage, data in the database).
     envVars:

@@ -7,10 +7,13 @@
 //   Notification         customers' alerts that are READ and older than RETENTION_ALERT_DAYS (staff notifications are untouched)
 //   Unverified accounts  self-registered customers who never verified their email within UNVERIFIED_ACCOUNT_DAYS and own nothing:
 //                        no vehicle, no chat, no link request. They are anonymised exactly like an account the customer
-//                        deleted (their name and address are gone, the row stays because the audit trail points at it)
+//                        deleted (their name and address are gone, the row stays because the audit trail points at it, and the
+//                        personal values in their activity-log rows are scrubbed: ADR 0010)
+//   Chats                conversations with no message for more than RETENTION_CHAT_DAYS days, with their messages. OFF by default
+//   Enquiries            website enquiries created more than RETENTION_ENQUIRY_DAYS days ago. OFF by default
 //
-// NOT touched, on purpose: chats (Conversation, Message) and enquiries. How long they are kept is an open question for the
-// business (docs/privacy-checklist.md).
+// Chats and enquiries hold personal messages and how long they are kept is a business decision (docs/privacy-checklist.md), so the two
+// settings default to 0 = NEVER delete. Only an operator who sets a number above 0 turns the deletion on, and it then obeys the dry run.
 //
 // DRY RUN (RETENTION_DRY_RUN, true unless set to false): the same queries run and the counts are returned, but NOTHING is
 // removed and no summary row is written. The deploy that adds retention therefore changes no data until it is switched on.
@@ -34,9 +37,21 @@ export interface RetentionCounts {
   refreshTokens: number;
   readAlerts: number;
   unverifiedAccounts: number;
+  chatConversations: number;
+  chatMessages: number;
+  enquiries: number;
 }
 
-export const NOTHING_REMOVED: RetentionCounts = { otpCodes: 0, customerSessions: 0, refreshTokens: 0, readAlerts: 0, unverifiedAccounts: 0 };
+export const NOTHING_REMOVED: RetentionCounts = {
+  otpCodes: 0,
+  customerSessions: 0,
+  refreshTokens: 0,
+  readAlerts: 0,
+  unverifiedAccounts: 0,
+  chatConversations: 0,
+  chatMessages: 0,
+  enquiries: 0,
+};
 
 const daysAgo = (now: Date, days: number) => new Date(now.getTime() - days * DAY_MS);
 
@@ -53,6 +68,9 @@ export async function runRetention(orgId: string, now: Date = new Date()): Promi
   const sessionCutoff = daysAgo(now, env.RETENTION_SESSION_DAYS);
   const alertCutoff = daysAgo(now, env.RETENTION_ALERT_DAYS);
   const unverifiedCutoff = daysAgo(now, env.UNVERIFIED_ACCOUNT_DAYS);
+  // 0 means "never": no cut-off at all, so nothing can match.
+  const chatCutoff = env.RETENTION_CHAT_DAYS > 0 ? daysAgo(now, env.RETENTION_CHAT_DAYS) : null;
+  const enquiryCutoff = env.RETENTION_ENQUIRY_DAYS > 0 ? daysAgo(now, env.RETENTION_ENQUIRY_DAYS) : null;
 
   const prisma = getPrisma();
   // The summary row needs a user to be attributed to (the audit trail points at a user). The org's oldest administrator stands in
@@ -65,12 +83,16 @@ export async function runRetention(orgId: string, now: Date = new Date()): Promi
   if (!actor && !dryRun) return { ...NOTHING_REMOVED, skipped: 1, dryRun };
 
   return prisma.$transaction(async (tx) => {
+    const chats = await removeIdleChats(tx, orgId, chatCutoff, dryRun);
     const counts: RetentionCounts = {
       otpCodes: await removeExpiredOtps(tx, orgId, otpCutoff, dryRun),
       customerSessions: await removeOldSessions(tx, orgId, sessionCutoff, "customerSession", dryRun),
       refreshTokens: await removeOldSessions(tx, orgId, sessionCutoff, "refreshToken", dryRun),
       readAlerts: await removeReadAlerts(tx, orgId, alertCutoff, dryRun),
-      unverifiedAccounts: await anonymiseUnverified(tx, orgId, unverifiedCutoff, now, dryRun),
+      unverifiedAccounts: await anonymiseUnverified(tx, orgId, unverifiedCutoff, now, dryRun, actor?.id ?? null),
+      chatConversations: chats.conversations,
+      chatMessages: chats.messages,
+      enquiries: await removeOldEnquiries(tx, orgId, enquiryCutoff, dryRun),
     };
 
     if (!dryRun && actor && Object.values(counts).some((n) => n > 0)) {
@@ -86,6 +108,29 @@ export async function runRetention(orgId: string, now: Date = new Date()): Promi
     }
     return { ...counts, skipped: 0, dryRun };
   });
+}
+
+/** Conversations idle for longer than the cut-off, with their messages. `cutoff` null (RETENTION_CHAT_DAYS = 0) removes nothing. At most RETENTION_BATCH conversations. */
+async function removeIdleChats(tx: Tx, orgId: string, cutoff: Date | null, dryRun: boolean): Promise<{ conversations: number; messages: number }> {
+  if (cutoff === null) return { conversations: 0, messages: 0 };
+  const rows = await tx.conversation.findMany({ where: { org_id: orgId, lastMessageAt: { lt: cutoff } }, select: { id: true }, orderBy: { lastMessageAt: "asc" }, take: RETENTION_BATCH });
+  if (rows.length === 0) return { conversations: 0, messages: 0 };
+  const ids = rows.map((r) => r.id);
+  const messages = await tx.message.count({ where: { org_id: orgId, conversationId: { in: ids } } });
+  if (dryRun) return { conversations: ids.length, messages };
+  // The messages are named explicitly (the foreign key would cascade anyway), so the count above is the count removed.
+  await tx.message.deleteMany({ where: { org_id: orgId, conversationId: { in: ids } } });
+  const removed = await tx.conversation.deleteMany({ where: { org_id: orgId, id: { in: ids } } });
+  return { conversations: removed.count, messages };
+}
+
+/** Website enquiries created before the cut-off. `cutoff` null (RETENTION_ENQUIRY_DAYS = 0) removes nothing. At most RETENTION_BATCH. */
+async function removeOldEnquiries(tx: Tx, orgId: string, cutoff: Date | null, dryRun: boolean): Promise<number> {
+  if (cutoff === null) return 0;
+  const rows = await tx.enquiry.findMany({ where: { org_id: orgId, createdAt: { lt: cutoff } }, select: { id: true }, orderBy: { createdAt: "asc" }, take: RETENTION_BATCH });
+  if (rows.length === 0) return 0;
+  if (dryRun) return rows.length;
+  return (await tx.enquiry.deleteMany({ where: { org_id: orgId, id: { in: rows.map((r) => r.id) } } })).count;
 }
 
 async function removeExpiredOtps(tx: Tx, orgId: string, cutoff: Date, dryRun: boolean): Promise<number> {
@@ -124,7 +169,7 @@ async function removeReadAlerts(tx: Tx, orgId: string, cutoff: Date, dryRun: boo
   return (await tx.notification.deleteMany({ where: { org_id: orgId, id: { in: rows.map((r) => r.id) } } })).count;
 }
 
-async function anonymiseUnverified(tx: Tx, orgId: string, cutoff: Date, now: Date, dryRun: boolean): Promise<number> {
+async function anonymiseUnverified(tx: Tx, orgId: string, cutoff: Date, now: Date, dryRun: boolean, actorId: string | null): Promise<number> {
   const candidates = await tx.user.findMany({
     where: {
       org_id: orgId,
@@ -157,5 +202,7 @@ async function anonymiseUnverified(tx: Tx, orgId: string, cutoff: Date, now: Dat
   await tx.deviceToken.deleteMany({ where: { org_id: orgId, userId: { in: ids } } });
   await tx.notification.deleteMany({ where: { org_id: orgId, userId: { in: ids } } });
   await tx.notificationPreference.deleteMany({ where: { org_id: orgId, userId: { in: ids } } });
+  // The same scrub as for an account the customer deleted (ADR 0010): the personal values in their activity-log rows.
+  if (actorId) await activityLog.scrubCustomerActivity(tx, { orgId, customerIds: ids, actorId });
   return anonymised.count;
 }

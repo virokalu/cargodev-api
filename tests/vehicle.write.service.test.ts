@@ -221,7 +221,7 @@ describe("deleteVehicle / conversions / quick edits", () => {
 describe("correctVehicleSerialNumber", () => {
   it("changes the number, keeps the prefix, bumps the counter up only", async () => {
     const result = await correctVehicleSerialNumber(ORG_A, "u", "v_fc_pending", 500);
-    expect(result).toEqual({ serial: "FC500" });
+    expect(result).toEqual({ serial: "FC500", serialReused: false });
     expect(row("v_fc_pending")).toMatchObject({ serial: "FC500", serialNumber: 500, serialPrefix: "FC" });
     const counter = () => fake.rows("serialCounter").find((c) => c["org_id"] === ORG_A && c["prefix"] === "FC")?.["lastNumber"];
     expect(counter()).toBe(500);
@@ -236,7 +236,7 @@ describe("correctVehicleSerialNumber", () => {
 
   it("allows a serial that only the OTHER org uses", async () => {
     // Org B has FC900; org A does not.
-    await expect(correctVehicleSerialNumber(ORG_A, "u", "v_fc_pending", 900)).resolves.toEqual({ serial: "FC900" });
+    await expect(correctVehicleSerialNumber(ORG_A, "u", "v_fc_pending", 900)).resolves.toEqual({ serial: "FC900", serialReused: false });
   });
 
   it.each([0, -1, 1.5, Number.NaN])("rejects %s", async (n) => {

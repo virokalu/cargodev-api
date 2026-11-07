@@ -8,7 +8,7 @@ app, future customer app) can use it without Next.js.
 
 ## Stack
 
-Node 20+, TypeScript (strict), Fastify, zod, jose (JWT), bcryptjs, Prisma + `@prisma/adapter-pg`,
+Node 24 (the version in `.nvmrc`; the Dockerfile and CI use it too), TypeScript (strict), Fastify, zod, jose (JWT), bcryptjs, Prisma + `@prisma/adapter-pg`,
 Vitest + supertest.
 
 ## Quick start (Windows / PowerShell)

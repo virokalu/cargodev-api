@@ -6,7 +6,7 @@ import { CUSTOMER_RATE_LIMITS, type CustomerLimitName } from "../config/customer
 import { identifierLimiter } from "../lib/identifier-limiter.js";
 import { success } from "../lib/response.js";
 import { currentCustomer, requireCustomer } from "../plugins/customer-auth.js";
-import { listCustomerConversations, listCustomerMessages, sendCustomerMessage, startConversation, suggestedQuestions } from "../services/chat.service.js";
+import { listCustomerConversations, listCustomerMessages, markCustomerConversationRead, sendCustomerMessage, startConversation, suggestedQuestions } from "../services/chat.service.js";
 
 const ipLimit = (name: CustomerLimitName) => ({
   config: { rateLimit: { max: CUSTOMER_RATE_LIMITS[name].ip.max, timeWindow: CUSTOMER_RATE_LIMITS[name].ip.windowMs } },
@@ -46,6 +46,11 @@ export function registerCustomerChatRoutes(app: FastifyInstance) {
   app.get<ConversationParams>("/conversations/:id/messages", route("read"), async (request, reply) => {
     limitCustomer("read", request, reply);
     return success(await listCustomerMessages(currentCustomer(request), request.params.id, request.query));
+  });
+
+  app.post<ConversationParams>("/conversations/:id/read", route("read"), async (request, reply) => {
+    limitCustomer("read", request, reply);
+    return success(await markCustomerConversationRead(currentCustomer(request), request.params.id));
   });
 
   app.post<ConversationParams>("/conversations/:id/messages", route("chatSend"), async (request, reply) => {

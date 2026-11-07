@@ -9,6 +9,7 @@
 // typed in any case reuses the existing row.
 
 import { getPrisma } from "../lib/prisma.js";
+import { isUniqueViolation } from "../lib/unique-violation.js";
 import { ServiceError } from "../lib/errors.js";
 import { buildTrackWhere, type TrackFilter } from "../lib/vehicle-track.js";
 import type { SessionUser } from "../lib/session-user.js";
@@ -220,9 +221,9 @@ export async function getTransportCompanyById(orgId: string, id: string): Promis
 
 // ── Inspection Company (FC only) ────────────────────────────────────────
 
-export async function searchInspectionCompanies(orgId: string, query: string): Promise<LookupOption[]> {
+export async function searchInspectionCompanies(orgId: string, query: string, track?: TrackFilter): Promise<LookupOption[]> {
   return getPrisma().inspectionCompany.findMany({
-    where: { org_id: orgId, name: { contains: query, mode: "insensitive" } },
+    where: { org_id: orgId, name: { contains: query, mode: "insensitive" }, ...(track && { vehicles: usedByVehiclesIn(orgId, track) }) },
     select: { id: true, name: true },
     orderBy: { name: "asc" },
     take: SEARCH_LIMIT,
@@ -242,9 +243,9 @@ export async function getInspectionCompanyById(orgId: string, id: string): Promi
 
 // ── Inspection By (FC only) ──────────────────────────────────────────────
 
-export async function searchInspectionBy(orgId: string, query: string): Promise<LookupOption[]> {
+export async function searchInspectionBy(orgId: string, query: string, track?: TrackFilter): Promise<LookupOption[]> {
   return getPrisma().inspectionBy.findMany({
-    where: { org_id: orgId, name: { contains: query, mode: "insensitive" } },
+    where: { org_id: orgId, name: { contains: query, mode: "insensitive" }, ...(track && { vehicles: usedByVehiclesIn(orgId, track) }) },
     select: { id: true, name: true },
     orderBy: { name: "asc" },
     take: SEARCH_LIMIT,
@@ -333,9 +334,9 @@ export interface FreightAgentOption extends LookupOption {
 
 const FREIGHT_AGENT_SELECT = { id: true, name: true, offersRoro: true, offersContainer: true } as const;
 
-export async function listFreightAgents(orgId: string): Promise<FreightAgentOption[]> {
+export async function listFreightAgents(orgId: string, track?: TrackFilter): Promise<FreightAgentOption[]> {
   return getPrisma().freightAgent.findMany({
-    where: { org_id: orgId },
+    where: { org_id: orgId, ...(track && { vehicles: usedByVehiclesIn(orgId, track) }) },
     select: FREIGHT_AGENT_SELECT,
     orderBy: { name: "asc" },
   });
@@ -395,11 +396,11 @@ export async function listRowColourStatusesInUse(
   });
 }
 
-export async function listRowColourStatuses(orgId: string): Promise<
+export async function listRowColourStatuses(orgId: string, track?: TrackFilter): Promise<
   (LookupOption & { colour: string; transportCellOnly: boolean })[]
 > {
   return getPrisma().rowColourStatus.findMany({
-    where: { org_id: orgId },
+    where: { org_id: orgId, ...(track && { vehicles: usedByVehiclesIn(orgId, track) }) },
     select: { id: true, name: true, colour: true, transportCellOnly: true },
     orderBy: { name: "asc" },
   });
@@ -426,10 +427,6 @@ function parseLookupName(name: string): string {
 
 function snapshot(row: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(row)) as Prisma.InputJsonValue;
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 }
 
 interface FindOrCreateSpec<T extends { id: string }> {
@@ -463,6 +460,7 @@ async function findOrCreateRow<T extends { id: string }>(spec: FindOrCreateSpec<
     if (isUniqueViolation(error)) {
       const winner = await spec.find(getPrisma());
       if (winner) return winner;
+      throw new ServiceError("CONFLICT", "That name is already in use.", { name: "Name already in use" });
     }
     throw error;
   }
@@ -491,7 +489,7 @@ async function renameRow<Row extends { org_id: string; name: string }, T extends
   const current = await spec.load(getPrisma());
   assertBelongsToOrg(spec.actor.orgId, current, spec.notFoundMessage);
   if (await spec.hasDuplicate(getPrisma(), current)) {
-    throw new ServiceError("CONFLICT", spec.conflictMessage);
+    throw new ServiceError("CONFLICT", spec.conflictMessage, { name: "Name already in use" });
   }
 
   try {
@@ -511,6 +509,8 @@ async function renameRow<Row extends { org_id: string; name: string }, T extends
   } catch (error) {
     // The update's own where carries org_id: no row of THIS org matched, so nothing was written.
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") throw new ServiceError("NOT_FOUND", spec.notFoundMessage);
+    // Two renames to the same name at once: the database lets one through.
+    if (isUniqueViolation(error)) throw new ServiceError("CONFLICT", spec.conflictMessage, { name: "Name already in use" });
     throw error;
   }
 }

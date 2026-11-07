@@ -2,6 +2,10 @@
 
 Source of truth for clients. Update this file in the same PR that changes behaviour.
 
+**Building a staff web or iOS app?** Read [staff-frontend-integration.md](staff-frontend-integration.md): the complete staff-zone contract (every `/api/v1` route with its roles, exact request fields, example responses, the sign-in and refresh rules, files, live updates, and the gaps), checked against the code by `tests/staff-frontend-contract.test.ts`. The customer app has [customer-app-integration.md](customer-app-integration.md) and the public website [website-integration.md](website-integration.md).
+
+**Already have a client built for the original mobile API?** [legacy-parity-report.md](legacy-parity-report.md) compares every endpoint of the original contract ([legacy/mobile-api-reference.md](legacy/mobile-api-reference.md)) with this API (same, additive, changed, unknown).
+
 ## Envelope
 
 Success: `{ "data": <payload> }`
@@ -57,7 +61,7 @@ Logout is idempotent. If `expoPushToken` is sent, that device token is removed, 
 | GET | /api/v1/customers/search?q= | any staff | done. `{ id, name }` only, for every role |
 | GET | /api/v1/customers/:id | any staff | done. `{ id, name }` only, for every role |
 | POST | /api/v1/customers | ADMINISTRATOR, MANAGER | done |
-| PATCH | /api/v1/customers/:id | ADMINISTRATOR, MANAGER | done |
+| PATCH | /api/v1/customers/:id | ADMINISTRATOR, MANAGER | done. **Partial update**: only the fields sent change (absent = unchanged, `null` or blank clears an optional field); unknown fields and an empty body are 400. The log records only changed fields |
 
 ### Staff and profile
 
@@ -65,10 +69,10 @@ Logout is idempotent. If `expoPushToken` is sent, that device token is removed, 
 |---|---|---|---|
 | GET | /api/v1/staff?q= | ADMINISTRATOR, MANAGER | done |
 | POST | /api/v1/staff | ADMINISTRATOR | done |
-| PATCH | /api/v1/staff/:id | ADMINISTRATOR | done |
+| PATCH | /api/v1/staff/:id | ADMINISTRATOR | done. **Partial update** (any of name, email, phone, role, active, password; at least one): absent = unchanged; blank or null password = unchanged; unknown fields and an empty body are 400 |
 | POST | /api/v1/staff/:id/active `{ "active": boolean }` | ADMINISTRATOR | done |
 | GET | /api/v1/profile | any staff | done |
-| PATCH | /api/v1/profile | any staff | done |
+| PATCH | /api/v1/profile | any staff | done. **Partial update** (any of name, email, phone; at least one): absent = unchanged, `phone: null` clears; unknown fields and an empty body are 400 |
 | POST | /api/v1/profile/password | any staff | done |
 | GET | /api/v1/organization | any staff | done |
 
@@ -146,11 +150,11 @@ Every write is scoped to the token's org by id; another org's, a deleted or an u
 | PATCH | /api/v1/vehicles/:id/auction-bill-paid | ADMINISTRATOR, MANAGER, OPERATOR | `{ "auctionBillPaid": true \| false \| null }`. The key is required; `null` means "not entered" |
 | POST | /api/v1/vehicles/:id/convert-to-export | ADMINISTRATOR, MANAGER | `{ "destination" }`. FL vehicles only |
 | POST | /api/v1/vehicles/:id/revert-to-local, /convert-to-local, /revert-to-export | ADMINISTRATOR, MANAGER | No body |
-| PATCH | /api/v1/vehicles/:id/serial | ADMINISTRATOR | `{ "serialNumber": positive integer }`. 409 `CONFLICT` if another vehicle has it |
+| PATCH | /api/v1/vehicles/:id/serial | ADMINISTRATOR | `{ "serialNumber": positive integer }`. Answers `{ serial, serialReused }`. 409 `CONFLICT` (with `fieldErrors.serial: "already in use"`) only if another **active** vehicle has it: the serial of a **deleted** vehicle is free (ADR 0009; `reuseDeletedSerial` is deprecated and ignored) |
 | GET | /api/v1/vehicles/check-chassis?chassisNo=&excludeId= | any staff | `{ duplicate }`. A warning only, never blocks a save |
 | GET | /api/v1/vehicles/next-serial?track=FC\|FL | any staff | `{ serial }`, a hint; the real number is assigned at save |
 
-Every id in a create or update body (model, grade, hall, supplier, customer, agents, locations, row colour, inspection) must belong to the caller's org, otherwise 400 with a field error. A 409 `CONFLICT` means the serial was taken by a concurrent save; retry.
+Every id in a create or update body (model, grade, hall, supplier, customer, agents, locations, row colour, inspection) must belong to the caller's org, otherwise 400 with a field error. A 409 `CONFLICT` means an **active** vehicle already has the serial (or it was taken by a concurrent save; retry). A serial held only by deleted vehicles is free and is assigned: the create answers with one more key, `serialReused` (ADR 0009, `docs/staff-frontend-integration.md` 1.8.0).
 
 ### Vehicle milestones (staff)
 
@@ -170,7 +174,7 @@ Automation records BOOKING_RECEIVED (when a vehicle enters that status) and SHIP
 |---|---|---|---|---|
 | POST | /api/v1/uploads/presign | ADMINISTRATOR, MANAGER, OPERATOR | `{ vehicleId?, kind: AUCTION_SHEET \| VEHICLE_PHOTO \| VEHICLE_DOCUMENT, fileName, contentType, fileSize }` | 200 `{ uploadUrl, key, expiresInSeconds: 300, headers: { "Content-Type" } }` |
 
-The vehicle must be the caller's org's (otherwise 404, and nothing is signed). The server builds the key (the client never chooses it): `org/<orgId>/vehicles/<vehicleId>/{photos|documents|auction-sheet}/<uuid>-<safe name>.<ext>`, or `org/<orgId>/uploads/staging/...` when there is no vehicle yet. The extension always comes from the signed content type, never from the file name. The link is signed for the exact size and type, valid 5 minutes. **Only these content types, matched exactly:** photos and auction sheets `image/jpeg`, `image/png`, `image/webp` (up to 10 MB); documents `application/pdf` (up to 20 MB). Anything else (svg, html, gif, "image/jpeg; charset=...", other casing) is a 400. Send the file with a PUT to `uploadUrl` using exactly the returned headers, then pass `publicUrl` to the add-photo / add-document / auction-sheet endpoints. 400 `File storage is not configured.` when storage is off.
+The vehicle must be the caller's org's (otherwise 404, and nothing is signed). The server builds the key (the client never chooses it): `org/<orgId>/vehicles/<vehicleId>/{photos|documents|auction-sheet}/<uuid>-<safe name>.<ext>`, or `org/<orgId>/uploads/staging/...` when there is no vehicle yet. The extension always comes from the signed content type, never from the file name. The link is signed for the exact size and type, valid 5 minutes. **Only these content types, matched exactly:** photos and auction sheets `image/jpeg`, `image/png`, `image/webp` (up to 10 MB); documents `application/pdf` (up to 20 MB). Anything else (svg, html, gif, "image/jpeg; charset=...", other casing) is a 400. Send the file with a PUT to `uploadUrl` using exactly the returned headers, then pass the returned `key` to the add-photo / add-document / auction-sheet endpoints (there is no public address in the answer). 400 `File storage is not configured.` when storage is off.
 
 ### Vehicle files
 
@@ -324,6 +328,7 @@ Plain text only; no attachments. A message is trimmed, 1 to 2000 characters, wit
 | GET | /conversations?page&pageSize | `{ rows: [{ id, vehicle: { id, serial } \| null, lastMessageAt, lastMessage: { senderType, snippet, createdAt } \| null }], total, page, pageSize }`. The vehicle is named only while the customer may still see it |
 | POST | /conversations | `{ vehicleId?, body }` -> 201 `{ conversation: { id, vehicleId }, message }`. A vehicle must be the customer's own and released (otherwise `404 Vehicle not found.`, the same for unknown, someone else's and unreleased). At most 50 conversations (409) and 10 new ones an hour |
 | GET | /conversations/:id/messages?page&pageSize | `{ rows: [{ id, senderType: "CUSTOMER" \| "STAFF", body, createdAt }], total, page, pageSize }`, newest first. Staff identity is never shown |
+| POST | /conversations/:id/read | no body -> `{ id, unreadCount: 0 }`. Marks the staff messages up to now as read. `GET /conversations` rows carry `unreadCount` (staff messages not yet read). Writes `MARK_CHAT_READ`. 60 a minute per IP and per customer (read limit) |
 | POST | /conversations/:id/messages | `{ body }` -> 201 the message. 15 a minute per customer (429 with Retry-After) |
 
 **Staff** (`/api/v1`; `CHAT_ROLES` = ADMINISTRATOR, MANAGER, OPERATOR; VIEWER is 403 on every chat route). **Scope** (`src/config/roles.ts`, FTJ decision): ADMINISTRATOR and MANAGER reach every conversation of their org; an OPERATOR reaches only conversations of customers whose `assignedAgentId` is that operator. The assignment, the user's `loginEnabled` and the user's CURRENT role are read from the database on every request, so reassigning a customer removes the old agent's access at once and a deactivated user has none (403). Anything out of scope (another agent's customer, an unassigned customer, another org's conversation, an unknown id) is the same `404 Conversation not found.` The scope applies to the inbox list, reading, replying and marking handled. Link request approval and rejection stay ADMINISTRATOR and MANAGER:
@@ -333,6 +338,7 @@ Plain text only; no attachments. A message is trimmed, 1 to 2000 characters, wit
 | GET | /chat/conversations?status=open\|handled\|all&page&pageSize | inbox, newest activity first: `{ rows: [{ id, customer: { id, name, companyName }, vehicle \| null, lastMessageAt, handled, lastMessage }], total, page, pageSize }` |
 | GET | /chat/conversations/:id/messages?page&pageSize | `{ conversation: { id, customer, vehicle, handled }, rows: [{ id, senderType, senderName \| null, body, createdAt }], total, page, pageSize }` |
 | POST | /chat/conversations/:id/messages | `{ body }` -> 201 the reply (writes ActivityLog `REPLY_CHAT_MESSAGE`, without the text) |
+| POST | /chat/conversations/:id/read | no body -> `{ id, unreadCount: 0 }`. Marks the customer messages up to now as read (one marker per conversation, shared by staff). Writes `MARK_CHAT_READ`. Inbox rows carry `unreadCount` |
 | POST | /chat/conversations/:id/handled | `{ handled: boolean }` -> `{ id, handled }` (`MARK_CONVERSATION_HANDLED` / `REOPEN_CONVERSATION`). A new customer message reopens it |
 
 **Who is told.** After the transaction commits, the other party only gets (1) a live `event: message` on their stream with `{ conversationId, messageId, senderType, createdAt }` (never the text; the client fetches it) and (2) at most one alert per burst (the first message, a change of sender, or a pause of more than 5 minutes) with a fixed text ("New message from <customer name>" for staff, "You have a new message from the CargoDev team." for the customer): no message text ever travels by push or email. Recipients are decided from the database at that moment: the customer's assigned agent if they are an active staff member of the org whose role may open chat; otherwise (no agent, or an agent who cannot open chat) the active administrators and managers. Never a user who could not open the conversation. The live event goes to the same people as the alert. A customer who switched off `CHAT_MESSAGE` alerts still gets the live message.
@@ -397,4 +403,4 @@ ARRIVED and DELIVERED are recorded by staff only; nothing sets them automaticall
 
 ## Known doc drift
 
-The vehicle list `sort` default in code is `purchaseDate desc`. Follow the code.
+The staff vehicle list `sort` default in code is `serial` with `dir=desc` (and `track=FC`); an earlier version of this line said `purchaseDate desc`, which is the old web screen's order, not this API's. Send `sort=purchaseDate&dir=desc` to get that order. The original mobile contract agrees with the code (`docs/legacy/mobile-api-reference.md` lines 126 and 134-135). See [staff-frontend-integration.md](staff-frontend-integration.md), section 1.

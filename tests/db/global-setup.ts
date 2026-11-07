@@ -4,6 +4,7 @@
 // only to the database that passed the safety guard.
 
 import { execFileSync } from "node:child_process";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -45,6 +46,18 @@ export function generateSchemaSql(testDatabaseUrl: string): string {
   return sql;
 }
 
+/**
+ * The hand-written migrations that prisma/schema.prisma cannot express (Prisma has no syntax for a partial unique index), applied after
+ * the generated schema so the test database has what production has after them. Today: the partial serial indexes of migration 1.
+ * Migration 2 is NOT here: it lives in prisma/pending-migrations and is applied only by the test that needs it.
+ */
+export function handWrittenMigrationSql(): string[] {
+  const dir = path.join(repoRoot, "prisma", "migrations");
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && /_vehicle_serial_active_unique$/.test(entry.name))
+    .map((entry) => readFileSync(path.join(dir, entry.name, "migration.sql"), "utf8"));
+}
+
 async function readSchemaState(client: pg.Client): Promise<SchemaState> {
   const tables = await client.query<{ n: string }>(
     "SELECT count(*)::text AS n FROM information_schema.tables WHERE table_schema = 'public'"
@@ -81,6 +94,7 @@ export default async function setup(): Promise<void> {
     // Only reached for an empty database or one this harness created earlier.
     await client.query("DROP SCHEMA IF EXISTS public CASCADE");
     await client.query(sql);
+    for (const extra of handWrittenMigrationSql()) await client.query(extra);
     await client.query(`COMMENT ON SCHEMA public IS '${HARNESS_SENTINEL}'`);
   } finally {
     await client.end();

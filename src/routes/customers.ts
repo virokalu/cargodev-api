@@ -25,8 +25,8 @@ export function registerCustomerRoutes(app: FastifyInstance) {
   });
 
   app.get("/customers/search", { preHandler: authenticate() }, async (request) => {
-    const { q } = parseInput(customerSearchQuerySchema, request.query);
-    return success(await searchCustomers(currentUser(request).orgId, q));
+    const { q, track } = parseInput(customerSearchQuerySchema, request.query);
+    return success(await searchCustomers(currentUser(request).orgId, q, track));
   });
 
   app.get<{ Params: { id: string } }>("/customers/:id", { preHandler: authenticate() }, async (request) => {

@@ -9,7 +9,9 @@ import { success } from "../lib/response.js";
 import {
   getVehicleDetail,
   getVehicleFilterOptions,
+  getVehicleTimeline,
   listDistinctDestinations,
+  listDistinctPartnerNames,
   listVehicles,
   listVehicleStatusHistory,
   resolveVehicleIdBySerial,
@@ -25,6 +27,8 @@ import {
   setAuctionSheet,
 } from "../services/file.service.js";
 import { previewNextSerial } from "../services/serial.service.js";
+import { partnerNamesQuerySchema } from "../validation/vehicle.schema.js";
+import { trackOnlyQuerySchema } from "../validation/lookup.schema.js";
 import type { StaffRole } from "@prisma/client";
 import {
   auctionBillPaidBodySchema,
@@ -39,12 +43,12 @@ import {
   convertVehicleToExport,
   convertVehicleToLocal,
   correctVehicleSerialNumber,
-  createVehicle,
+  createVehicleDetail,
   deleteVehicle,
   hasDuplicateChassisNo,
   revertVehicleToExport,
   revertVehicleToLocal,
-  updateVehicle,
+  updateVehicleDetail,
   updateVehicleAuctionBillPaid,
   updateVehicleRowColourStatus,
 } from "../services/vehicle.service.js";
@@ -86,12 +90,12 @@ export function registerVehicleRoutes(app: FastifyInstance) {
   type IdParams = { Params: { id: string } };
 
   app.post("/vehicles", manage, async (request, reply) =>
-    reply.status(201).send(success(await createVehicle(currentUser(request), request.body)))
+    reply.status(201).send(success(await createVehicleDetail(currentUser(request), request.body)))
   );
 
   // Full replace (PUT), not a partial patch: omitted optional fields are cleared.
   app.put<IdParams>("/vehicles/:id", manage, async (request) =>
-    success(await updateVehicle(currentUser(request), request.params.id, request.body))
+    success(await updateVehicleDetail(currentUser(request), request.params.id, request.body))
   );
 
   app.delete<IdParams>("/vehicles/:id", manage, async (request) => {
@@ -136,6 +140,7 @@ export function registerVehicleRoutes(app: FastifyInstance) {
 
   app.patch<IdParams>("/vehicles/:id/serial", { preHandler: authenticate(CAN_CORRECT_SERIAL) }, async (request) => {
     const user = currentUser(request);
+    // reuseDeletedSerial is DEPRECATED: it is still accepted by the schema and is ignored.
     const { serialNumber } = parseInput(serialCorrectionBodySchema, request.body, "Invalid request body.");
     return success(await correctVehicleSerialNumber(user.orgId, user.id, request.params.id, serialNumber));
   });
@@ -191,15 +196,26 @@ export function registerVehicleRoutes(app: FastifyInstance) {
 
   app.get("/vehicles/filter-options", auth, async () => success(getVehicleFilterOptions()));
 
-  app.get("/vehicles/destinations", auth, async (request) =>
-    success(await listDistinctDestinations(currentUser(request).orgId))
-  );
+  app.get("/vehicles/destinations", auth, async (request) => {
+    const { track } = parseInput(trackOnlyQuerySchema, request.query);
+    return success(await listDistinctDestinations(currentUser(request).orgId, track));
+  });
+
+  // The partner behind "partnership" is Vehicle.partnerName (text, FL vehicles). Distinct, trimmed, sorted without regard to case, at most 500.
+  app.get("/vehicles/partner-names", auth, async (request) => {
+    const { track } = parseInput(partnerNamesQuerySchema, request.query);
+    return success(await listDistinctPartnerNames(currentUser(request).orgId, track));
+  });
 
   app.get<{ Params: { serial: string } }>("/vehicles/:serial", auth, async (request) => {
     const vehicle = await getVehicleDetail(currentUser(request).orgId, request.params.serial);
     if (!vehicle) throw new ServiceError("NOT_FOUND", "Vehicle not found.");
     return success(vehicle);
   });
+
+  app.get<{ Params: { serial: string } }>("/vehicles/:serial/timeline", auth, async (request) =>
+    success(await getVehicleTimeline(currentUser(request).orgId, request.params.serial))
+  );
 
   app.get<{ Params: { serial: string } }>("/vehicles/:serial/status-history", auth, async (request) => {
     const { orgId } = currentUser(request);

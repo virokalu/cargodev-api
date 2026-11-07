@@ -38,7 +38,7 @@ CI runs both in the required `ci` job.
 The in-memory fake proves our logic. It cannot prove anything that depends on Postgres itself, so these tests run against a real one:
 
 - **NULL handling.** `{ not: id }` and a top-level `NOT` on a nullable column drop the NULL rows (SQL three-valued logic), while `NOT` over a relation filter keeps rows with no related row. Found while writing `null-semantics.db.test.ts`; it exposed a real bug in the row-colour filter.
-- **Serial numbers.** Parallel creates get distinct, gap-free serials; the counter never moves backwards under concurrent legacy entries; the unique constraints are the backstop.
+- **Serial numbers.** Parallel creates get distinct, gap-free serials; the counter never moves backwards under concurrent legacy entries; the unique constraints are the backstop. Serial uniqueness among non-deleted vehicles (free reuse, ADR 0009) is proven in `tests/db/serial-uniqueness.db.test.ts` in both database states (migration 1 only, then migration 2 applied by the test), including concurrent creates and corrections; the test harness applies migration 1 after building the schema (`handWrittenMigrationSql` in `tests/db/global-setup.ts`) because Prisma cannot express partial indexes.
 - **Advisory locks.** A second session is refused while the first holds the job lock, the lock is released on commit, rollback and a dying connection, and two scheduler instances run a job one at a time.
 - **Vehicle and dashboard SQL.** The effective-status filters, relation search and ordering, NULLs-first/last ordering, soft delete, org scoping, and that the dashboard's counts agree with the list each bar links to.
 
@@ -95,6 +95,22 @@ If you see "The database test harness refused to run", read the message: it says
 
 - `tests/deployment.test.ts`: the settings and their refusals (pool size, shutdown deadlines, client address source and header name), graceful shutdown (order, a second signal, a failing close, the deadline cutting off a hang, a real app sending `event: shutdown`), the pool size reaching the driver, the client address modes (socket ignores every forwarding header; hops; header mode with validation, fallback, one masked warning a minute, and rate-limit keys that follow the header), the database latency script with a fake client, and the container files (pinned tag, non-root, exec-form CMD, health check, `--ignore-scripts`, no `.env` copied, `.dockerignore`, the CI image job).
 - `tests/route-inventory.test.ts` with `tests/route-inventory.table.ts`: every registered route against one explicit table, in both directions, then 401 / cross-zone 401 / 403 per role for every non-public route, and the operator scope for chat.
+- `tests/staff-frontend-contract.test.ts` with `tests/helpers/staff-contract-examples.ts`: docs/staff-frontend-integration.md cannot drift. Every JSON example is compared, key set for key set, with what the real route returns for fake data; every `/api/v1` route needs a section and a role-matrix row that agree with the route inventory; the facts block and the forwarder example are recomputed from the code.
+- `tests/trusted-forwarder.test.ts`, `tests/trusted-forwarder-compare.test.ts`, `tests/forwarder-env.test.ts`: the trusted forwarder (ADR 0008), every verification step mutation-checked.
+- `tests/patch-semantics.test.ts`, `tests/vehicle-detail-status.test.ts`, `tests/cors-expose.test.ts`: PATCH semantics, the effective and stored status and the derived timeline, and the exposed response headers.
+- `tests/legacy-contract.test.ts`: the facts of the ORIGINAL mobile contract (`docs/legacy/mobile-api-reference.md`) that must not change, with fake data: the envelope and error codes, the sign-in and refresh statuses and the exact "Session expired. Please sign in again." message, logout, session revocation, the pagination bounds and list defaults, every legacy query parameter, the notification read behaviour, device tokens and the push `data` keys. `docs/legacy-parity-report.md` compares every legacy endpoint with the current API.
+- Real Postgres (`npm run test:db`): `tests/db/customer-list.db.test.ts` (vehicleCount excludes soft-deleted vehicles) and `tests/db/unique-violation.db.test.ts` (concurrent saves end in exactly one success and a 409).
+
+## Mutation checks: how to run them without hurting the repo
+
+A mutation check changes one rule on purpose and expects a test to fail. It must never change the real files, so it runs in a **mirror**, a separate copy of the project outside the repo. Rules (a stray `prisma generate` once replaced the repo's client because the mirror shared its `node_modules`):
+
+- The mirror has its **own copy of `node_modules`**, never a link or junction to the repo's. The runner refuses to start if it is a link.
+- **Never run `prisma generate`, `npm install` or any command that writes to `node_modules` from the repo's folder while pointing at the mirror, and never run `prisma generate` in the mirror at all.** The mirror's client was copied from the repo's; the schema is not mutated.
+- Only one rule is mutated at a time, the file is restored in a `finally`, and a mutant counts as killed only when the runner prints a failing test count. A run that prints no result counts as NOT killed.
+- Real-database mutants use a throwaway local database only (`TEST_DATABASE_URL`), and one batch at a time, because those tests reset the tables.
+- **After every mutation run, check the repo:** `npm run check:prisma-client` (it compares the schema copy inside the generated client with `prisma/schema.prisma`; exit 1 and a message if they differ, fixed by `npx prisma generate` in the repo). The runner does this itself and prints the result; also run `npm run typecheck`.
+
 
 ## Slice 7 tests
 
@@ -162,3 +178,11 @@ If `migrate dev` cannot create its shadow database, do not loosen permissions: u
 - `tests/viewer-privacy.test.ts`: a VIEWER gets customer list rows and by-customer report groups without email, phone and address (exact key sets, the keys absent), cannot find a customer by email or phone, and the other roles are unchanged.
 - Timing tests use a virtual clock (`tests/helpers/virtual-clock.ts`), not the wall clock: `Date` and `setTimeout` are faked and the clock jumps to the next timer whenever the request waits on one. A response floor of 120 ms is then exactly 120 virtual ms however busy the machine is (checked with twice as many busy loops as CPU cores), and a branch that waits for something extra (an inline email send) shows up as extra virtual time. Bcrypt work is checked by counting calls (`tests/login-enumeration.test.ts`, `tests/customer-zone.test.ts`).
 - The `org_id` scan (`tests/helpers/org-scan.ts`, used by `tests/org-scoped-writes.test.ts`) reads every `.ts` file under `src/` (new files are covered with no change), finds each Prisma call, and requires `org_id` at the TOP LEVEL of that call's own `where` (spreads, `AND` arrays and helper functions are followed; a nested `org_id` or `user.org_id` does not count). It covers writes and reads of tables with an `org_id` column; photos and documents must use `vehicle: { org_id }`. The few reads that are scoped another way are listed in the test with the reason.
+
+## Added with the chat, privacy and lookup work (2026-11-07)
+
+- `tests/chat-unread.test.ts`: unread counts and mark-read per side, scope and IDOR, marker never backwards, activity log.
+- `tests/activity-scrub.test.ts` and `tests/db/activity-scrub.db.test.ts`: the activity-log scrub (ADR 0010), on real Postgres too.
+- `tests/db/retention-chat.db.test.ts`: chat and enquiry retention (batch limit, dry run, org isolation).
+- `tests/lookup-case-report.test.ts` and `tests/db/lookup-case-index.db.test.ts`: the lookup-case duplicate check and the prepared unique indexes (applied inside a rolled-back transaction).
+- `tests/db/serial-uniqueness.db.test.ts`: serial uniqueness with the partial indexes, before and after the contract migration.

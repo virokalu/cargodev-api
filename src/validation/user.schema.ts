@@ -22,11 +22,11 @@ const optionalPassword = z
   .string()
   .nullable()
   .optional()
-  .transform((v) => (v && v.trim() !== "" ? v.trim() : null))
-  .refine((v) => v === null || v.length >= MIN_PASSWORD_LENGTH, {
+  .transform((v) => (v && v.trim() !== "" ? v.trim() : undefined))
+  .refine((v) => v === undefined || v.length >= MIN_PASSWORD_LENGTH, {
     message: `Must be at least ${MIN_PASSWORD_LENGTH} characters`,
   })
-  .refine((v) => v === null || fitsBcryptLimit(v), {
+  .refine((v) => v === undefined || fitsBcryptLimit(v), {
     message: `Must be ${MAX_PASSWORD_BYTES} bytes or fewer`,
   });
 
@@ -38,14 +38,26 @@ export const staffCreateSchema = z.object({
   password: newPassword,
 });
 
-export const staffUpdateSchema = z.object({
-  name,
-  email,
-  phone,
-  role,
-  active: z.boolean(),
-  password: optionalPassword,
-});
+// PATCH semantics: only the fields sent change (absent = unchanged; phone: explicit null or blank clears it); a blank or null password
+// leaves the password alone; unknown fields are a 400; an empty body is a 400.
+const patchPhone = z
+  .string()
+  .nullable()
+  .optional()
+  .transform((v) => (v === undefined ? undefined : v && v.trim() !== "" ? v.trim() : null))
+  .refine((v) => v === undefined || v === null || v.length <= 30, { message: "Must be 30 characters or fewer" });
+
+export const staffUpdateSchema = z
+  .object({
+    name: name.optional(),
+    email: email.optional(),
+    phone: patchPhone,
+    role: role.optional(),
+    active: z.boolean().optional(),
+    password: optionalPassword,
+  })
+  .strict()
+  .refine((v) => Object.values(v).some((x) => x !== undefined), { message: "Send at least one field to change" });
 
 export type StaffCreateInput = z.infer<typeof staffCreateSchema>;
 export type StaffUpdateInput = z.infer<typeof staffUpdateSchema>;

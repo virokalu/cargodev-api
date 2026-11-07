@@ -174,6 +174,7 @@ describe('routes marked "scoped to assigned customers"', () => {
         "GET /api/v1/chat/conversations/:id/messages",
         "POST /api/v1/chat/conversations/:id/handled",
         "POST /api/v1/chat/conversations/:id/messages",
+        "POST /api/v1/chat/conversations/:id/read",
       ].sort()
     );
     for (const e of scoped) expect(e.roles).toContain("OPERATOR");

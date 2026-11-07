@@ -419,6 +419,8 @@ export async function deleteCustomerAccount(customer: { id: string; orgId: strin
     }
     await tx.notification.deleteMany({ where: { org_id: customer.orgId, userId: user.id } });
     await tx.notificationPreference.deleteMany({ where: { org_id: customer.orgId, userId: user.id } });
+    // The personal values that staff edits left in the activity log go too (a deliberate exception to "append-only": ADR 0010).
+    await activityLog.scrubCustomerActivity(tx, { orgId: customer.orgId, customerIds: [user.id], actorId: user.id });
     await activityLog.record(tx, { orgId: customer.orgId, actorId: user.id, action: "CUSTOMER_DELETE_ACCOUNT", entity: "Customer", entityId: user.id });
   });
   return { deleted: true };

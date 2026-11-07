@@ -219,7 +219,7 @@ describe("batches, idempotence and the summary row", () => {
     await otp("o1", ORG_A, "cust_a", ago(40));
     await run();
     const second = await run();
-    expect([second.otpCodes, second.customerSessions, second.refreshTokens, second.readAlerts, second.unverifiedAccounts, second.skipped]).toEqual([0, 0, 0, 0, 0, 0]);
+    expect([second.otpCodes, second.customerSessions, second.refreshTokens, second.readAlerts, second.unverifiedAccounts, second.chatConversations, second.chatMessages, second.enquiries, second.skipped]).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0]);
     expect(await summaryRows()).toHaveLength(1);
   });
 
@@ -231,7 +231,7 @@ describe("batches, idempotence and the summary row", () => {
     const rows = await summaryRows();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ actorId: "admin_a", entity: "Retention", entityId: ORG_A });
-    expect(rows[0]?.after).toEqual({ otpCodes: 2, customerSessions: 1, refreshTokens: 0, readAlerts: 0, unverifiedAccounts: 0, system: true, job: "retention" });
+    expect(rows[0]?.after).toEqual({ otpCodes: 2, customerSessions: 1, refreshTokens: 0, readAlerts: 0, unverifiedAccounts: 0, chatConversations: 0, chatMessages: 0, enquiries: 0, system: true, job: "retention" });
     expect(JSON.stringify(rows[0])).not.toMatch(/example\.test|cust_a|Buyer/);
   });
 

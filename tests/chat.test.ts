@@ -113,6 +113,7 @@ describe("access", () => {
     ["POST", "/conversations", { body: "hi" }],
     ["GET", "/conversations/c1/messages"],
     ["POST", "/conversations/c1/messages", { body: "hi" }],
+    ["POST", "/conversations/c1/read"],
   ];
 
   it.each(CUSTOMER_ROUTES)("customer %s %s: 401 without a token, with a staff token and with garbage", async (method, path, body) => {
@@ -132,6 +133,7 @@ describe("access", () => {
     ["GET", "/chat/conversations/c1/messages"],
     ["POST", "/chat/conversations/c1/messages", { body: "hi" }],
     ["POST", "/chat/conversations/c1/handled", { handled: true }],
+    ["POST", "/chat/conversations/c1/read"],
   ];
 
   it("the chat roles are in one constant", () => {
@@ -626,7 +628,7 @@ describe("the staff inbox", () => {
     expect(data.total).toBe(2);
     expect(data.rows.map((r: { customer: { id: string } }) => r.customer.id)).toEqual(["cust_a2", "cust_a1"]);
     expect(data.rows[1]).toMatchObject({ id: first.id, vehicle: { id: "cv1", serial: "FC801" }, handled: false, lastMessage: { senderType: "CUSTOMER", snippet: "About the car" } });
-    expect(Object.keys(data.rows[0]).sort()).toEqual(["customer", "handled", "id", "lastMessage", "lastMessageAt", "vehicle"]);
+    expect(Object.keys(data.rows[0]).sort()).toEqual(["customer", "handled", "id", "lastMessage", "lastMessageAt", "unreadCount", "vehicle"]);
   });
 
   it("only this org's conversations: another org's are invisible and unreachable", async () => {

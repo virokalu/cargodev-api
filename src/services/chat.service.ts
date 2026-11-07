@@ -183,6 +183,34 @@ async function appendMessage(
   return { message: { id: row.id, senderType: row.senderType, body: row.body, createdAt: row.createdAt.toISOString() }, delivery };
 }
 
+/**
+ * Unread = messages of the OTHER side created after this side's read marker (null marker = never read, so all of them).
+ * The organisation and the conversation are always in the filter.
+ */
+async function countUnread(client: TxClient | ReturnType<typeof getPrisma>, orgId: string, conversationId: string, otherSide: Sender, readAt: Date | null): Promise<number> {
+  return client.message.count({
+    where: { org_id: orgId, conversationId, senderType: otherSide, ...(readAt ? { createdAt: { gt: readAt } } : {}) },
+  });
+}
+
+/** Moves a side's read marker forward to now (never backwards) and records it. Returns the unread count after (0). */
+async function markRead(
+  actor: { orgId: string; actorId: string; side: "customer" | "staff" },
+  conversationId: string
+): Promise<{ id: string; unreadCount: number }> {
+  const now = new Date();
+  const field = actor.side === "customer" ? "customerReadAt" : "staffReadAt";
+  await getPrisma().$transaction(async (tx) => {
+    await tx.conversation.updateMany({
+      where: { id: conversationId, org_id: actor.orgId, OR: [{ [field]: null }, { [field]: { lt: now } }] },
+      data: { [field]: now },
+    });
+    await activityLog.record(tx, { orgId: actor.orgId, actorId: actor.actorId, action: "MARK_CHAT_READ", entity: "Conversation", entityId: conversationId, after: { side: actor.side } });
+  });
+  // Messages that arrived in the same instant as the marker are not unread: the marker is "everything up to now".
+  return { id: conversationId, unreadCount: 0 };
+}
+
 // ---------------------------------------------------------------------------------------------
 // Customer
 
@@ -195,6 +223,8 @@ export interface CustomerConversation {
   vehicle: { id: string; serial: string } | null;
   lastMessageAt: string;
   lastMessage: { senderType: Sender; snippet: string; createdAt: string } | null;
+  /** Staff messages the customer has not read yet. */
+  unreadCount: number;
 }
 
 /** The customer's own conversations, most recent first. A vehicle is named only while the customer may still see it. */
@@ -209,7 +239,7 @@ export async function listCustomerConversations(customer: CustomerPrincipalLike,
       orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
       skip: (page - 1) * pageSize,
       take: pageSize,
-      select: { id: true, vehicleId: true, lastMessageAt: true },
+      select: { id: true, vehicleId: true, lastMessageAt: true, customerReadAt: true },
     }),
   ]);
 
@@ -232,9 +262,12 @@ export async function listCustomerConversations(customer: CustomerPrincipalLike,
     )
   );
 
+  const unread = await Promise.all(rows.map((row) => countUnread(prisma, customer.orgId, row.id, "STAFF", row.customerReadAt)));
+
   return {
     rows: rows.map((row, i) => ({
       id: row.id,
+      unreadCount: unread[i]!,
       vehicle: row.vehicleId && visible.has(row.vehicleId) ? { id: row.vehicleId, serial: visible.get(row.vehicleId)! } : null,
       lastMessageAt: row.lastMessageAt.toISOString(),
       lastMessage: last[i] ? { senderType: last[i]!.senderType, snippet: snippet(last[i]!.body), createdAt: last[i]!.createdAt.toISOString() } : null,
@@ -308,6 +341,12 @@ export async function listCustomerMessages(customer: CustomerPrincipalLike, conv
   return { rows: rows.map((m) => ({ id: m.id, senderType: m.senderType, body: m.body, createdAt: m.createdAt.toISOString() })), total, page, pageSize };
 }
 
+/** The customer opened the conversation: everything up to now is read. Another customer's conversation is a 404. */
+export async function markCustomerConversationRead(customer: CustomerPrincipalLike, conversationId: string): Promise<{ id: string; unreadCount: number }> {
+  const conversation = await ownConversation(customer, conversationId);
+  return markRead({ orgId: customer.orgId, actorId: customer.id, side: "customer" }, conversation.id);
+}
+
 export async function sendCustomerMessage(customer: CustomerPrincipalLike & { name: string }, conversationId: string, rawBody: unknown): Promise<MessageDto> {
   const { body } = parseInput(sendMessageBodySchema, rawBody, INVALID);
   const conversation = await ownConversation(customer, conversationId);
@@ -340,6 +379,8 @@ export interface InboxRow {
   lastMessageAt: string;
   handled: boolean;
   lastMessage: { senderType: Sender; snippet: string; createdAt: string } | null;
+  /** Customer messages no staff member has read yet (the marker is shared by all staff who can see the conversation). */
+  unreadCount: number;
 }
 
 export async function listInbox(actor: SessionUser, rawQuery: unknown): Promise<Page<InboxRow>> {
@@ -355,7 +396,7 @@ export async function listInbox(actor: SessionUser, rawQuery: unknown): Promise<
       orderBy: [{ lastMessageAt: "desc" }, { id: "desc" }],
       skip: (page - 1) * pageSize,
       take: pageSize,
-      select: { id: true, customerId: true, vehicleId: true, lastMessageAt: true, handledAt: true },
+      select: { id: true, customerId: true, vehicleId: true, lastMessageAt: true, handledAt: true, staffReadAt: true },
     }),
   ]);
 
@@ -374,6 +415,7 @@ export async function listInbox(actor: SessionUser, rawQuery: unknown): Promise<
       )
     ),
   ]);
+  const unread = await Promise.all(rows.map((row) => countUnread(prisma, orgId, row.id, "CUSTOMER", row.staffReadAt)));
   const customerById = new Map(customers.map((c) => [c.id, c]));
   const vehicleById = new Map(vehicles.map((v) => [v.id, v]));
 
@@ -387,6 +429,7 @@ export async function listInbox(actor: SessionUser, rawQuery: unknown): Promise<
         vehicle: vehicle ? { id: vehicle.id, serial: vehicle.serial } : null,
         lastMessageAt: row.lastMessageAt.toISOString(),
         handled: row.handledAt !== null,
+        unreadCount: unread[i]!,
         lastMessage: last[i] ? { senderType: last[i]!.senderType, snippet: snippet(last[i]!.body), createdAt: last[i]!.createdAt.toISOString() } : null,
       };
     }),
@@ -481,6 +524,12 @@ export async function replyAsStaff(actor: SessionUser, conversationId: string, r
   });
   publishDelivery(result.delivery);
   return result.message;
+}
+
+/** A staff member opened the conversation: customer messages up to now are read. Out of scope is the usual 404. */
+export async function markStaffConversationRead(actor: SessionUser, conversationId: string): Promise<{ id: string; unreadCount: number }> {
+  const conversation = await orgConversation(actor, conversationId);
+  return markRead({ orgId: actor.orgId, actorId: actor.id, side: "staff" }, conversation.id);
 }
 
 export async function setConversationHandled(actor: SessionUser, conversationId: string, rawBody: unknown): Promise<{ id: string; handled: boolean }> {

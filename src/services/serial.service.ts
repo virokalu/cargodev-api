@@ -11,6 +11,13 @@
 //      next *new* serial continues correctly; if lower, it just back-fills
 //      without touching the counter.
 //
+// A serial is unique among vehicles that are NOT soft-deleted (docs/adr/adr-0009-serial-uniqueness-among-active-vehicles.md): the
+// serial of a deleted vehicle is free again. Every check below therefore looks at ACTIVE vehicles only (deletedAt null), and when a
+// serial is taken that a deleted vehicle used to hold, the id of the most recent such vehicle is returned (reusedFromVehicleId) so
+// the activity log can say which vehicle it came from. The database enforces the same rule with two partial unique indexes
+// (migration 20261105120000), so two requests passing these checks together still end with exactly one winner. Auto-generated
+// serials never reuse a number: the counter only goes up.
+//
 // All functions take `tx` (a Prisma transaction client) — callers are
 // responsible for wrapping the counter update and the vehicle insert in the
 // same $transaction so the two never disagree.
@@ -24,6 +31,29 @@ type TxClient = Prisma.TransactionClient;
 export interface AssignedSerial {
   serialNumber: number;
   serial: string;
+  /** The id of the most recent DELETED vehicle that held this serial, or null (always null for an auto-generated serial). */
+  reusedFromVehicleId: string | null;
+}
+
+const SERIAL_IN_USE = "already in use";
+
+/**
+ * The 409 for a serial that an ACTIVE vehicle holds. `inputField` is the body field the client sent (legacySerialNumber on create,
+ * serialNumber on correction, kept so existing clients keep working); `serial` is the field error named by the contract.
+ */
+export function serialInUse(serial: string, inputField: string): ServiceError {
+  const message = `Serial ${serial} already exists.`;
+  return new ServiceError("CONFLICT", message, { [inputField]: message, serial: SERIAL_IN_USE });
+}
+
+/** The most recent DELETED vehicle of this org that held the serial (traceability only; it never blocks anything). */
+async function findDeletedHolder(tx: TxClient, orgId: string, serial: string): Promise<string | null> {
+  const row = await tx.vehicle.findFirst({
+    where: { org_id: orgId, serial, deletedAt: { not: null } },
+    orderBy: { deletedAt: "desc" },
+    select: { id: true },
+  });
+  return row?.id ?? null;
 }
 
 /**
@@ -51,7 +81,7 @@ export async function assignNextSerial(
     data: { lastNumber: { increment: 1 } },
   });
 
-  return { serialNumber: counter.lastNumber, serial: `${prefix}${counter.lastNumber}` };
+  return { serialNumber: counter.lastNumber, serial: `${prefix}${counter.lastNumber}`, reusedFromVehicleId: null };
 }
 
 /**
@@ -67,25 +97,22 @@ export async function assignLegacySerial(
 ): Promise<AssignedSerial> {
   const serial = `${prefix}${manualNumber}`;
 
-  const existing = await tx.vehicle.findUnique({
-    where: { org_id_serial: { org_id: orgId, serial } },
+  // Only an ACTIVE vehicle blocks the number; a deleted one has given it up.
+  const holder = await tx.vehicle.findFirst({
+    where: { org_id: orgId, serial, deletedAt: null },
     select: { id: true },
   });
-  if (existing) {
-    throw new ServiceError(
-      "CONFLICT",
-      `Serial ${serial} already exists.`,
-      { legacySerialNumber: `Serial ${serial} already exists.` }
-    );
-  }
+  if (holder) throw serialInUse(serial, "legacySerialNumber");
+  const reusedFromVehicleId = await findDeletedHolder(tx, orgId, serial);
 
   const counter = await tx.serialCounter.findUniqueOrThrow({
     where: { org_id_prefix: { org_id: orgId, prefix } },
   });
 
+  // lastNumber = max(lastNumber, entered): a reused LOWER number leaves the counter where it is.
   await bumpCounterTo(tx, orgId, prefix, manualNumber);
 
-  return { serialNumber: manualNumber, serial };
+  return { serialNumber: manualNumber, serial, reusedFromVehicleId };
 }
 
 /**
@@ -108,17 +135,13 @@ export async function correctSerialNumber(
 ): Promise<AssignedSerial> {
   const serial = `${prefix}${newNumber}`;
 
-  const existing = await tx.vehicle.findUnique({
-    where: { org_id_serial: { org_id: orgId, serial } },
+  // Only ANOTHER ACTIVE vehicle blocks the number.
+  const holder = await tx.vehicle.findFirst({
+    where: { org_id: orgId, serial, deletedAt: null, id: { not: excludeVehicleId } },
     select: { id: true },
   });
-  if (existing && existing.id !== excludeVehicleId) {
-    throw new ServiceError(
-      "CONFLICT",
-      `Serial ${serial} already exists.`,
-      { serialNumber: `Serial ${serial} already exists.` }
-    );
-  }
+  if (holder) throw serialInUse(serial, "serialNumber");
+  const reusedFromVehicleId = await findDeletedHolder(tx, orgId, serial);
 
   const counter = await tx.serialCounter.findUniqueOrThrow({
     where: { org_id_prefix: { org_id: orgId, prefix } },
@@ -126,7 +149,7 @@ export async function correctSerialNumber(
 
   await bumpCounterTo(tx, orgId, prefix, newNumber);
 
-  return { serialNumber: newNumber, serial };
+  return { serialNumber: newNumber, serial, reusedFromVehicleId };
 }
 
 /** Read-only preview of the next auto-assigned serial — no increment. Used by

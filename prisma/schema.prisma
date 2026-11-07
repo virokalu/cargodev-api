@@ -879,15 +879,18 @@ enum MessageSender {
 }
 
 model Conversation {
-  id            String    @id @default(cuid())
-  org_id        String
-  customerId    String
+  id             String    @id @default(cuid())
+  org_id         String
+  customerId     String
   // optional: a vehicle that belongs to this customer
-  vehicleId     String?
-  lastMessageAt DateTime  @default(now())
-  handledAt     DateTime?
-  handledById   String?
-  createdAt     DateTime  @default(now())
+  vehicleId      String?
+  lastMessageAt  DateTime  @default(now())
+  handledAt      DateTime?
+  handledById    String?
+  // Read markers, one per side: messages of the OTHER side created after this time are unread. null = never read.
+  customerReadAt DateTime?
+  staffReadAt    DateTime?
+  createdAt      DateTime  @default(now())
 
   org      Organization @relation(fields: [org_id], references: [id])
   customer User         @relation("ConversationCustomer", fields: [customerId], references: [id])

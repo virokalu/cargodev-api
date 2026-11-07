@@ -99,6 +99,30 @@ It runs in CI before the image is built (the `image` job), and `tests/check-buil
 
 If the host says it cannot find the Dockerfile: (1) run the script with the commit hash from the host's log; (2) if it fails, that commit is missing files, so deploy a newer commit (the host builds the commit it names, not your branch tip); (3) if it passes, check the service settings: branch, **Root Directory empty**, **Dockerfile Path `./Dockerfile`**, and that auto-deploy builds the latest commit. Setting the host to deploy only after CI checks pass keeps a broken commit from ever reaching it.
 
+## File links on the API's own domain
+
+`GET /f/v1/...` (ADR 0007) is served by this API on the same hostname as the rest of the API for now (`FILE_LINK_BASE_URL` = the API origin; no separate `files.<domain>` hostname is needed). It needs `FILE_LINK_SECRET` and `FILE_LINK_BASE_URL`, which are **required in production** (the start stops without them).
+
+- **Caching at the edge:** these answers are private to one person. If a CDN or proxy sits in front, add a rule to **bypass the cache** for `/f/v1/*` (the API already sends `Cache-Control: private`, which a correct edge honours; the rule makes it certain).
+- **CORS:** a plain `<img>`, `<a>` or PDF viewer needs none. Only a browser app that loads a link with `fetch` from another origin needs that origin in the API's CORS list (`GET` only).
+- **If you later give files their own hostname** (for example `files.<domain>`): point a CNAME at the API host, set `FILE_LINK_BASE_URL` to it, and keep the cache bypass rule for that hostname. No code change.
+- **Closing the main bucket needs no storage CORS rule for GET**: the browser never talks to storage (uploads still need the PUT rule).
+- Rotating the secret: docs/runbook.md.
+
+## Build inputs: every file the image copies must be in the commit
+
+A host that builds from git (Render, CI) sees only the **commit**, not your disk. A Dockerfile, `tsconfig.build.json` or `prisma/` folder that exists locally but was never committed makes the host fail with `failed to read dockerfile: open Dockerfile: no such file or directory` or `COPY failed: file not found`.
+
+`sh scripts/check-build-inputs.sh [commit]` (read-only; default `HEAD`) reads the Dockerfile and `.dockerignore` **as committed** and fails, listing every problem, if:
+
+- `Dockerfile` is not at the repo root with exactly that name in the commit (a wrong capital letter or a subfolder is reported with what it found);
+- a `COPY`/`ADD` source (other than `--from=<stage>` copies) has no file in the commit;
+- every file of a source is left out of the build context by `.dockerignore` (Docker rules: patterns are relative to the root, `*` does not cross `/`, the last match wins, `!` puts a file back).
+
+It runs in CI before the image is built (the `image` job), and `tests/check-build-inputs.test.ts` proves it on throwaway repositories. To check what a host built, pass its commit: `sh scripts/check-build-inputs.sh fed2350`.
+
+If the host says it cannot find the Dockerfile: (1) run the script with the commit hash from the host's log; (2) if it fails, that commit is missing files, so deploy a newer commit (the host builds the commit it names, not your branch tip); (3) if it passes, check the service settings: branch, **Root Directory empty**, **Dockerfile Path `./Dockerfile`**, and that auto-deploy builds the latest commit. Setting the host to deploy only after CI checks pass keeps a broken commit from ever reaching it.
+
 ## Client address (rate limits and logs)
 
 `CLIENT_IP_SOURCE` decides where `request.ip` comes from:
@@ -115,6 +139,13 @@ socket address is used and a masked warning is logged (the header name only, at 
 runbook after every host or setting change. Behind a load balancer with `socket`, every request shares the balancer's address and one
 rate-limit bucket: set the mode before go-live.
 
+### Node version
+
+The whole project uses **Node 24**: `.nvmrc` says `24`, the Dockerfile pins `node:24.x` (an exact patch version, so a deploy cannot change the runtime), CI reads its Node from `.nvmrc`, and `package.json` `engines.node` is `>=24.0.0` (a floor, not a ceiling: a newer Node on a developer machine still works). `npm test` and `npm run test:db` first run `scripts/check-node.cjs`, which stops with a plain message on an older Node, and the test setup files refuse to start on one too. To change the version, change `.nvmrc`, the Dockerfile image and `engines` together; `tests/node-version.test.ts` fails if they disagree.
+
+### Server-side callers: the trusted forwarder (optional)
+
+A web front end that runs on a server (the Next app) makes every visitor look like one address. Set `TRUSTED_FORWARDER_SECRET` (and give the same value to that server, and only to that server) to let it pass the real visitor address in three signed headers; the API believes the address only when the signature verifies and is under a minute old. Without the secret the feature is off and the headers are ignored. It overrides the address only for requests that carry a valid signature; it does not replace `CLIENT_IP_SOURCE`. Rotate: set the new value as `TRUSTED_FORWARDER_SECRET` and the old one as `TRUSTED_FORWARDER_SECRET_PREVIOUS`, switch the caller, then remove the previous one. A refused signature logs one masked warning a minute (reason and header names only). Details and the signing recipe: docs/staff-frontend-integration.md, section 9; decision: docs/adr/adr-0008-trusted-forwarder-for-server-side-callers.md.
 **Production refuses to start without `CLIENT_IP_SOURCE`** (any of the three values is accepted; the choice must be deliberate). In `socket` mode, if requests arrive carrying `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `True-Client-IP`, `CF-Connecting-IP` or `X-Client-IP`, the API logs one warning a minute naming the header names (never a value or an address): that usually means a proxy is in front and the mode should be `hops` or `header`.
 
 ## Request logs
@@ -155,6 +186,8 @@ A new consumer is added to this list before it is given access.
 `docs/render.yaml.example` is a minimal, secret-free definition for a Docker host (names of variables, no values): Docker runtime, region singapore, health check `/health`, `maxShutdownDelaySeconds: 45`, one instance, no persistent disk, `sync: false` for every secret. Keep it equivalent to what is deployed.
 
 ## First-deploy checklist
+
+Before step 1: every variable, how to get its value, and which to leave unset on staging are in [render-env-checklist.md](render-env-checklist.md).
 
 Do these in order; stop at the first failure.
 

@@ -84,6 +84,20 @@ Staff clients must treat the `url` as a ticket, not an address: use it now, ask 
   only if needed); the staging API uses a different bucket and a different key; the public stock bucket has its own key; the
   audit and copy tools use short-lived keys that you revoke afterwards. Never reuse a developer's personal key, never one key across
   environments.
+- **Lifecycle rule for uploads that were never registered (staging uploads).** A staff member can upload a file and then never attach it
+  (the form is abandoned, the vehicle is never saved). The API cannot know, and the object stays in the bucket for ever. The files that
+  have not been attached yet sit under the **staging-upload prefix** `org/<orgId>/uploads/staging/` (see `allowedPrefixesForNewFile` in
+  `src/lib/object-storage.ts`); a file that was attached lives under `org/<orgId>/vehicles/<vehicleId>/...` instead and is never touched
+  by this rule. Add an **object lifecycle rule that expires (deletes) objects under that prefix after about one day** (a day is longer
+  than the five-minute upload link and a long form session, and short enough that abandoned files do not pile up).
+  - **One rule per organisation.** The organisation id is *inside* the prefix, before `uploads/staging/`, and a lifecycle rule matches a
+    fixed prefix (no wildcard in the middle), so there must be one rule for each `org/<orgId>/uploads/staging/`. With one or two
+    organisations that is two rules; add one whenever an organisation is added.
+  - **Or change the key layout later**, so that one rule covers everyone: put the staging area first (for example
+    `staging/<orgId>/...`), which makes `staging/` a single prefix. That is a code change with a migration of the keys that clients
+    still hold, so it is not part of this task; until then use the per-organisation rules.
+  - Set the rule on the bucket in the provider's dashboard, **never from this API**, and check it in staging first (upload a file, do not
+    attach it, and confirm it is gone after the rule's age). Documentation only: nothing in the API changes.
 - **The public domain on this bucket** (and the shared public development address `r2.dev`) will be disconnected at the switch; plan the
   order below so nothing still uses them.
 

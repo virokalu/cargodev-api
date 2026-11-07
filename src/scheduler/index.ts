@@ -10,7 +10,7 @@ import { runRetention } from "../services/retention.service.js";
 import { createDailyChecksJob } from "./daily-checks-job.js";
 import type { ScheduledJob } from "./scheduler.js";
 
-const RETENTION_KEYS = ["otpCodes", "customerSessions", "refreshTokens", "readAlerts", "unverifiedAccounts"] as const;
+const RETENTION_KEYS = ["otpCodes", "customerSessions", "refreshTokens", "readAlerts", "unverifiedAccounts", "chatConversations", "chatMessages", "enquiries"] as const;
 
 export function defaultJobs(): ScheduledJob[] {
   // Retention counts for the current run, summed over every org. Reset when the run starts, logged once when it ends.

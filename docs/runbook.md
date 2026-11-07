@@ -61,6 +61,22 @@ Migrations are additive-first (ADR 0004) and run only through `npm run migrate -
 5. Run `deploy` only with the maintainer's approval for that run. Coding agents never run `deploy` on their own.
 6. If the tables exist but `_prisma_migrations` is empty or missing, `deploy` stops. The maintainer baselines the history by hand; this tool never runs `migrate resolve`.
 
+### Production: the GitHub Environment run (`.github/workflows/migrate-production.yml`)
+
+Production migrations run from GitHub Actions on every push to `main` that adds one, and by hand. The approval of step 5 is the **required reviewer of the Environment `production`**; nothing else starts it.
+
+One-time setup (GitHub: Settings > Environments > New environment `production`):
+- **Required reviewers:** the maintainer. Tick "Prevent self-review" if there is a second maintainer. **Deployment branches:** `main` only.
+- **Secret** `MIGRATION_DATABASE_URL`: the direct, non-pooled address (stored here only, never on the API host). If the runner cannot reach it (a direct Supabase address is IPv6 only), use the provider's session-pooler address that allows migrations.
+- **Variable** `MIGRATION_EXPECTED_TARGET`: the production project ref (or host). It is not a secret. The run stops if the address points at any other database (step 2, done by the tool).
+- **Repository secret** `RENDER_DEPLOY_HOOK_URL` (Render: service > Settings > Deploy Hook): the workflow starts the API deploy with it. A repository secret, so a push without a migration needs no approval. **The Render service must have Auto-Deploy turned off** (`autoDeploy: false`), otherwise Render would deploy on the push before the migration ran.
+
+Every push to `main` starts the workflow. A "detect" job compares with the last successful run: with no change under `prisma/migrations` the API deploy starts at once; with a new migration the migrate job waits for the reviewer, applies it, and only then starts the API deploy. The reviewer's approval also means "a backup exists" (step 3). A rejected, failed or cancelled migration means no deploy.
+
+Manual run (for example the first time, or a retry): Actions > "Migrate production" > Run workflow on `main`, tick **backup_taken** (step 3: you took it), optionally **deploy_api**. The reviewer approves. The job prints status, drift and the SQL of every pending migration, applies them, and prints status again. It stops, applying nothing, on a wrong target, a broken history, or an unapproved scan finding. A flagged (contract) migration runs only after its name is in `scan-approved.txt` in a reviewed commit on `main`.
+
+Order: migration first, then the API deploy (the new code may read new columns). Migrations are additive, so the old version keeps working in between.
+
 ## Before migration 2 (serial uniqueness among non-deleted vehicles)
 
 Background: ADR 0009. **Migration 1** (`prisma/migrations/20261105120000_vehicle_serial_active_unique`) only adds two partial unique indexes next to the old ones, and is run like any other migration (section above). **Migration 2** (`prisma/pending-migrations/20261105120100_vehicle_serial_drop_full_uniques`) drops the old full unique indexes. **Reuse of a deleted vehicle's serial starts only when it has run.** It sits outside `prisma/migrations`, so `deploy` never applies it by accident. Do these in order and stop at the first item that is not true:

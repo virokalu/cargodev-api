@@ -64,6 +64,22 @@ export function resolveMigrationTarget(env: Record<string, string | undefined> =
   };
 }
 
+/**
+ * The automated production run (GitHub Environment) names the database it is allowed to change in MIGRATION_EXPECTED_TARGET: the
+ * project ref of a Supabase URL, else the host. `deploy` stops when the real target differs, and, when
+ * MIGRATION_REQUIRE_EXPECTED_TARGET=true, when nothing was named. Returns the reason to stop, or null. Never prints a URL.
+ */
+export function expectedTargetProblem(env: Record<string, string | undefined>, target: MigrationTarget): string | null {
+  const expected = env["MIGRATION_EXPECTED_TARGET"]?.trim().toLowerCase();
+  if (!expected) {
+    return env["MIGRATION_REQUIRE_EXPECTED_TARGET"] === "true"
+      ? "MIGRATION_EXPECTED_TARGET is not set, and this run requires it. Name the project ref (or host) this run may change."
+      : null;
+  }
+  const actual = (target.projectRef ?? target.host).toLowerCase();
+  return actual === expected ? null : `The target (${actual}) is not the one this run may change (MIGRATION_EXPECTED_TARGET). Nothing was applied.`;
+}
+
 // ---------------------------------------------------------------------------------------------
 // What _prisma_migrations says, compared with the migrations folder.
 

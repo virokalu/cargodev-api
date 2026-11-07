@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi  } from "vitest";
 // bcrypt is deliberately slow and the whole suite runs in parallel: allow this file more than the 5 s default (per file, not global).
 vi.setConfig({ testTimeout: 30_000 });
 import type { FakePrisma } from "./helpers/fake-prisma.js";
-import { ORG_A } from "./helpers/fixtures.js";
+import { ORG_A, ORG_B } from "./helpers/fixtures.js";
 import { CUSTOMER_PASSWORD, NEW_PASSWORD, bearerFor, codeFrom, newCustomerFake, post, request } from "./helpers/customer-fixtures.js";
 
 const state = vi.hoisted(() => ({
@@ -489,6 +489,40 @@ describe("delete account", () => {
     // The address is free again.
     expect((await register("a1@example.test")).statusCode).toBe(202);
     expect(state.sent.at(-1)!.subject).toMatch(/verification/i);
+  });
+
+  it("scrubs the personal values that staff edits left in the activity log, in the same request, and only for this customer (ADR 0010)", async () => {
+    const personal = { name: "A One", email: "a1@example.test", phone: "0771111111", address: "1 Example Road", companyName: "A One Ltd", country: "LK" };
+    const logRow = (id: string, over: Record<string, unknown>) => ({ id, org_id: ORG_A, actorId: "cust_a1", action: "UPDATE_CUSTOMER", entity: "User", entityId: "cust_a1", before: { ...personal }, after: { ...personal }, createdAt: new Date(), ...over });
+    fake.seed(
+      "activityLog",
+      logRow("mine_before_after", {}),
+      logRow("mine_own", { entity: "Customer", action: "CUSTOMER_UPDATE_PROFILE", before: null, after: { fields: ["phone"] } }),
+      logRow("other_customer", { entityId: "cust_a2" }),
+      logRow("other_org", { org_id: ORG_B }),
+      logRow("other_entity", { entity: "Vehicle" })
+    );
+    const res = await post(app, "/auth/delete-account", { password: CUSTOMER_PASSWORD }, await bearerFor("cust_a1"));
+    expect(res.statusCode).toBe(200);
+    const row = (id: string) => rows("activityLog").find((r) => r["id"] === id)!;
+    expect(row("mine_before_after")["before"]).toEqual({ ...personal, name: "[removed]", email: "[removed]", phone: "[removed]", address: "[removed]", companyName: "[removed]" });
+    expect(row("mine_before_after")["after"]).toEqual({ ...personal, name: "[removed]", email: "[removed]", phone: "[removed]", address: "[removed]", companyName: "[removed]" });
+    expect((row("mine_before_after")["after"] as Record<string, unknown>)["country"]).toBe("LK"); // not a personal field
+    expect(row("mine_own")["after"]).toEqual({ fields: ["phone"] });
+    for (const id of ["other_customer", "other_org", "other_entity"]) expect(row(id)["after"], id).toEqual(personal);
+    const summary = rows("activityLog").filter((r) => r["action"] === "CUSTOMER_ACTIVITY_SCRUBBED");
+    expect(summary).toHaveLength(1);
+    expect([summary[0]!["entityId"], summary[0]!["after"]]).toEqual(["cust_a1", { rowsScrubbed: 1, fieldsReplaced: 10 }]);
+    expect(JSON.stringify(summary)).not.toMatch(/example.test|0771/);
+    expect(rows("activityLog").map((r) => r["action"])).toContain("CUSTOMER_DELETE_ACCOUNT");
+  });
+
+  it("a wrong password scrubs nothing", async () => {
+    fake.seed("activityLog", { id: "keep", org_id: ORG_A, actorId: "cust_a1", action: "UPDATE_CUSTOMER", entity: "User", entityId: "cust_a1", before: null, after: { email: "a1@example.test" }, createdAt: new Date() });
+    const res = await post(app, "/auth/delete-account", { password: "wrong-example-password" }, await bearerFor("cust_a1"));
+    expect(res.statusCode).toBe(400);
+    expect(rows("activityLog").find((r) => r["id"] === "keep")!["after"]).toEqual({ email: "a1@example.test" });
+    expect(rows("activityLog").filter((r) => r["action"] === "CUSTOMER_ACTIVITY_SCRUBBED")).toHaveLength(0);
   });
 
   it("never touches another customer", async () => {

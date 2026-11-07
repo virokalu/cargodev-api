@@ -6,6 +6,7 @@
   "scripts": {
     "check:node": "node scripts/check-node.cjs",
     "check:prisma-client": "node scripts/check-prisma-client.mjs",
+    "check:lookup-case": "tsx --env-file-if-exists=.env scripts/check-lookup-case-duplicates.ts",
     "pretest": "node scripts/check-node.cjs",
     "test": "vitest run",
     "prepare": "husky",

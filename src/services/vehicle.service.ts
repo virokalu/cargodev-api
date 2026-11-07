@@ -31,7 +31,7 @@ import { safeError } from "../lib/redact.js";
 import { checkNewFileKey, storedUrlForKey, verifyUploadedObject, type FileKind } from "../lib/object-storage.js";
 import { fileReference } from "../lib/file-reference.js";
 import { vehicleCreateSchema, vehicleUpdateSchema, flattenFieldErrors } from "../validation/vehicle.schema.js";
-import { assignNextSerial, assignLegacySerial, correctSerialNumber } from "./serial.service.js";
+import { assignNextSerial, assignLegacySerial, correctSerialNumber, serialInUse } from "./serial.service.js";
 import * as activityLog from "./activity-log.service.js";
 import { recordStatusMilestone, syncMilestonesForStatusChange } from "./milestone.service.js";
 import { createPhotoThumbnail } from "./photo-thumbnail.service.js";
@@ -158,12 +158,12 @@ export async function getVehicleDetail(orgId: string, serial: string): Promise<V
   // Looked up by serial, not id — serial is unique per org, read-only after
   // creation (CLAUDE.md), and human-readable, so it doubles as the vehicle
   // detail/edit page's URL slug instead of the opaque database id.
-  const vehicle = await getPrisma().vehicle.findUnique({
-    where: { org_id_serial: { org_id: orgId, serial } },
+  // The serial is unique only among NOT deleted vehicles (a deleted one may share it), so look for the active one.
+  const vehicle = await getPrisma().vehicle.findFirst({
+    where: { org_id: orgId, serial, deletedAt: null },
     select: {
       id: true,
       org_id: true,
-      deletedAt: true,
       serial: true,
       serialPrefix: true,
       convertedToExport: true,
@@ -222,9 +222,8 @@ export async function getVehicleDetail(orgId: string, serial: string): Promise<V
     },
   });
 
-  // org_id is already part of the lookup key above, so a match is
-  // guaranteed to belong to this org — only soft-delete needs checking here.
-  if (!vehicle || vehicle.deletedAt !== null) return null;
+  // org_id and deletedAt are part of the where clause above: a match is this org's active vehicle.
+  if (!vehicle) return null;
 
   // Skip the query entirely when there's no ETD — the milestone this feeds
   // shows as not-completed in that case regardless (lib/shipment-milestones.ts),
@@ -488,12 +487,15 @@ async function assertNewFileKeys(
   if (input.auctionSheetKey) await check("auctionSheetKey", input.auctionSheetKey, "AUCTION_SHEET");
   for (const [i, key] of input.photoKeys.entries()) await check(`photoKeys.${i}`, key, "VEHICLE_PHOTO");
   for (const [i, doc] of input.documents.entries()) await check(`documents.${i}.key`, doc.key, "VEHICLE_DOCUMENT");
-  if (input.auctionSheetKey) await check("auctionSheetKey", input.auctionSheetKey, "AUCTION_SHEET");
-  for (const [i, key] of input.photoKeys.entries()) await check(`photoKeys.${i}`, key, "VEHICLE_PHOTO");
-  for (const [i, doc] of input.documents.entries()) await check(`documents.${i}.key`, doc.key, "VEHICLE_DOCUMENT");
   if (Object.keys(fieldErrors).length > 0) {
     throw new ServiceError("VALIDATION", "One or more files are not valid uploads.", fieldErrors);
   }
+}
+
+/** The vehicle as the activity log keeps it: the auction sheet is a file reference (id, kind, name), never the stored address. */
+function loggedVehicle(row: { id: string; auctionSheetUrl: string | null }): unknown {
+  const { auctionSheetUrl, ...rest } = row;
+  return { ...JSON.parse(JSON.stringify(rest)), auctionSheet: auctionSheetUrl ? fileReference("AUCTION_SHEET", row.id, auctionSheetUrl) : null };
 }
 
 /**
@@ -510,11 +512,8 @@ async function mapSerialConflict<T>(
     return await run();
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
-    if (legacyNumber != null) {
-      const message = `Serial ${track}${legacyNumber} already exists.`;
-      throw new ServiceError("CONFLICT", message, { legacySerialNumber: message });
-    }
-    throw new ServiceError("CONFLICT", "That serial number was just taken. Please try again.");
+    if (legacyNumber != null) throw serialInUse(`${track}${legacyNumber}`, "legacySerialNumber");
+    throw new ServiceError("CONFLICT", "That serial number was just taken. Please try again.", { serial: "already in use" });
   }
 }
 
@@ -523,8 +522,7 @@ async function mapCorrectionConflict<T>(track: SerialPrefix, newNumber: number, 
     return await run();
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
-    const message = `Serial ${track}${newNumber} already exists.`;
-    throw new ServiceError("CONFLICT", message, { serialNumber: message });
+    throw serialInUse(`${track}${newNumber}`, "serialNumber");
   }
 }
 
@@ -550,6 +548,11 @@ async function isCancelledRowColour(tx: TxClient, rowColourStatusId: string | nu
 }
 
 export async function createVehicle(user: SessionUser, rawInput: unknown): Promise<Vehicle> {
+  return (await createVehicleWithReuse(user, rawInput)).vehicle;
+}
+
+/** createVehicle, plus the id of the deleted vehicle whose serial this one took over (null when the serial was free of history). */
+export async function createVehicleWithReuse(user: SessionUser, rawInput: unknown): Promise<{ vehicle: Vehicle; reusedFromVehicleId: string | null }> {
   const parsed = vehicleCreateSchema.safeParse(rawInput);
   if (!parsed.success) {
     throw new ServiceError(
@@ -573,12 +576,7 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
     });
   }
   const legacySerialNumber = input.legacySerialNumber;
-  // Only an administrator may ask to reuse a deleted vehicle's serial; anyone else who sends the flag is refused outright.
-  if (input.reuseDeletedSerial === true && user.role !== "ADMINISTRATOR") {
-    throw new ServiceError("FORBIDDEN", "Only an administrator can reuse the serial number of a deleted vehicle.", {
-      reuseDeletedSerial: "Only an administrator can set this",
-    });
-  }
+  // `reuseDeletedSerial` is DEPRECATED: it is accepted and ignored (a deleted vehicle's serial is free to use for everyone who may create).
 
   // FL vehicles never carry shipping fields — strip regardless of what was
   // posted (never trust the UI alone to have hidden them). Tech Doc §1 line 16.
@@ -655,9 +653,10 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
 
   const vehicle = await mapSerialConflict(input.track, input.isLegacyEntry ? legacySerialNumber : null, () =>
     getPrisma().$transaction(async (tx) => {
-    const { serialNumber, serial } = input.isLegacyEntry
-      ? await assignLegacySerial(tx, user.orgId, input.track, legacySerialNumber!, input.reuseDeletedSerial === true)
+    const assigned = input.isLegacyEntry
+      ? await assignLegacySerial(tx, user.orgId, input.track, legacySerialNumber!)
       : await assignNextSerial(tx, user.orgId, input.track);
+    const { serialNumber, serial, reusedFromVehicleId } = assigned;
 
     // Shipment status is derived, never set manually (Tech Doc §1) — with one
     // documented exception: a legacy-serial FC record wasn't tracked through
@@ -887,10 +886,12 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
       entityId: created.id,
       // Snapshot through JSON to turn Date objects into plain ISO strings —
       // the ActivityLog.after column is Json, not a live Prisma model.
-      after: loggedVehicle(created),
+      // reusedFromVehicleId (only when the serial was taken over from a deleted vehicle): which vehicle held it before.
+      after: reusedFromVehicleId ? { ...(loggedVehicle(created) as Record<string, unknown>), reusedFromVehicleId } : loggedVehicle(created),
     });
 
     return {
+      reusedFromVehicleId,
       created,
       bookingReceivedNotification,
       documentUploadedNotification,
@@ -909,7 +910,7 @@ export async function createVehicle(user: SessionUser, rawInput: unknown): Promi
   // Photos staged before the vehicle existed get their small version too (best effort, never fatal).
   for (const url of input.photoUrls) await createPhotoThumbnail(user.orgId, url);
 
-  return vehicle.created;
+  return { vehicle: vehicle.created, reusedFromVehicleId: vehicle.reusedFromVehicleId };
 }
 
 /** Soft-warn only — legacy data may have real duplicate chassis numbers, so
@@ -1246,9 +1247,10 @@ async function detailAfterWrite(orgId: string, serial: string): Promise<VehicleD
   return detail;
 }
 
-export async function createVehicleDetail(user: SessionUser, rawInput: unknown): Promise<VehicleDetailData> {
-  const created = await createVehicle(user, rawInput);
-  return detailAfterWrite(user.orgId, created.serial);
+/** The answer of POST /vehicles: the detail shape plus serialReused (true when the serial was taken over from a deleted vehicle). */
+export async function createVehicleDetail(user: SessionUser, rawInput: unknown): Promise<VehicleDetailData & { serialReused: boolean }> {
+  const { vehicle, reusedFromVehicleId } = await createVehicleWithReuse(user, rawInput);
+  return { ...(await detailAfterWrite(user.orgId, vehicle.serial)), serialReused: reusedFromVehicleId !== null };
 }
 
 export async function updateVehicleDetail(user: SessionUser, id: string, rawInput: unknown): Promise<VehicleDetailData> {
@@ -1256,8 +1258,8 @@ export async function updateVehicleDetail(user: SessionUser, id: string, rawInpu
   return detailAfterWrite(user.orgId, updated.serial);
 }
 
-/** Soft delete — sets deletedAt instead of removing the row, so the serial
- * number is never reissued and the record stays recoverable. Every read
+/** Soft delete — sets deletedAt instead of removing the row, so the record stays on file. The serial is FREE again from this moment
+ * (uniqueness is among non-deleted vehicles only; docs/adr/adr-0009). Every read
  * path (table, edit, chassis-dup check) filters deletedAt out, so a
  * soft-deleted vehicle behaves like it's gone everywhere it's used. */
 export async function deleteVehicle(orgId: string, actorId: string, id: string): Promise<void> {
@@ -1519,9 +1521,8 @@ export async function correctVehicleSerialNumber(
   orgId: string,
   actorId: string,
   id: string,
-  newNumber: number,
-  reuseDeleted = false
-): Promise<{ serial: string }> {
+  newNumber: number
+): Promise<{ serial: string; serialReused: boolean }> {
   const existing = await assertVehicleInOrg(orgId, id);
 
   if (!Number.isInteger(newNumber) || newNumber <= 0) {
@@ -1534,7 +1535,7 @@ export async function correctVehicleSerialNumber(
   }
 
   return mapCorrectionConflict(existing.serialPrefix, newNumber, () => getPrisma().$transaction(async (tx) => {
-    const { serial } = await correctSerialNumber(tx, orgId, existing.serialPrefix, newNumber, id, reuseDeleted);
+    const { serial, reusedFromVehicleId } = await correctSerialNumber(tx, orgId, existing.serialPrefix, newNumber, id);
 
     await writeVehicle(tx, orgId, id, { serialNumber: newNumber, serial });
 
@@ -1545,10 +1546,11 @@ export async function correctVehicleSerialNumber(
       entity: "Vehicle",
       entityId: id,
       before: { serial: existing.serial },
-      after: { serial },
+      // reusedFromVehicleId (only when the serial was taken over from a deleted vehicle): which vehicle held it before.
+      after: reusedFromVehicleId ? { serial, reusedFromVehicleId } : { serial },
     });
 
-    return { serial };
+    return { serial, serialReused: reusedFromVehicleId !== null };
   }));
 }
 

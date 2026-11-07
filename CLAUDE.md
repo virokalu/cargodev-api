@@ -19,9 +19,9 @@ This file is the contract. If a change breaks a rule here, change the rule in a 
 5. Lookup rows are created only through lookup services.
 6. Tri-state flags (`auctionBillPaid`, `logBook`, `extraKey`) are `Boolean?`. `null` means "not entered". Never coerce to `false`.
 7. Roles are exactly `ADMINISTRATOR | MANAGER | OPERATOR | VIEWER`, enforced in the auth hook per route, not only in a UI.
-8. Serial numbers are read-only after creation except the admin correction service. Counter rule: `lastNumber = max(lastNumber, entered)`, incremented in a transaction.
+8. Serial numbers are read-only after creation except the admin correction service. Counter rule: `lastNumber = max(lastNumber, entered)`, incremented in a transaction. A serial is unique **among non-deleted vehicles only** (ADR 0009): deleting a vehicle frees its serial, a new vehicle may take it, and the same serial can then exist on one deleted and one active vehicle. So **identify a vehicle by its `id`, never by its serial alone**, and every lookup by serial filters `deletedAt: null`. The database enforces it with partial unique indexes (`WHERE "deletedAt" IS NULL`) that `schema.prisma` cannot declare; never remove them.
 9. FC vs FL uses the **effective track** helpers, not `serialPrefix`. FL vehicles never store shipping fields.
-10. Soft-deleted vehicles (`deletedAt`) are excluded from every read path.
+10. Soft-deleted vehicles (`deletedAt`) are excluded from every read path. The serial of a deleted vehicle is free again (rule 8).
 
 ## Response contract
 

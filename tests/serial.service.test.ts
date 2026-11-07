@@ -31,7 +31,7 @@ beforeEach(() => {
 describe("assignNextSerial", () => {
   it("increments the counter and returns the prefixed serial", async () => {
     const result = await assignNextSerial(fake.tx, ORG_A, "FC");
-    expect(result).toEqual({ serialNumber: 101, serial: "FC101" });
+    expect(result).toEqual({ serialNumber: 101, serial: "FC101", reusedFromVehicleId: null });
     expect(fake.lastNumber(ORG_A, "FC")).toBe(101);
   });
 
@@ -55,7 +55,7 @@ describe("assignNextSerial", () => {
 describe("assignLegacySerial", () => {
   it("bumps the counter when the entered number is higher", async () => {
     const result = await assignLegacySerial(fake.tx, ORG_A, "FC", 250);
-    expect(result).toEqual({ serialNumber: 250, serial: "FC250" });
+    expect(result).toEqual({ serialNumber: 250, serial: "FC250", reusedFromVehicleId: null });
     expect(fake.lastNumber(ORG_A, "FC")).toBe(250);
     expect((await assignNextSerial(fake.tx, ORG_A, "FC")).serial).toBe("FC251");
   });
@@ -77,19 +77,41 @@ describe("assignLegacySerial", () => {
     expect(error).toBeInstanceOf(ServiceError);
     expect(error).toMatchObject({
       code: "CONFLICT",
-      fieldErrors: { legacySerialNumber: "Serial FC40 already exists." },
+      fieldErrors: { legacySerialNumber: "Serial FC40 already exists.", serial: "already in use" },
     });
     expect(fake.lastNumber(ORG_A, "FC")).toBe(100);
-    expect((error as ServiceError).reason).toBeUndefined(); // a live vehicle: a plain conflict
+    expect((error as ServiceError).reason).toBeUndefined(); // a plain conflict: no machine reason
   });
 
-  it("a deleted vehicle's serial: reason SERIAL_PREVIOUSLY_USED, or SERIAL_REUSE_NOT_ENABLED with the flag; the counter does not move", async () => {
+  it("a serial held only by a DELETED vehicle is free: it is assigned, with the id of that vehicle, and a lower number leaves the counter alone", async () => {
     fake.seedVehicle(ORG_A, "veh_gone", "FC41", new Date("2026-10-01T00:00:00Z"));
-    const plain = await assignLegacySerial(fake.tx, ORG_A, "FC", 41).catch((e: unknown) => e);
-    expect(plain).toMatchObject({ code: "CONFLICT", reason: "SERIAL_PREVIOUSLY_USED", fieldErrors: { legacySerialNumber: expect.any(String) } });
-    const flagged = await assignLegacySerial(fake.tx, ORG_A, "FC", 41, true).catch((e: unknown) => e);
-    expect(flagged).toMatchObject({ code: "CONFLICT", reason: "SERIAL_REUSE_NOT_ENABLED" });
-    expect(fake.lastNumber(ORG_A, "FC")).toBe(100);
+    const result = await assignLegacySerial(fake.tx, ORG_A, "FC", 41);
+    expect(result).toEqual({ serialNumber: 41, serial: "FC41", reusedFromVehicleId: "veh_gone" });
+    expect(fake.lastNumber(ORG_A, "FC")).toBe(100); // lastNumber = max(lastNumber, entered)
+  });
+
+  it("an ACTIVE vehicle still blocks the serial even when a deleted one also had it", async () => {
+    fake.seedVehicle(ORG_A, "veh_old", "FC42", new Date("2026-09-01T00:00:00Z"));
+    fake.seedVehicle(ORG_A, "veh_live", "FC42");
+    await expect(assignLegacySerial(fake.tx, ORG_A, "FC", 42)).rejects.toMatchObject({ code: "CONFLICT", fieldErrors: { serial: "already in use" } });
+  });
+
+  it("with several deleted vehicles the MOST RECENTLY deleted one is named", async () => {
+    fake.seedVehicle(ORG_A, "veh_first", "FC43", new Date("2026-08-01T00:00:00Z"));
+    fake.seedVehicle(ORG_A, "veh_last", "FC43", new Date("2026-10-01T00:00:00Z"));
+    fake.seedVehicle(ORG_A, "veh_mid", "FC43", new Date("2026-09-01T00:00:00Z"));
+    expect((await assignLegacySerial(fake.tx, ORG_A, "FC", 43)).reusedFromVehicleId).toBe("veh_last");
+  });
+
+  it("another organisation's vehicle with the same serial is not a holder and not a source", async () => {
+    fake.seedVehicle("org_other", "veh_b", "FC44");
+    fake.seedVehicle("org_other", "veh_b_gone", "FC45", new Date("2026-10-01T00:00:00Z"));
+    expect(await assignLegacySerial(fake.tx, ORG_A, "FC", 44)).toMatchObject({ reusedFromVehicleId: null });
+    expect(await assignLegacySerial(fake.tx, ORG_A, "FC", 45)).toMatchObject({ reusedFromVehicleId: null });
+  });
+
+  it("the automatic number never reuses and says so", async () => {
+    expect(await assignNextSerial(fake.tx, ORG_A, "FC")).toEqual({ serialNumber: 101, serial: "FC101", reusedFromVehicleId: null });
   });
 });
 
@@ -108,8 +130,20 @@ describe("correctSerialNumber", () => {
     );
     expect(error).toMatchObject({
       code: "CONFLICT",
-      fieldErrors: { serialNumber: "Serial FC41 already exists." },
+      fieldErrors: { serialNumber: "Serial FC41 already exists.", serial: "already in use" },
     });
+  });
+
+  it("a number held only by a deleted vehicle can be corrected to; the deleted vehicle's id comes back", async () => {
+    fake.seedVehicle(ORG_A, "veh_a1", "FC40");
+    fake.seedVehicle(ORG_A, "veh_gone", "FC46", new Date("2026-10-01T00:00:00Z"));
+    expect(await correctSerialNumber(fake.tx, ORG_A, "FC", 46, "veh_a1")).toEqual({ serialNumber: 46, serial: "FC46", reusedFromVehicleId: "veh_gone" });
+    expect(fake.lastNumber(ORG_A, "FC")).toBe(100);
+  });
+
+  it("the correcting vehicle itself is never its own holder", async () => {
+    fake.seedVehicle(ORG_A, "veh_a1", "FC40");
+    expect((await correctSerialNumber(fake.tx, ORG_A, "FC", 40, "veh_a1")).reusedFromVehicleId).toBeNull();
   });
 
   it("bumps the counter up but never down", async () => {

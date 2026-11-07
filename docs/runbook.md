@@ -61,6 +61,23 @@ Migrations are additive-first (ADR 0004) and run only through `npm run migrate -
 5. Run `deploy` only with the maintainer's approval for that run. Coding agents never run `deploy` on their own.
 6. If the tables exist but `_prisma_migrations` is empty or missing, `deploy` stops. The maintainer baselines the history by hand; this tool never runs `migrate resolve`.
 
+## Before migration 2 (serial uniqueness among non-deleted vehicles)
+
+Background: ADR 0009. **Migration 1** (`prisma/migrations/20261105120000_vehicle_serial_active_unique`) only adds two partial unique indexes next to the old ones, and is run like any other migration (section above). **Migration 2** (`prisma/pending-migrations/20261105120100_vehicle_serial_drop_full_uniques`) drops the old full unique indexes. **Reuse of a deleted vehicle's serial starts only when it has run.** It sits outside `prisma/migrations`, so `deploy` never applies it by accident. Do these in order and stop at the first item that is not true:
+
+1. **Migration 1 is applied** and `npm run migrate -- status` shows nothing pending. `npm run migrate -- drift` says there are no differences (it ignores partial indexes).
+2. **A backup exists, and you tried to restore it** (section "Backups and the restore drill"). Rollback is impossible after the first reuse (see below); the backup is the only way back to a world without shared serials.
+3. **The converted Next app was verified on staging**, against a staging database that already has migration 2: it identifies a vehicle by `id`, opens vehicles by serial only through this API (which returns the active one), and shows `serialReused` where the business wants a warning.
+4. **No old deployment reads or writes vehicles any more.** An old reader or writer that assumes one row per `(org_id, serial)` would show or edit the wrong vehicle once a serial is shared. Check the old app's cron and jobs too.
+5. **Read the SQL and the scan** (`prisma/pending-migrations/.../migration.sql`; the scan flags two `DROP INDEX`). Only the maintainer approves it, by adding the migration's name to `prisma/migrations/scan-approved.txt`.
+6. **Enable it in ONE change** (a reviewed pull request): move the folder into `prisma/migrations`, apply `schema.prisma.patch` (it removes the two `@@unique` lines; until then `schema.prisma` must keep them or `drift` reports a difference), and run the test suite. The real-database tests apply the migration themselves and prove both states.
+7. **Run `deploy` for that migration only with the maintainer's approval for that run**, after comparing the printed project ref. Then `npm run migrate -- status` and `drift` must be clean.
+8. **After it ran:** one test reuse on staging first (delete a throwaway vehicle, create one with its serial: the answer says `serialReused: true` and the activity log names the old vehicle).
+
+**Rollback.** Before the first reuse, the two old indexes can be re-created (statements at the end of the migration file). After the first reuse that fails with a duplicate. The only way back is then to rename or delete one of the two vehicles that share a serial by hand, or to restore the backup and lose what happened since.
+
+**Checking the partial indexes.** `SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'Vehicle' AND indexdef LIKE '%deletedAt%';` must list `Vehicle_org_serial_active_key` and `Vehicle_org_prefix_number_active_key`, each `WHERE ("deletedAt" IS NULL)` and starting with `org_id`. The test `tests/db/serial-uniqueness.db.test.ts` fails if either disappears.
+
 ## Move to another host
 
 The service is portable on purpose (docs/deployment.md: portability checklist). An afternoon, in this order:

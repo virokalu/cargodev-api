@@ -1,10 +1,14 @@
-// A deleted vehicle's serial is never handed out again by accident. The parts that do not need a database migration:
-//  - a conflict with a LIVE vehicle is a plain 409 (no `reason`);
-//  - a conflict with a DELETED vehicle is a 409 with reason SERIAL_PREVIOUSLY_USED;
-//  - `reuseDeletedSerial: true` is for administrators: a MANAGER sending it gets 403, an administrator gets a 409 with reason
-//    SERIAL_REUSE_NOT_ENABLED (the database still holds the old unique key until the approved partial-index migration is applied);
-//  - `reason` exists on a 409 only; auto-generated serials never reuse a number. Fake data only.
+// FREE REUSE of a deleted vehicle's serial (ADR 0009): serial uniqueness applies among vehicles that are NOT soft-deleted.
+//  - creating (ADMINISTRATOR or MANAGER) or correcting (ADMINISTRATOR only) to a serial held only by deleted vehicles SUCCEEDS;
+//  - a clash with an ACTIVE vehicle is a 409 with fieldErrors.serial "already in use";
+//  - the answer carries serialReused, and the activity log records reusedFromVehicleId (the most recent deleted holder);
+//  - `reuseDeletedSerial` is DEPRECATED: accepted and ignored; no 403 for a manager; the old codes are gone;
+//  - auto-generated serials never reuse a number; a reused lower number leaves the counter alone.
+// This file runs against the in-memory fake (which has no unique index); what the DATABASE enforces is proven in tests/db/serial-uniqueness.db.test.ts.
+// Fake data only.
 
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FakePrisma } from "./helpers/fake-prisma.js";
@@ -27,6 +31,7 @@ import { clearStaffAuthCache } from "../src/services/staff-auth-state.service.js
 let app: FastifyInstance;
 let fake: FakePrisma;
 let ctx: Ctx;
+type Row = Record<string, unknown>;
 type Err = { error: { code: string; message: string; fieldErrors?: Record<string, string>; reason?: string } };
 
 beforeAll(async () => {
@@ -48,127 +53,202 @@ beforeEach(() => {
 });
 
 const vehicles = () => fake.rows("vehicle");
-const serialOf = (id: string) => vehicles().find((v) => v["id"] === id)!["serial"];
+const byId = (id: string): Row => vehicles().find((v) => v["id"] === id)!;
+const counter = () => fake.rows("serialCounter").find((c) => c["prefix"] === "FC")!["lastNumber"];
+const lastLog = (action: string) => {
+  const rows = fake.rows("activityLog").filter((r) => r["action"] === action);
+  expect(rows.length, `an activity-log row for ${action}`).toBeGreaterThan(0);
+  return rows[rows.length - 1] as { entityId: string; before: Row; after: Row };
+};
 const legacyBody = (n: number, extra: Record<string, unknown> = {}) => ({
   track: "FC", isLegacyEntry: true, legacySerialNumber: n, chassisNo: `CHASSIS-REUSE-${n}`, brandId: "brand_a1", modelId: "model_a1", ...extra,
 });
-// FC101 is live (v_fc_pending); FC106 belongs to a deleted vehicle (v_fc_deleted).
-const LIVE = 102;
+// In the fixtures FC101 and FC102 belong to ACTIVE vehicles; FC106 belongs to a DELETED one (v_fc_deleted).
+const ACTIVE = 102;
 const DELETED = 106;
 
-describe("serial correction (administrator only)", () => {
+describe("create with a legacy serial", () => {
+  it.each(["MANAGER", "ADMINISTRATOR"] as const)("a serial held only by a deleted vehicle is free for a %s: 201, serialReused true", async (role) => {
+    const res = await ctx.call(role, "POST", "/api/v1/vehicles", legacyBody(DELETED));
+    expect(res.status).toBe(201);
+    const data = (res.body as { data: { id: string; serial: string; serialReused: boolean } }).data;
+    expect([data.serial, data.serialReused]).toEqual(["FC106", true]);
+    expect(vehicles().filter((v) => v["serial"] === "FC106")).toHaveLength(2); // the deleted one and the new one
+  });
+
+  it("the activity log of the creation records reusedFromVehicleId = the deleted vehicle, and the entity id is the NEW vehicle", async () => {
+    const created = (await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(DELETED))).body as { data: { id: string } };
+    const log = lastLog("CREATE_VEHICLE");
+    expect(log.entityId).toBe(created.data.id);
+    expect(log.after["reusedFromVehicleId"]).toBe("v_fc_deleted");
+    expect(log.entityId).not.toBe("v_fc_deleted");
+  });
+
+  it("a serial nobody ever had: serialReused false, and the log has no reusedFromVehicleId key", async () => {
+    const res = await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(777));
+    expect((res.body as { data: { serialReused: boolean } }).data.serialReused).toBe(false);
+    expect(lastLog("CREATE_VEHICLE").after).not.toHaveProperty("reusedFromVehicleId");
+  });
+
+  it("an automatic serial: serialReused false, and the counter moves up by one", async () => {
+    const before = counter() as number;
+    const res = await ctx.call("MANAGER", "POST", "/api/v1/vehicles", { track: "FC", isLegacyEntry: false, chassisNo: "CHASSIS-AUTO-1", brandId: "brand_a1", modelId: "model_a1" });
+    expect(res.status).toBe(201);
+    expect((res.body as { data: { serialReused: boolean; serial: string } }).data).toMatchObject({ serialReused: false, serial: `FC${before + 1}` });
+    expect(counter()).toBe(before + 1);
+  });
+
+  it("the answer is the detail shape plus serialReused, and nothing else is added", async () => {
+    const created = (await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(778))).body as { data: Row };
+    const detail = (await ctx.call("MANAGER", "GET", "/api/v1/vehicles/FC778")).body as { data: Row };
+    expect(Object.keys(created.data).sort()).toEqual([...Object.keys(detail.data), "serialReused"].sort());
+  });
+
+  it("an ACTIVE vehicle's serial is a 409 CONFLICT with fieldErrors.serial 'already in use' (and the field of the body), no reason; nothing is created", async () => {
+    const before = vehicles().length;
+    const res = await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(ACTIVE));
+    expect(res.status).toBe(409);
+    const error = (res.body as Err).error;
+    expect(error.code).toBe("CONFLICT");
+    expect(error.fieldErrors).toEqual({ legacySerialNumber: "Serial FC102 already exists.", serial: "already in use" });
+    expect(error).not.toHaveProperty("reason");
+    expect(vehicles()).toHaveLength(before);
+  });
+
+  it("a reused LOWER number does not move the counter (lastNumber = max(lastNumber, entered)); a higher one bumps it", async () => {
+    const before = counter() as number;
+    await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(DELETED));
+    expect(counter()).toBe(before);
+    await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(before + 50));
+    expect(counter()).toBe(before + 50);
+  });
+
+  it("GET /vehicles/:serial answers with the ACTIVE vehicle when a deleted one shares the serial, and so do the other serial routes", async () => {
+    const created = (await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(DELETED))).body as { data: { id: string } };
+    for (const suffix of ["", "/timeline", "/status-history", "/milestones", "/files"]) {
+      const res = await ctx.call("VIEWER", "GET", `/api/v1/vehicles/FC106${suffix}`);
+      expect([suffix, res.status]).toEqual([suffix, 200]);
+    }
+    const detail = (await ctx.call("VIEWER", "GET", "/api/v1/vehicles/FC106")).body as { data: { id: string } };
+    expect(detail.data.id).toBe(created.data.id);
+    expect(detail.data.id).not.toBe("v_fc_deleted");
+  });
+
+  it("with no active holder (the new vehicle is deleted again) the serial is a 404 again", async () => {
+    const created = (await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(DELETED))).body as { data: { id: string } };
+    expect((await ctx.call("MANAGER", "DELETE", `/api/v1/vehicles/${created.data.id}`)).status).toBe(200);
+    expect((await ctx.call("VIEWER", "GET", "/api/v1/vehicles/FC106")).status).toBe(404);
+  });
+});
+
+describe("serial correction (ADMINISTRATOR only)", () => {
   const url = "/api/v1/vehicles/v_fc_pending/serial";
 
-  it("a live serial is a plain 409: a field error and no reason", async () => {
-    const res = await ctx.call("ADMINISTRATOR", "PATCH", url, { serialNumber: LIVE });
-    expect(res.status).toBe(409);
-    const error = (res.body as Err).error;
-    expect(Object.keys(error).sort()).toEqual(["code", "fieldErrors", "message"]);
-    expect(error.fieldErrors).toHaveProperty("serialNumber");
+  it("to a serial held only by a deleted vehicle: 200, serialReused true, and the log names the deleted vehicle", async () => {
+    const res = await ctx.call("ADMINISTRATOR", "PATCH", url, { serialNumber: DELETED });
+    expect(res.status).toBe(200);
+    expect((res.body as { data: Row }).data).toEqual({ serial: "FC106", serialReused: true });
+    const log = lastLog("CORRECT_VEHICLE_SERIAL");
+    expect(log.entityId).toBe("v_fc_pending");
+    expect(log.before).toEqual({ serial: "FC101" });
+    expect(log.after).toEqual({ serial: "FC106", reusedFromVehicleId: "v_fc_deleted" });
+    expect(byId("v_fc_pending")["serial"]).toBe("FC106");
   });
 
-  it("a deleted vehicle's serial is a 409 with reason SERIAL_PREVIOUSLY_USED, and nothing changes", async () => {
+  it("to a free serial: serialReused false and no reusedFromVehicleId in the log", async () => {
+    const res = await ctx.call("ADMINISTRATOR", "PATCH", url, { serialNumber: 150 });
+    expect((res.body as { data: Row }).data).toEqual({ serial: "FC150", serialReused: false });
+    expect(lastLog("CORRECT_VEHICLE_SERIAL").after).toEqual({ serial: "FC150" });
+  });
+
+  it("to an ACTIVE vehicle's serial: 409 with fieldErrors.serial 'already in use' and serialNumber, nothing changes", async () => {
+    const res = await ctx.call("ADMINISTRATOR", "PATCH", url, { serialNumber: ACTIVE });
+    expect(res.status).toBe(409);
+    expect((res.body as Err).error.fieldErrors).toEqual({ serialNumber: "Serial FC102 already exists.", serial: "already in use" });
+    expect(byId("v_fc_pending")["serial"]).toBe("FC101");
+  });
+
+  it("delete, recreate, then correct another vehicle to the recreated (active) serial: 409", async () => {
+    await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(DELETED));
     const res = await ctx.call("ADMINISTRATOR", "PATCH", url, { serialNumber: DELETED });
     expect(res.status).toBe(409);
-    const error = (res.body as Err).error;
-    expect([error.code, error.reason]).toEqual(["CONFLICT", "SERIAL_PREVIOUSLY_USED"]);
-    expect(error.fieldErrors).toHaveProperty("serialNumber");
-    expect(serialOf("v_fc_pending")).toBe("FC101");
   });
 
-  it("with reuseDeletedSerial the administrator gets reason SERIAL_REUSE_NOT_ENABLED (the database still forbids reuse), and nothing changes", async () => {
-    const res = await ctx.call("ADMINISTRATOR", "PATCH", url, { serialNumber: DELETED, reuseDeletedSerial: true });
+  it("a MANAGER cannot correct a serial at all (403): the role list did not change", async () => {
+    for (const body of [{ serialNumber: 150 }, { serialNumber: DELETED }]) expect((await ctx.call("MANAGER", "PATCH", url, body)).status).toBe(403);
+    expect(byId("v_fc_pending")["serial"]).toBe("FC101");
+  });
+});
+
+describe("reuseDeletedSerial is deprecated: accepted and ignored", () => {
+  it("a MANAGER who sends it is NOT refused: the create behaves exactly as without it", async () => {
+    for (const flag of [true, false]) {
+      const n = flag ? 790 : 791;
+      const res = await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(n, { reuseDeletedSerial: flag }));
+      expect([flag, res.status]).toEqual([flag, 201]);
+    }
+    const reused = await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(DELETED, { reuseDeletedSerial: false }));
+    expect(reused.status).toBe(201); // false does not forbid reuse either
+  });
+
+  it("the flag changes nothing about a clash with an active vehicle", async () => {
+    const res = await ctx.call("ADMINISTRATOR", "POST", "/api/v1/vehicles", legacyBody(ACTIVE, { reuseDeletedSerial: true }));
     expect(res.status).toBe(409);
-    expect((res.body as Err).error.reason).toBe("SERIAL_REUSE_NOT_ENABLED");
-    expect(serialOf("v_fc_pending")).toBe("FC101");
   });
 
-  it("a MANAGER cannot reach the correction at all (403), flag or not", async () => {
-    for (const body of [{ serialNumber: 150 }, { serialNumber: 150, reuseDeletedSerial: true }]) {
-      expect((await ctx.call("MANAGER", "PATCH", url, body)).status).toBe(403);
-    }
-    expect(serialOf("v_fc_pending")).toBe("FC101");
+  it("the correction accepts it too, and still ignores it", async () => {
+    const free = await ctx.call("ADMINISTRATOR", "PATCH", "/api/v1/vehicles/v_fc_pending/serial", { serialNumber: 151, reuseDeletedSerial: true });
+    expect(free.status).toBe(200);
+    const taken = await ctx.call("ADMINISTRATOR", "PATCH", "/api/v1/vehicles/v_fc_booked_future/serial", { serialNumber: 151, reuseDeletedSerial: true });
+    expect(taken.status).toBe(409);
   });
 
-  it("a free serial still works, with or without the flag", async () => {
-    expect((await ctx.call("ADMINISTRATOR", "PATCH", url, { serialNumber: 150, reuseDeletedSerial: true })).status).toBe(200);
-    expect(serialOf("v_fc_pending")).toBe("FC150");
+  it("a wrongly typed value is still a 400 (the field is validated, just not used)", async () => {
+    expect((await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(792, { reuseDeletedSerial: "yes" }))).status).toBe(400);
   });
 });
 
-describe("create with a legacy serial", () => {
-  it("a live serial is a plain 409 with fieldErrors.legacySerialNumber and no reason; nothing is created", async () => {
-    const before = vehicles().length;
-    const res = await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(LIVE));
-    expect(res.status).toBe(409);
-    const error = (res.body as Err).error;
-    expect(Object.keys(error).sort()).toEqual(["code", "fieldErrors", "message"]);
-    expect(error.fieldErrors).toHaveProperty("legacySerialNumber");
-    expect(vehicles()).toHaveLength(before);
-  });
-
-  it("a deleted vehicle's serial is 409 SERIAL_PREVIOUSLY_USED for a MANAGER and for an administrator without the flag", async () => {
-    for (const role of ["MANAGER", "ADMINISTRATOR"] as const) {
-      const before = vehicles().length;
-      const res = await ctx.call(role, "POST", "/api/v1/vehicles", legacyBody(DELETED));
-      expect([role, res.status, (res.body as Err).error.reason]).toEqual([role, 409, "SERIAL_PREVIOUSLY_USED"]);
-      expect(vehicles()).toHaveLength(before);
-    }
-  });
-
-  it("a MANAGER who sends reuseDeletedSerial: true gets 403 FORBIDDEN, with a field error and no reason; nothing is created", async () => {
-    for (const body of [legacyBody(DELETED, { reuseDeletedSerial: true }), legacyBody(777, { reuseDeletedSerial: true }), { ...legacyBody(1), isLegacyEntry: false, legacySerialNumber: null, reuseDeletedSerial: true }]) {
-      const before = vehicles().length;
-      const res = await ctx.call("MANAGER", "POST", "/api/v1/vehicles", body);
-      const error = (res.body as Err).error;
-      expect([res.status, error.code]).toEqual([403, "FORBIDDEN"]);
-      expect(error).not.toHaveProperty("reason");
-      expect(error.fieldErrors).toHaveProperty("reuseDeletedSerial");
-      expect(vehicles()).toHaveLength(before);
-    }
-  });
-
-  it("a MANAGER sending reuseDeletedSerial: false is not refused", async () => {
-    expect((await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(778, { reuseDeletedSerial: false }))).status).toBe(201);
-  });
-
-  it("an administrator with the flag and a deleted serial gets 409 SERIAL_REUSE_NOT_ENABLED; with the flag and a free serial the create succeeds", async () => {
-    const before = vehicles().length;
-    const refused = await ctx.call("ADMINISTRATOR", "POST", "/api/v1/vehicles", legacyBody(DELETED, { reuseDeletedSerial: true }));
-    expect([refused.status, (refused.body as Err).error.reason]).toEqual([409, "SERIAL_REUSE_NOT_ENABLED"]);
-    expect(vehicles()).toHaveLength(before);
-    const created = await ctx.call("ADMINISTRATOR", "POST", "/api/v1/vehicles", legacyBody(779, { reuseDeletedSerial: true }));
-    expect(created.status).toBe(201);
-    expect((created.body as { data: { serial: string } }).data.serial).toBe("FC779");
+describe("the guarded-reuse codes are gone", () => {
+  it("no source file mentions SERIAL_PREVIOUSLY_USED or SERIAL_REUSE_NOT_ENABLED, and no answer of the flows above carries a reason", async () => {
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const full = path.join(dir, name);
+        if (statSync(full).isDirectory()) walk(full);
+        else if (full.endsWith(".ts") && /SERIAL_PREVIOUSLY_USED|SERIAL_REUSE_NOT_ENABLED/.test(readFileSync(full, "utf8"))) offenders.push(full);
+      }
+    };
+    walk("src");
+    expect(offenders).toEqual([]);
+    const answers = [
+      await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(ACTIVE)),
+      await ctx.call("ADMINISTRATOR", "PATCH", "/api/v1/vehicles/v_fc_pending/serial", { serialNumber: ACTIVE }),
+      await ctx.call("ADMINISTRATOR", "PATCH", "/api/v1/vehicles/v_fc_pending/serial", { serialNumber: DELETED }),
+    ];
+    for (const answer of answers) expect(JSON.stringify(answer.body)).not.toMatch(/"reason"|SERIAL_/);
   });
 });
 
-describe("auto-generated serials never reuse a number", () => {
-  it("the counter only goes up: deleting the newest vehicle does not free its number", async () => {
-    const create = async () => ((await ctx.call("MANAGER", "POST", "/api/v1/vehicles", { track: "FC", isLegacyEntry: false, chassisNo: `CHASSIS-AUTO-${Math.random()}`, brandId: "brand_a1", modelId: "model_a1" })).body as { data: { id: string; serial: string } }).data;
-    const first = await create();
-    expect(first.serial).toBe("FC110");
-    expect((await ctx.call("MANAGER", "DELETE", `/api/v1/vehicles/${first.id}`)).status).toBe(200);
-    const second = await create();
-    expect(second.serial).toBe("FC111");
-    expect(second.serial).not.toBe(first.serial);
-  });
-});
-
-describe("`reason` exists on a 409 only", () => {
-  it("errorBody keeps it for CONFLICT and drops it for every other code", () => {
+describe("`reason` plumbing (kept for future 409 causes)", () => {
+  it("errorBody keeps a reason for CONFLICT and drops it for every other code", () => {
     expect(errorBody("CONFLICT", "m", undefined, "WHY")).toEqual({ error: { code: "CONFLICT", message: "m", reason: "WHY" } });
     for (const code of ["VALIDATION", "FORBIDDEN", "NOT_FOUND", "INTERNAL", "RATE_LIMITED"]) {
       expect(errorBody(code, "m", undefined, "WHY"), code).toEqual({ error: { code, message: "m" } });
     }
     expect(errorBody("CONFLICT", "m")).toEqual({ error: { code: "CONFLICT", message: "m" } });
+    expect(new ServiceError("CONFLICT", "m", undefined, "WHY").reason).toBe("WHY");
+  });
+});
+
+describe("restoring a deleted vehicle (no such path exists today)", () => {
+  it("there is no restore or undelete route or service", () => {
+    expect(readFileSync("src/routes/vehicles.ts", "utf8")).not.toMatch(/restore|undelete/i);
+    expect(readFileSync("src/services/vehicle.service.ts", "utf8")).not.toMatch(/export async function (restore|undelete)/i);
   });
 
-  it("a ServiceError carries it only when given, and the handler sends it only on a conflict", async () => {
-    expect(new ServiceError("CONFLICT", "m").reason).toBeUndefined();
-    expect(new ServiceError("CONFLICT", "m", undefined, "WHY").reason).toBe("WHY");
-    // end to end: the 403 for the manager flag has no reason even though other errors in the same flow do
-    const forbidden = await ctx.call("MANAGER", "POST", "/api/v1/vehicles", legacyBody(DELETED, { reuseDeletedSerial: true }));
-    expect(JSON.stringify(forbidden.body)).not.toContain("reason");
+  // DOCUMENTED TODO for the day a restore path is added: restoring a vehicle whose serial is now held by an ACTIVE vehicle must be a
+  // 409 (the partial unique index would refuse the UPDATE anyway; the service must turn that into a 409 with fieldErrors.serial).
+  it.skip("restoring a vehicle whose serial an active vehicle now holds is a 409 with fieldErrors.serial 'already in use'", () => {
+    // 1. delete FC106's holder, create a new FC106 (active), 2. restore the deleted one, 3. expect 409 and the deleted one still deleted.
   });
 });

@@ -1,6 +1,6 @@
 # Staff frontend integration contract
 
-**Contract version:** 1.7.0 (2026-11-04). Staff zone: everything under `/api/v1`, plus the signed file links under `/f/v1`.
+**Contract version:** 1.9.0 (2026-11-07). Staff zone: everything under `/api/v1`, plus the signed file links under `/f/v1`.
 **Written for:** a frontend developer who has never seen this repository and is building the staff web app (Next.js) or the iOS staff app against this API.
 **Source of truth:** the code. This file is checked against the running routes by `tests/staff-frontend-contract.test.ts`: every JSON example below (a fenced block marked `example:<id>`) is compared, key for key, with what the real route returns for fake data, and every `/api/v1` route must appear here with the roles the code allows. If the test fails, this file or the code is wrong. `docs/api-contract.md` is the shorter reference for all zones; this file is the complete staff contract.
 
@@ -26,7 +26,7 @@ All values in examples are fake. `https://api.example.test` stands for the API's
 
 **Base address.** `https://api.example.test` (placeholder). Every path below starts with `/api/v1` unless stated.
 
-**Envelope.** Success: `{ "data": <payload> }`. Error: `{ "error": { "code", "message", "fieldErrors"? } }`. `fieldErrors` is an object of `field name -> one message`, present on validation problems and some conflicts. `message` is safe to show to a person; do not parse it, use `code` and the HTTP status. **`fieldErrors` values are always one string per field, never an array** (the same shape as the original mobile contract). A `409 CONFLICT` may also carry an optional `reason` string, a stable machine-readable cause (`SERIAL_PREVIOUSLY_USED`, `SERIAL_REUSE_NOT_ENABLED`; more may be added): it exists on a `409` only, and every other error is exactly `{ code, message, fieldErrors? }`. Show `message`; branch on `reason` only if you need to.
+**Envelope.** Success: `{ "data": <payload> }`. Error: `{ "error": { "code", "message", "fieldErrors"? } }`. `fieldErrors` is an object of `field name -> one message`, present on validation problems and some conflicts. `message` is safe to show to a person; do not parse it, use `code` and the HTTP status. **`fieldErrors` values are always one string per field, never an array** (the same shape as the original mobile contract). A `409 CONFLICT` **may** carry an optional `reason` string, a stable machine-readable cause, on a `409` only (since 1.6.0). **No `reason` is returned today** (the two serial reasons of 1.6.0 were removed in 1.8.0); treat it as reserved, ignore it if you meet one, and use `code`, the HTTP status and `fieldErrors`. Every other error is exactly `{ code, message, fieldErrors? }`.
 
 | `code` | HTTP | Meaning for the UI |
 |---|---|---|
@@ -34,7 +34,7 @@ All values in examples are fake. `https://api.example.test` stands for the API's
 | `UNAUTHENTICATED` | 401 | No usable token, an expired token, or the account is no longer allowed in (deactivated, removed). Refresh once, then sign in again |
 | `FORBIDDEN` | 403 | The role may not do this, or the account is locked, or a refresh token is no good (see section 2) |
 | `NOT_FOUND` | 404 | No such thing, **or it belongs to another organisation** (never 403 for that), or the route does not exist (message `Route not found.`) |
-| `CONFLICT` | 409 | A concurrent or duplicate change (serial taken, a decision already made, a duplicate email or name). Reload and retry. May carry a `reason` (below). Where a field is to blame the body carries `fieldErrors` keyed by that field (see below) |
+| `CONFLICT` | 409 | A concurrent or duplicate change (serial taken, a decision already made, a duplicate email or name). Reload and retry. May carry a `reason` (reserved; none is returned today). Where a field is to blame the body carries `fieldErrors` keyed by that field (see below) |
 | `RATE_LIMITED` | 429 | Too many requests. Wait `Retry-After` seconds |
 | `INTERNAL` | 500 | A bug or an outage. The message is always `Something went wrong.`; details are only in the server log |
 
@@ -88,7 +88,8 @@ Example (409):
     "code": "CONFLICT",
     "message": "Serial FC102 already exists.",
     "fieldErrors": {
-      "serialNumber": "Serial FC102 already exists."
+      "serialNumber": "Serial FC102 already exists.",
+      "serial": "already in use"
     }
   }
 }
@@ -436,6 +437,7 @@ Roles are exactly `ADMINISTRATOR | MANAGER | OPERATOR | VIEWER`, enforced on the
 | GET | `/api/v1/chat/conversations/:id/messages` | scoped | scoped | scoped | — |
 | POST | `/api/v1/chat/conversations/:id/messages` | scoped | scoped | scoped | — |
 | POST | `/api/v1/chat/conversations/:id/handled` | scoped | scoped | scoped | — |
+| POST | `/api/v1/chat/conversations/:id/read` | scoped | scoped | scoped | — |
 | GET | `/api/v1/stock` | yes | yes | — | — |
 | POST | `/api/v1/stock` | yes | yes | — | — |
 | GET | `/api/v1/stock/:id` | yes | yes | — | — |
@@ -472,7 +474,7 @@ Roles are exactly `ADMINISTRATOR | MANAGER | OPERATOR | VIEWER`, enforced on the
 
 **Serial numbers.** The server assigns `serial` on create (`FC` or `FL` plus the next number for the track). `GET /vehicles/next-serial` is only a preview. A *legacy entry* (`isLegacyEntry: true`) supplies `legacySerialNumber` instead. The serial is read-only after creation: `PUT` cannot change it or the track; only an ADMINISTRATOR can correct it, with `PATCH /vehicles/:id/serial`.
 
-**Soft delete.** `DELETE /vehicles/:id` hides the vehicle from every read (list, detail, reports, files, milestones, search, dashboard). It is not restorable through the API. Its serial is not reused.
+**Soft delete.** `DELETE /vehicles/:id` hides the vehicle from every read (list, detail, reports, files, milestones, search, dashboard). It is not restorable through the API (there is no restore route). **Its serial becomes free** (since 1.8.0): a new vehicle may be created with it, or an administrator may correct a vehicle to it, and then the same serial exists on one deleted and one active vehicle. Lookups by serial only ever find the active one; the deleted one is identified by its id (activity log, notifications and link requests carry ids).
 
 **Vehicle remark.** `vehicleRemark` is one single text field (max 2000) that is **overwritten** on every `PUT`; there is no remark history. Send the whole current text back when you save.
 
@@ -765,7 +767,7 @@ Example (200; the second name belongs to an FC vehicle converted to local, which
 
 **Roles:** ADMINISTRATOR, MANAGER, OPERATOR, VIEWER
 
-One vehicle by **serial** (the serial is unique within the organisation). Unknown, deleted or another organisation's serial: `404`. The detail uses **objects** (`{ id, name }`) for lookups so an edit form can preselect them. `shipmentStatus` is the **effective** status to display (stored value with the ETD and cancelled-row-colour rules applied, `CANCELLED` computed on FC); `storedShipmentStatus` is the stored value (`PENDING`, `BOOKING_RECEIVED` or `SHIPPED`). Use `storedShipmentStatus` only to explain a difference.
+One vehicle by **serial** (a serial is unique among the organisation's **active** vehicles; a deleted vehicle may share it and is never returned). Unknown, deleted or another organisation's serial: `404`. The detail uses **objects** (`{ id, name }`) for lookups so an edit form can preselect them. `shipmentStatus` is the **effective** status to display (stored value with the ETD and cancelled-row-colour rules applied, `CANCELLED` computed on FC); `storedShipmentStatus` is the stored value (`PENDING`, `BOOKING_RECEIVED` or `SHIPPED`). Use `storedShipmentStatus` only to explain a difference.
 
 Example (200):
 
@@ -1026,8 +1028,8 @@ Create. Body fields (type; optional unless marked; empty strings and `null` clea
 |---|---|
 | `track` (required) | `"FC"` or `"FL"` |
 | `isLegacyEntry` (required) | boolean; `true` means you supply the serial number yourself |
-| `legacySerialNumber` | positive integer; required when `isLegacyEntry` is true. A serial that belongs to a **live** vehicle is `409` with `fieldErrors.legacySerialNumber`; one that belonged to a **deleted** vehicle is `409` with `reason: "SERIAL_PREVIOUSLY_USED"` (deleted serials are not handed out again) |
-| `reuseDeletedSerial` | boolean, optional, **administrator only**. A MANAGER who sends `true` gets `403 FORBIDDEN` (`fieldErrors.reuseDeletedSerial`) and nothing is created. For an administrator it asks to reuse a deleted vehicle's serial; **that is not enabled yet** (the database still forbids it until a migration is approved), so the answer is `409` with `reason: "SERIAL_REUSE_NOT_ENABLED"`. With a free serial the flag changes nothing. Automatically assigned serials never reuse a number |
+| `legacySerialNumber` | positive integer; required when `isLegacyEntry` is true. A serial that an **active** vehicle holds is `409` with `fieldErrors.legacySerialNumber` and `fieldErrors.serial: "already in use"`. A serial held **only by deleted vehicles is free: the create succeeds** (since 1.8.0) and the answer says `serialReused: true`. The counter still follows `lastNumber = max(lastNumber, entered)`: a reused lower number does not move it |
+| `reuseDeletedSerial` | **Deprecated since 1.8.0: accepted and ignored.** It used to ask for permission to reuse a deleted vehicle's serial (1.6.0 and 1.7.0 answered `403` for a MANAGER and `409` with a `reason` for everyone else). Reuse is now free, so the field does nothing and no `403` is returned. Stop sending it; it will be rejected as an unknown field in a later MAJOR version |
 | `shipmentStatus` | `PENDING`, `BOOKING_RECEIVED` or `SHIPPED` (otherwise the server decides from the ETD) |
 | `chassisNo` (required) | string, 1-100 |
 | `brandId`, `modelId` (required) | ids |
@@ -1050,7 +1052,7 @@ Create. Body fields (type; optional unless marked; empty strings and `null` clea
 
 Cross-field rules (each a `400` with a `fieldErrors` entry on the named field): a shipping method needs a `freightAgentId`; `CONTAINER` also needs a `packingAgentId`; `eta` must be after `etd`; not both `auctionHallId` and `supplierId`; `hasPartnership` needs `partnerName`; legacy entry needs `legacySerialNumber`. Every id must belong to your organisation. File keys are checked (they must be inside your organisation's staging folder and the object must exist, section 6). On FL the shipping fields are dropped.
 
-Answers **201 with the new vehicle in the detail shape**, exactly what `GET /vehicles/:serial` returns (section 5.3): names and nested objects, the effective `track`, no `org_id` and no `serialPrefix`. A `409 CONFLICT` means the serial was taken by a concurrent save: retry.
+Answers **201 with the new vehicle in the detail shape**, exactly what `GET /vehicles/:serial` returns (section 5.3): names and nested objects, the effective `track`, no `org_id` and no `serialPrefix`. A `409 CONFLICT` means the serial was taken by a concurrent save: retry. **Plus one key, `serialReused: boolean` (since 1.8.0):** `true` when the serial was taken over from a deleted vehicle (the activity log of the creation then records `reusedFromVehicleId`, the id of the most recent deleted vehicle that held it), `false` otherwise (always `false` for an automatically assigned serial: the counter never goes back).
 
 Example (201):
 
@@ -1127,7 +1129,8 @@ Example (201):
     "customerVisible": null,
     "portOfLoading": null,
     "portOfDischarge": null,
-    "voyageNo": null
+    "voyageNo": null,
+    "serialReused": false
   }
 }
 ```
@@ -1332,14 +1335,15 @@ See `revert-to-local`.
 
 **Roles:** ADMINISTRATOR
 
-Administrator correction. Body `{ "serialNumber": positive integer (max 999999999), "reuseDeletedSerial"?: boolean }`; the prefix stays. Answers `{ "data": { "serial": "FC150" } }`. `409` with `fieldErrors.serialNumber` if another vehicle has that number. If the number belonged to a **deleted** vehicle the `409` also carries `reason: "SERIAL_PREVIOUSLY_USED"`; with `reuseDeletedSerial: true` it carries `reason: "SERIAL_REUSE_NOT_ENABLED"` (reuse is not enabled yet). A MANAGER cannot call this route at all (`403`).
+Administrator correction (**ADMINISTRATOR only**, unchanged). Body `{ "serialNumber": positive integer (max 999999999), "reuseDeletedSerial"?: boolean (deprecated, ignored) }`; the prefix stays. Answers `{ "data": { "serial": "FC150", "serialReused": false } }` (since 1.8.0 with `serialReused`). `409` with `fieldErrors.serialNumber` and `fieldErrors.serial: "already in use"` if **another active** vehicle has that number. A number held only by deleted vehicles is **free**: the correction succeeds with `serialReused: true`, and the activity log records `reusedFromVehicleId`. Only an administrator may correct a serial; a MANAGER gets `403`.
 
 Example (200):
 
 ```json example:vehicles.serial 200
 {
   "data": {
-    "serial": "FC150"
+    "serial": "FC150",
+    "serialReused": false
   }
 }
 ```
@@ -1351,23 +1355,20 @@ Example (409):
     "code": "CONFLICT",
     "message": "Serial FC102 already exists.",
     "fieldErrors": {
-      "serialNumber": "Serial FC102 already exists."
+      "serialNumber": "Serial FC102 already exists.",
+      "serial": "already in use"
     }
   }
 }
 ```
 
-Example (409, the number belonged to a deleted vehicle):
+Example (200, the number belonged to a deleted vehicle, so it is reused):
 
-```json example:vehicles.serial.reused 409
+```json example:vehicles.serial.reuse 200
 {
-  "error": {
-    "code": "CONFLICT",
-    "message": "Serial FC106 belonged to a deleted vehicle and is not reused.",
-    "fieldErrors": {
-      "serialNumber": "Serial FC106 belonged to a deleted vehicle and is not reused."
-    },
-    "reason": "SERIAL_PREVIOUSLY_USED"
+  "data": {
+    "serial": "FC106",
+    "serialReused": true
   }
 }
 ```
@@ -3203,7 +3204,7 @@ Staff answer customers' questions. See the role matrix: an OPERATOR sees only th
 
 **Roles:** ADMINISTRATOR, MANAGER, OPERATOR (scoped to assigned customers)
 
-The inbox. Query (strict): `page`, `pageSize` (1-50, default 20), `status` (`open` default, `handled`, `all`). Newest activity first.
+The inbox. Query (strict): `page`, `pageSize` (1-50, default 20), `status` (`open` default, `handled`, `all`). Newest activity first. Each row has `unreadCount` (since 1.9.0): the customer messages that no staff member has read yet. The read marker is **one per conversation, shared by all staff who can see it**: when anyone calls `POST .../read`, it is read for everyone. A conversation that existed before 1.9.0 shows all its customer messages as unread until someone opens it once.
 
 Example (200):
 
@@ -3228,7 +3229,8 @@ Example (200):
           "senderType": "CUSTOMER",
           "snippet": "Where is my vehicle now?",
           "createdAt": "2026-10-30T12:00:00.000Z"
-        }
+        },
+        "unreadCount": 1
       }
     ],
     "total": 1,
@@ -3309,6 +3311,23 @@ Example (200):
   "data": {
     "id": "conv_1",
     "handled": true
+  }
+}
+```
+
+#### POST /api/v1/chat/conversations/:id/read
+
+**Roles:** ADMINISTRATOR, MANAGER, OPERATOR (scoped to assigned customers)
+
+No body. Call it when a staff member opens the conversation: every customer message up to now becomes read for staff, and `unreadCount` in the inbox goes to 0 until the customer writes again. It never changes the customer's own unread count. Calling it again is harmless; the marker never moves backwards. Writes ActivityLog `MARK_CHAT_READ` (no text). A conversation out of scope (another agent's customer, another org, an unknown id) is `404 Conversation not found.`
+
+Example (200):
+
+```json example:chat.read 200
+{
+  "data": {
+    "id": "conv_1",
+    "unreadCount": 0
   }
 }
 ```
@@ -4073,6 +4092,8 @@ Breaking changes are announced here before they ship. The test `tests/staff-fron
 
 | Version | Date | Change |
 |---|---|---|
+| 1.9.0 | 2026-11-07 | **Additive:** `unreadCount` on every inbox row of `GET /chat/conversations`, and the new `POST /chat/conversations/:id/read` (mark read for staff). Nothing existing changed or was removed |
+| 1.8.0 | 2026-11-05 | **Behaviour change (free reuse of serials, ADR 0009):** a serial is unique among **non-deleted** vehicles only. Deleting a vehicle frees its serial: `POST /vehicles` (legacy serial) and `PATCH /vehicles/:id/serial` now **succeed** for a serial held only by deleted vehicles (they used to answer `409`); a clash with an **active** vehicle is still `409`, and its `fieldErrors` now also has `serial: "already in use"` (the old `legacySerialNumber` / `serialNumber` key stays). **Additive:** `serialReused: boolean` on the answers of create and of the correction. **Removed:** the reasons `SERIAL_PREVIOUSLY_USED` and `SERIAL_REUSE_NOT_ENABLED` (added in 1.6.0 and never needed by a released client): the code is no longer returned and no `reason` is returned at all. **Deprecated:** the body field `reuseDeletedSerial` is accepted and ignored (no `403` for a MANAGER any more). A client that assumed a serial identifies one vehicle for ever must key on the vehicle `id` |
 | 1.7.0 | 2026-11-04 | **Additive; with no new query parameter every existing answer is byte-for-byte the same** (except the new `isSuperAdmin` key of the profile): optional `track=FC\|FL` on the filter-bar lookups, `GET /customers/search`, `GET /vehicles/destinations` and `GET /lookups/row-colour-statuses` (only values used by non-deleted vehicles of that effective track; other values are `400`); new `GET /vehicles/partner-names`; `isSuperAdmin` on `GET` and `PATCH /profile`; the `X-Contract-Version` header on every `/api/v1` answer (also exposed to browsers). The timeline steps are listed in full (section 5.5) |
 | 1.6.0 | 2026-11-04 | **Additive:** an optional `reason` string on `409` errors only (`SERIAL_PREVIOUSLY_USED`, `SERIAL_REUSE_NOT_ENABLED`); an optional `reuseDeletedSerial` flag on `POST /vehicles` and `PATCH /vehicles/:id/serial` (a MANAGER who sends `true` gets `403`; reuse of a deleted serial is not enabled yet, so an administrator gets `409`); a deleted vehicle's serial is now reported as such instead of "already exists". `fieldErrors` is documented as one string per field. The default list order is confirmed as `serial` descending, track `FC` |
 | 1.5.1 | 2026-11-03 | Wording only: section 8 now cites the original mobile contract (`docs/legacy/mobile-api-reference.md`) for the sign-in and refresh statuses and the default list order, and `docs/legacy-parity-report.md` compares every legacy endpoint with this API. No behaviour changed |

@@ -52,6 +52,7 @@ Every generated secret below must be **at least 32 bytes** (this gives 64 charac
 | `FILE_LINK_MAX_TTL_SECONDS` | optional (default 900) | The longest a link is ever accepted | default | no | 30 to 900 |
 | `RETENTION_DRY_RUN` | optional (default `true`) | `true`: the cleanup job only counts. `false`: it deletes | default | no | Switch to `false` only on purpose (`docs/runbook.md`) |
 | `RETENTION_OTP_DAYS`, `RETENTION_SESSION_DAYS`, `RETENTION_ALERT_DAYS`, `UNVERIFIED_ACCOUNT_DAYS` | optional (defaults 30, 30, 180, 14) | Cleanup ages in days | default | no | Change only after a privacy decision |
+| `RETENTION_CHAT_DAYS`, `RETENTION_ENQUIRY_DAYS` | optional (default `0` = never delete) | Delete chat conversations idle for more than N days, and website enquiries older than N days | default | no | Personal messages: keep `0` until the business has decided the period (`docs/privacy-checklist.md`). Obeys `RETENTION_DRY_RUN` |
 | `PUBLIC_STOCK_ENABLED` | optional (default `false`) | Mounts the public website API (`/api/public`) and the staff stock routes | default | no | Turn on at the website launch (`docs/launch-checklist-stock.md`) |
 | `PUBLIC_ALLOWED_ORIGINS` | optional (default none) | Website origins allowed to call `/api/public` | fixed | no | Comma-separated, never `*` |
 | `PUBLIC_STOCK_IMAGE_BASE_URL` | optional | The address stock images are served from | fixed | no | A custom domain on the public bucket in production (an `r2.dev` address is refused there); https, no credentials, query or fragment |

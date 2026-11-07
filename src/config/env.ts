@@ -4,7 +4,6 @@
 
 import { z } from "zod";
 import { hasInvalidAllowListEntry, parseAllowList } from "../lib/email-allow-list.js";
-import { hasInvalidAllowListEntry, parseAllowList } from "../lib/email-allow-list.js";
 
 // Not addresses: a client address is never read from these.
 const FORBIDDEN_IP_HEADERS = new Set(["authorization", "cookie", "set-cookie", "host", "content-type", "content-length", "user-agent", "origin", "referer", "accept"]);
@@ -95,6 +94,11 @@ const baseSchema = z.object({
   RETENTION_SESSION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
   RETENTION_ALERT_DAYS: z.coerce.number().int().min(1).max(3650).default(180),
   UNVERIFIED_ACCOUNT_DAYS: z.coerce.number().int().min(1).max(3650).default(14),
+  // Chats and website enquiries hold personal messages. 0 (the DEFAULT) means NEVER delete them. A number N above 0 lets the daily job delete
+  // conversations that have had no message for more than N days (their messages go with them) and enquiries created more than N days ago.
+  // Both obey RETENTION_DRY_RUN (a dry run only counts) and work in batches of 1000 per organisation per run.
+  RETENTION_CHAT_DAYS: z.coerce.number().int().min(0).max(3650).default(0),
+  RETENTION_ENQUIRY_DAYS: z.coerce.number().int().min(0).max(3650).default(0),
   // How long (seconds) the API remembers that a staff user is still active and which role they hold, before it reads the
   // database again. Changes made in this process apply at once; another instance sees them within this time. 0 turns it off.
   STAFF_AUTH_CACHE_SECONDS: z.coerce.number().int().min(0).max(300).default(30),

@@ -6,7 +6,7 @@ import type { FastifyInstance } from "fastify";
 import { CHAT_ROLES } from "../config/roles.js";
 import { success } from "../lib/response.js";
 import { authenticate, currentUser } from "../plugins/auth.js";
-import { listInbox, listStaffMessages, replyAsStaff, setConversationHandled } from "../services/chat.service.js";
+import { listInbox, listStaffMessages, markStaffConversationRead, replyAsStaff, setConversationHandled } from "../services/chat.service.js";
 
 export function registerStaffChatRoutes(app: FastifyInstance) {
   const chat = { preHandler: authenticate(CHAT_ROLES) };
@@ -21,6 +21,8 @@ export function registerStaffChatRoutes(app: FastifyInstance) {
   app.post<Params>("/chat/conversations/:id/messages", chat, async (request, reply) =>
     reply.status(201).send(success(await replyAsStaff(currentUser(request), request.params.id, request.body)))
   );
+
+  app.post<Params>("/chat/conversations/:id/read", chat, async (request) => success(await markStaffConversationRead(currentUser(request), request.params.id)));
 
   app.post<Params>("/chat/conversations/:id/handled", chat, async (request) =>
     success(await setConversationHandled(currentUser(request), request.params.id, request.body))

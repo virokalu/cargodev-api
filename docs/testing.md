@@ -38,7 +38,7 @@ CI runs both in the required `ci` job.
 The in-memory fake proves our logic. It cannot prove anything that depends on Postgres itself, so these tests run against a real one:
 
 - **NULL handling.** `{ not: id }` and a top-level `NOT` on a nullable column drop the NULL rows (SQL three-valued logic), while `NOT` over a relation filter keeps rows with no related row. Found while writing `null-semantics.db.test.ts`; it exposed a real bug in the row-colour filter.
-- **Serial numbers.** Parallel creates get distinct, gap-free serials; the counter never moves backwards under concurrent legacy entries; the unique constraints are the backstop.
+- **Serial numbers.** Parallel creates get distinct, gap-free serials; the counter never moves backwards under concurrent legacy entries; the unique constraints are the backstop. Serial uniqueness among non-deleted vehicles (free reuse, ADR 0009) is proven in `tests/db/serial-uniqueness.db.test.ts` in both database states (migration 1 only, then migration 2 applied by the test), including concurrent creates and corrections; the test harness applies migration 1 after building the schema (`handWrittenMigrationSql` in `tests/db/global-setup.ts`) because Prisma cannot express partial indexes.
 - **Advisory locks.** A second session is refused while the first holds the job lock, the lock is released on commit, rollback and a dying connection, and two scheduler instances run a job one at a time.
 - **Vehicle and dashboard SQL.** The effective-status filters, relation search and ordering, NULLs-first/last ordering, soft delete, org scoping, and that the dashboard's counts agree with the list each bar links to.
 
@@ -178,3 +178,11 @@ If `migrate dev` cannot create its shadow database, do not loosen permissions: u
 - `tests/viewer-privacy.test.ts`: a VIEWER gets customer list rows and by-customer report groups without email, phone and address (exact key sets, the keys absent), cannot find a customer by email or phone, and the other roles are unchanged.
 - Timing tests use a virtual clock (`tests/helpers/virtual-clock.ts`), not the wall clock: `Date` and `setTimeout` are faked and the clock jumps to the next timer whenever the request waits on one. A response floor of 120 ms is then exactly 120 virtual ms however busy the machine is (checked with twice as many busy loops as CPU cores), and a branch that waits for something extra (an inline email send) shows up as extra virtual time. Bcrypt work is checked by counting calls (`tests/login-enumeration.test.ts`, `tests/customer-zone.test.ts`).
 - The `org_id` scan (`tests/helpers/org-scan.ts`, used by `tests/org-scoped-writes.test.ts`) reads every `.ts` file under `src/` (new files are covered with no change), finds each Prisma call, and requires `org_id` at the TOP LEVEL of that call's own `where` (spreads, `AND` arrays and helper functions are followed; a nested `org_id` or `user.org_id` does not count). It covers writes and reads of tables with an `org_id` column; photos and documents must use `vehicle: { org_id }`. The few reads that are scoped another way are listed in the test with the reason.
+
+## Added with the chat, privacy and lookup work (2026-11-07)
+
+- `tests/chat-unread.test.ts`: unread counts and mark-read per side, scope and IDOR, marker never backwards, activity log.
+- `tests/activity-scrub.test.ts` and `tests/db/activity-scrub.db.test.ts`: the activity-log scrub (ADR 0010), on real Postgres too.
+- `tests/db/retention-chat.db.test.ts`: chat and enquiry retention (batch limit, dry run, org isolation).
+- `tests/lookup-case-report.test.ts` and `tests/db/lookup-case-index.db.test.ts`: the lookup-case duplicate check and the prepared unique indexes (applied inside a rolled-back transaction).
+- `tests/db/serial-uniqueness.db.test.ts`: serial uniqueness with the partial indexes, before and after the contract migration.

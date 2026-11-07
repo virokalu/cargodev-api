@@ -223,7 +223,7 @@ export const vehicleCreateSchema = z
     track: z.enum(["FC", "FL"]),
     isLegacyEntry: z.boolean(),
     legacySerialNumber: z.number().int().positive().nullable().optional(),
-    // Administrator only (a MANAGER sending true is a 403): allow the legacy serial of a DELETED vehicle. See serial.service.ts serialTaken.
+    // DEPRECATED since contract 1.8.0: accepted and IGNORED. A deleted vehicle's serial is free for everyone who may create (ADR 0009).
     reuseDeletedSerial: z.boolean().optional(),
     // Only honoured by the service when isLegacyEntry && track === "FC" —
     // otherwise status stays derived from ETD (Tech Doc §1).
@@ -425,6 +425,7 @@ export const serialCorrectionBodySchema = z.object({
     .int("serialNumber must be a whole number")
     .positive("serialNumber must be positive")
     .max(999_999_999),
+  // DEPRECATED since contract 1.8.0: accepted and IGNORED (see vehicleCreateSchema).
   reuseDeletedSerial: z.boolean().optional(),
 });
 

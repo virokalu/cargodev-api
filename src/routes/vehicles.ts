@@ -140,8 +140,9 @@ export function registerVehicleRoutes(app: FastifyInstance) {
 
   app.patch<IdParams>("/vehicles/:id/serial", { preHandler: authenticate(CAN_CORRECT_SERIAL) }, async (request) => {
     const user = currentUser(request);
-    const { serialNumber, reuseDeletedSerial } = parseInput(serialCorrectionBodySchema, request.body, "Invalid request body.");
-    return success(await correctVehicleSerialNumber(user.orgId, user.id, request.params.id, serialNumber, reuseDeletedSerial === true));
+    // reuseDeletedSerial is DEPRECATED: it is still accepted by the schema and is ignored.
+    const { serialNumber } = parseInput(serialCorrectionBodySchema, request.body, "Invalid request body.");
+    return success(await correctVehicleSerialNumber(user.orgId, user.id, request.params.id, serialNumber));
   });
 
   app.get("/vehicles/check-chassis", auth, async (request) => {

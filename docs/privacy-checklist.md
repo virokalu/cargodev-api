@@ -14,11 +14,11 @@ What the privacy policy and the data handling must cover for the customer app, t
 | Staff sign-in sessions (token hash, user agent, IP address when the session starts) | `RefreshToken` | Stay signed in | Expired or revoked rows deleted after `RETENTION_SESSION_DAYS` (30) |
 | Push device tokens (Expo token, platform, app version, last seen) | `DeviceToken` | Notifications | Until sign-out, until the account is deleted, or until Expo reports the token dead |
 | Customer alerts (title and text about a vehicle) | `Notification` | In-app history | **Read** alerts older than `RETENTION_ALERT_DAYS` (180) are deleted; unread alerts are kept; deleted with the account |
-| Chat messages and conversations | `Message`, `Conversation` | Support | **No automatic deletion. Open question 1.** Deleted when the customer deletes their account |
-| Website enquiries (name, email, phone, message) | `Enquiry` | Reply to the enquiry | **No automatic deletion. Open question 1.** Not linked to an account, so not removed when an account is deleted |
+| Chat messages and conversations | `Message`, `Conversation` | Support | **Kept until the operator sets `RETENTION_CHAT_DAYS` above 0** (default 0 = never delete): then conversations with no message for more than that many days are deleted with their messages, in batches, as part of the daily job (dry run until `RETENTION_DRY_RUN=false`). Always deleted when the customer deletes their account. **Open question 1 decides the number** |
+| Website enquiries (name, email, phone, message) | `Enquiry` | Reply to the enquiry | **Kept until the operator sets `RETENTION_ENQUIRY_DAYS` above 0** (default 0 = never delete): then enquiries created more than that many days ago are deleted, handled or not, in batches by the daily job (dry run until `RETENTION_DRY_RUN=false`). Not linked to an account, so never removed when an account is deleted. **Open question 1 decides the number** |
 | Staff name, email, phone, role | `User` | Run the business | While the account exists; staff are deactivated, not erased (**open question 4**) |
 | Documents and photos about the customers' vehicles | R2 (private bucket) | Service | While the vehicle record exists. Customers reach them only through the API |
-| Activity log (who did what, when) | `ActivityLog` | Audit | Kept. **It is not free of personal values**: a staff edit of a customer stores the before and after name, email, phone and address; vehicle edits store the vehicle row. **Open question 3** |
+| Activity log (who did what, when) | `ActivityLog` | Audit | Kept, **with one deliberate exception (ADR 0010):** when a customer is anonymised (they deleted their account, or the retention job removed a never-verified sign-up), the five personal fields (name, email, phone, address, company name) in the `before` and `after` of THAT customer's own rows (entity `User` or `Customer`, that id, that organisation) are replaced by `[removed]`, in the same transaction, and one summary row (`CUSTOMER_ACTIVITY_SCRUBBED`, counts only) is written. Every other row and field is untouched. Staff edits of other people keep their values |
 | Retention summary rows (counts only) | `ActivityLog` | Show what the clean-up removed | Kept |
 
 Logs (server output) never contain passwords, codes, tokens, message bodies or full email addresses; request lines carry only the method, the route pattern, the status, the duration and the request id (enforced by tests).
@@ -29,7 +29,7 @@ In one transaction: the row is anonymised (name replaced, email, phone, address,
 
 ## The daily clean-up (retention)
 
-Runs inside the daily job; **a dry run until `RETENTION_DRY_RUN=false`** (the default, in every environment): it logs one line of counts and removes nothing. It never touches chats or enquiries. Details: `docs/architecture.md`, `docs/env.md`.
+Runs inside the daily job; **a dry run until `RETENTION_DRY_RUN=false`** (the default, in every environment): it logs one line of counts and removes nothing. It touches chats and enquiries only when `RETENTION_CHAT_DAYS` / `RETENTION_ENQUIRY_DAYS` are above 0. Details: `docs/architecture.md`, `docs/env.md`.
 
 ## Open questions for FTJ (decisions the business must make)
 
@@ -53,3 +53,14 @@ Runs inside the daily job; **a dry run until `RETENTION_DRY_RUN=false`** (the de
 - [ ] The public website enquiry form states what happens to the message and links the policy; anti-spam checks do not collect more than needed.
 - [ ] Cookies or similar on the website are covered (the API itself sets none).
 - [ ] Logs never contain passwords, codes, tokens, message bodies or full email addresses (enforced by tests; mention in the security section).
+
+## The activity log is append-only, with one exception (ADR 0010)
+
+The log exists to answer "who did what and when", and is not rewritten. A staff edit of a customer, however, stores the old and new values of the fields it changed, so the log held a deleted person's name, e-mail, phone and address for ever. That cannot be defended once the person has asked to be forgotten. So, **when a customer is anonymised** and only then:
+
+- the five fields `name`, `email`, `phone`, `address`, `companyName` are replaced by `[removed]` wherever they occur in the `before` and `after` of that customer's rows (entity `User` or `Customer`, `entityId` = the customer, same organisation); a field that is already empty or already removed is left alone;
+- it happens in the same transaction as the anonymisation (all or nothing);
+- one row `CUSTOMER_ACTIVITY_SCRUBBED` per customer records the counts (`rowsScrubbed`, `fieldsReplaced`), so the audit trail shows that a scrub happened and how much it changed, and nothing personal;
+- no other row, field, customer, entity or organisation is touched (proved on real Postgres: `tests/db/activity-scrub.db.test.ts`).
+
+What stays: who acted, when, which action and which entity id. The staff member's own edits of other people are not scrubbed.

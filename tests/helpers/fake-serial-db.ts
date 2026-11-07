@@ -20,7 +20,8 @@ interface VehicleRow {
 }
 
 type CounterKey = { org_id_prefix: { org_id: string; prefix: Prefix } };
-type VehicleKey = { org_id_serial: { org_id: string; serial: string } };
+/** The only vehicle query the serial engine makes: by organisation and serial, active (deletedAt null), deleted (not null) or either. */
+type VehicleWhere = { org_id: string; serial: string; deletedAt?: null | { not: null }; id?: { not: string } };
 
 export function createFakeSerialDb() {
   const counters: CounterRow[] = [];
@@ -62,10 +63,18 @@ export function createFakeSerialDb() {
   };
 
   const vehicle = {
-    async findUnique(args: { where: VehicleKey; select?: { id: true } }) {
-      const k = args.where.org_id_serial;
-      const row = vehicles.find((v) => v.org_id === k.org_id && v.serial === k.serial);
-      return row ? { id: row.id, deletedAt: row.deletedAt } : null;
+    async findFirst(args: { where: VehicleWhere; orderBy?: { deletedAt: "desc" }; select?: { id: true } }) {
+      const w = args.where;
+      const matches = vehicles.filter(
+        (v) =>
+          v.org_id === w.org_id &&
+          v.serial === w.serial &&
+          (w.deletedAt === undefined || (w.deletedAt === null ? v.deletedAt === null : v.deletedAt !== null)) &&
+          (w.id === undefined || v.id !== w.id.not)
+      );
+      if (args.orderBy?.deletedAt === "desc") matches.sort((a, b) => (b.deletedAt?.getTime() ?? 0) - (a.deletedAt?.getTime() ?? 0));
+      const row = matches[0];
+      return row ? { id: row.id } : null;
     },
   };
 

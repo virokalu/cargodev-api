@@ -24,7 +24,7 @@ export class ServiceError extends Error {
     public code: ServiceErrorCode,
     message: string,
     public fieldErrors?: Record<string, string>,
-    /** A machine-readable reason, sent ONLY on a 409 CONFLICT (for example SERIAL_PREVIOUSLY_USED). Ignored for every other code. */
+    /** A machine-readable reason, sent ONLY on a 409 CONFLICT (none is returned today). Ignored for every other code. */
     public reason?: string
   ) {
     super(message);

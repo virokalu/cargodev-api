@@ -140,28 +140,7 @@ describe("vehicle serials", () => {
     expect(await prisma.vehicle.count({ where: { org_id: ORG_A, serial: "FC500" } })).toBe(1);
   });
 
-  it("a deleted vehicle's serial: 409 SERIAL_PREVIOUSLY_USED on create and correction, 403 for a manager's flag, SERIAL_REUSE_NOT_ENABLED for the administrator's", async () => {
-    await seedLookups();
-    await prisma.vehicle.createMany({
-      data: [
-        { id: "gone", org_id: ORG_A, serialPrefix: "FC" as const, serialNumber: 300, serial: "FC300", deletedAt: new Date("2026-10-01T00:00:00Z") },
-        { id: "live", org_id: ORG_A, serialPrefix: "FC" as const, serialNumber: 301, serial: "FC301" },
-      ],
-    });
-    const reasonOf = async (job: () => Promise<unknown>) => {
-      const error = await job().then(() => null, (e: unknown) => e);
-      expect(error).toBeInstanceOf(ServiceError);
-      return { code: (error as ServiceError).code, reason: (error as ServiceError).reason };
-    };
-    const manager = { ...actor, id: "mgr", role: "MANAGER" as const, name: "Manager" };
-    expect(await reasonOf(() => createVehicle(actor, body(300, "CH-D1")))).toEqual({ code: "CONFLICT", reason: "SERIAL_PREVIOUSLY_USED" });
-    expect(await reasonOf(() => createVehicle(actor, { ...body(300, "CH-D2"), reuseDeletedSerial: true }))).toEqual({ code: "CONFLICT", reason: "SERIAL_REUSE_NOT_ENABLED" });
-    expect(await reasonOf(() => createVehicle(manager, { ...body(300, "CH-D3"), reuseDeletedSerial: true }))).toEqual({ code: "FORBIDDEN", reason: undefined });
-    expect(await reasonOf(() => createVehicle(actor, body(301, "CH-L1")))).toEqual({ code: "CONFLICT", reason: undefined });
-    expect(await reasonOf(() => correctVehicleSerialNumber(ORG_A, "actor", "live", 300))).toEqual({ code: "CONFLICT", reason: "SERIAL_PREVIOUSLY_USED" });
-    expect(await reasonOf(() => correctVehicleSerialNumber(ORG_A, "actor", "live", 300, true))).toEqual({ code: "CONFLICT", reason: "SERIAL_REUSE_NOT_ENABLED" });
-    expect(await prisma.vehicle.count({ where: { org_id: ORG_A, serial: "FC300" } })).toBe(1); // the deleted one, still the only holder
-  });
+  // A deleted vehicle's serial (free reuse, ADR 0009) is covered on real Postgres in tests/db/serial-uniqueness.db.test.ts.
 
   it("ten corrections to the same serial at once: one wins, nine are 409 with fieldErrors.serialNumber (most pass the existence check together and are stopped by the database)", async () => {
     const ids = Array.from({ length: 10 }, (_, i) => `v${i}`);

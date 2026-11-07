@@ -51,6 +51,7 @@ Every route in the zone. `auth` is `none` or `customer` (a customer access token
 | 34 | POST | `/conversations/:id/messages` | customer | 8.4 |
 | 35 | GET | `/stream` | customer | 9.1 |
 | 36 | POST | `/presence/heartbeat` | customer | 9.2 |
+| 37 | POST | `/conversations/:id/read` | customer | 8.5 |
 
 ---
 
@@ -1003,7 +1004,8 @@ Auth: customer. Query (strict): `page` (default 1), `pageSize` (1 to 50, default
         "id": "ckfake0conversation000001",
         "vehicle": { "id": "ckfake0vehicle00000000001", "serial": "FC1024" },
         "lastMessageAt": "2026-10-29T09:30:00.000Z",
-        "lastMessage": { "senderType": "STAFF", "snippet": "Your vehicle is at the yard.", "createdAt": "2026-10-29T09:30:00.000Z" }
+        "lastMessage": { "senderType": "STAFF", "snippet": "Your vehicle is at the yard.", "createdAt": "2026-10-29T09:30:00.000Z" },
+        "unreadCount": 1
       }
     ],
     "total": 1,
@@ -1013,7 +1015,7 @@ Auth: customer. Query (strict): `page` (default 1), `pageSize` (1 to 50, default
 }
 ```
 
-`vehicle` is `null` for a general conversation, and also if it was about a vehicle the customer may no longer see. `lastMessage.snippet` is the first 120 characters (cut with a trailing `…`); `lastMessage` is null only for a conversation with no messages (cannot normally happen). Errors: 400 `VALIDATION` `Invalid query parameters.`, 429, common.
+`unreadCount` is the number of staff messages the customer has not read yet (the customer's own messages are never counted; a conversation never opened counts every staff message). Call `POST /conversations/:id/read` (8.5) when the customer opens the conversation. `vehicle` is `null` for a general conversation, and also if it was about a vehicle the customer may no longer see. `lastMessage.snippet` is the first 120 characters (cut with a trailing `…`); `lastMessage` is null only for a conversation with no messages (cannot normally happen). Errors: 400 `VALIDATION` `Invalid query parameters.`, 429, common.
 
 ### 8.2 `POST /conversations`
 
@@ -1078,6 +1080,10 @@ Auth: customer. Body `{ "body" }`, rules above. Success: `201` with the message 
 ```
 
 Errors: 400 `VALIDATION` `Please fix the highlighted fields.` with `fieldErrors.body`; 404 `NOT_FOUND` `Conversation not found.`; 429; common. Limits: 60 per minute per IP; **15 per minute per customer** (the budget is shared with starting a conversation). Sending a message reopens a conversation staff had marked handled. Do not auto-retry a send that returned no response: the message may have been stored; refetch page 1 and check before re-sending.
+
+### 8.5 `POST /conversations/:id/read`
+
+Auth: customer. No body. Marks every staff message up to now as read for this customer; `unreadCount` for this conversation is 0 until staff write again. Success: `200` `{ "data": { "id": "ckfake0conversation000001", "unreadCount": 0 } }`. Calling it again is harmless. It never changes what staff see as unread. Errors: 404 `NOT_FOUND` `Conversation not found.` (unknown id, another customer's, malformed id: identical), 429, common. Limit: the "read" budget (60 per minute per IP and per customer).
 
 ### How new messages and staff replies arrive
 

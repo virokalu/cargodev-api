@@ -37,6 +37,127 @@ export async function record(tx: TxClient, entry: ActivityLogEntry): Promise<voi
   });
 }
 
+/** Several rows in one statement (the retention job writes a batch). Same rules as record(): the caller's transaction, one row per entry. */
+export async function recordMany(tx: TxClient, entries: readonly ActivityLogEntry[]): Promise<void> {
+  if (entries.length === 0) return;
+  await tx.activityLog.createMany({
+    data: entries.map((entry) => ({
+      org_id: entry.orgId,
+      actorId: entry.actorId,
+      action: entry.action,
+      entity: entry.entity,
+      entityId: entry.entityId,
+      ...(entry.before === undefined ? {} : { before: entry.before as Prisma.InputJsonValue }),
+      ...(entry.after === undefined ? {} : { after: entry.after as Prisma.InputJsonValue }),
+    })),
+  });
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// A DELIBERATE EXCEPTION to "the activity log is append-only" (docs/adr/adr-0010, docs/privacy-checklist.md).
+//
+// When a customer is anonymised (they deleted their account, or the retention job removed a never-verified sign-up), the personal values
+// that staff edits of that customer left in the log (the old and new name, e-mail, phone, address, company name) are replaced by a
+// placeholder, in the SAME transaction. ONLY those five fields, ONLY in the `before` and `after` of rows about that customer
+// (entity "User" or "Customer", that entityId, that organisation). Every other row, field and customer is untouched, and one new
+// summary row per customer records COUNTS only, so the audit trail still shows that a scrub happened and how much it changed.
+
+export const PERSONAL_FIELDS = ["email", "phone", "name", "address", "companyName"] as const;
+export const SCRUBBED_PLACEHOLDER = "[removed]";
+/** The entities whose rows are about a customer by id: staff edits (`User`) and the customer's own actions (`Customer`). */
+export const CUSTOMER_ENTITIES = ["User", "Customer"] as const;
+const SCRUB_PAGE = 500;
+
+/** Replaces the five personal fields wherever they appear in a JSON value. Pure. A field that is null or already the placeholder is left alone and not counted. */
+export function scrubPersonalFields(value: unknown): { value: unknown; replaced: number } {
+  if (Array.isArray(value)) {
+    let replaced = 0;
+    const out = value.map((item) => {
+      const result = scrubPersonalFields(item);
+      replaced += result.replaced;
+      return result.value;
+    });
+    return { value: out, replaced };
+  }
+  if (value !== null && typeof value === "object") {
+    let replaced = 0;
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if ((PERSONAL_FIELDS as readonly string[]).includes(key) && item !== null && item !== undefined && item !== SCRUBBED_PLACEHOLDER) {
+        out[key] = SCRUBBED_PLACEHOLDER;
+        replaced += 1;
+      } else {
+        const result = scrubPersonalFields(item);
+        out[key] = result.value;
+        replaced += result.replaced;
+      }
+    }
+    return { value: out, replaced };
+  }
+  return { value, replaced: 0 };
+}
+
+export interface ScrubCounts {
+  rowsScrubbed: number;
+  fieldsReplaced: number;
+}
+
+/**
+ * Scrubs the log rows about each of the given customers and writes ONE summary row per customer with the counts (and nothing personal).
+ * Runs in the caller's transaction, next to the anonymisation. `actorId` is who the summary row is attributed to (the customer for their
+ * own deletion, the organisation's administrator for the retention job).
+ */
+export async function scrubCustomerActivity(
+  tx: TxClient,
+  params: { orgId: string; customerIds: readonly string[]; actorId: string }
+): Promise<Map<string, ScrubCounts>> {
+  const { orgId, customerIds, actorId } = params;
+  const counts = new Map<string, ScrubCounts>(customerIds.map((id) => [id, { rowsScrubbed: 0, fieldsReplaced: 0 }]));
+  if (customerIds.length === 0) return counts;
+
+  for (let skip = 0; ; skip += SCRUB_PAGE) {
+    const page = await tx.activityLog.findMany({
+      where: { org_id: orgId, entityId: { in: [...customerIds] }, entity: { in: [...CUSTOMER_ENTITIES] } },
+      select: { id: true, entityId: true, before: true, after: true },
+      orderBy: { id: "asc" },
+      take: SCRUB_PAGE,
+      skip,
+    });
+    for (const row of page) {
+      const before = scrubPersonalFields(row.before);
+      const after = scrubPersonalFields(row.after);
+      if (before.replaced + after.replaced === 0) continue;
+      // The write names the organisation, the entity and the customer again: a row that is not about this customer cannot change.
+      const written = await tx.activityLog.updateMany({
+        where: { id: row.id, org_id: orgId, entityId: row.entityId, entity: { in: [...CUSTOMER_ENTITIES] } },
+        data: {
+          ...(before.replaced > 0 ? { before: before.value as Prisma.InputJsonValue } : {}),
+          ...(after.replaced > 0 ? { after: after.value as Prisma.InputJsonValue } : {}),
+        },
+      });
+      if (written.count === 1) {
+        const c = counts.get(row.entityId)!;
+        c.rowsScrubbed += 1;
+        c.fieldsReplaced += before.replaced + after.replaced;
+      }
+    }
+    if (page.length < SCRUB_PAGE) break;
+  }
+
+  await recordMany(
+    tx,
+    customerIds.map((customerId) => ({
+      orgId,
+      actorId,
+      action: "CUSTOMER_ACTIVITY_SCRUBBED",
+      entity: "Customer",
+      entityId: customerId,
+      after: counts.get(customerId)!, // counts only: { rowsScrubbed, fieldsReplaced }
+    }))
+  );
+  return counts;
+}
+
 export interface ActivityLogListParams {
   page: number;
   pageSize: number;

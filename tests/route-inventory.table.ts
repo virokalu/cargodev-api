@@ -74,6 +74,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { method: "POST", path: "/api/customer/v1/conversations", kind: "customer" },
   { method: "GET", path: "/api/customer/v1/conversations/:id/messages", kind: "customer" },
   { method: "POST", path: "/api/customer/v1/conversations/:id/messages", kind: "customer" },
+  { method: "POST", path: "/api/customer/v1/conversations/:id/read", kind: "customer" },
   // STAFF (/api/v1): a staff token, roles from each route's authenticate() list
   // Contact details (email, phone, address) are left out for a VIEWER: in the list, in its search, and in the by-customer report
   // (tests/viewer-privacy.test.ts). Search and detail carry only { id, name } for every role.
@@ -205,6 +206,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { method: "GET", path: "/api/v1/chat/conversations/:id/messages", kind: "staff", roles: AMO, scoped: "assigned customers" },
   { method: "POST", path: "/api/v1/chat/conversations/:id/messages", kind: "staff", roles: AMO, scoped: "assigned customers" },
   { method: "POST", path: "/api/v1/chat/conversations/:id/handled", kind: "staff", roles: AMO, scoped: "assigned customers" },
+  { method: "POST", path: "/api/v1/chat/conversations/:id/read", kind: "staff", roles: AMO, scoped: "assigned customers" },
   { method: "GET", path: "/api/v1/stock", kind: "staff", roles: AM },
   { method: "POST", path: "/api/v1/stock", kind: "staff", roles: AM },
   { method: "GET", path: "/api/v1/stock/:id", kind: "staff", roles: AM },

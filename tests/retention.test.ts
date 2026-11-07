@@ -45,6 +45,17 @@ describe("retention settings", () => {
     await expect(loadEnvFresh({ RETENTION_DRY_RUN: bad })).rejects.toThrow("RETENTION_DRY_RUN");
   });
 
+  it("chat and enquiry retention default to 0 = NEVER delete, accept 0 to 3650, and reject anything else", async () => {
+    const env = await loadEnvFresh({});
+    expect([env.RETENTION_CHAT_DAYS, env.RETENTION_ENQUIRY_DAYS]).toEqual([0, 0]);
+    expect(await loadEnvFresh({ RETENTION_CHAT_DAYS: "365", RETENTION_ENQUIRY_DAYS: "730" }).then((e) => [e.RETENTION_CHAT_DAYS, e.RETENTION_ENQUIRY_DAYS])).toEqual([365, 730]);
+    expect((await loadEnvFresh({ RETENTION_CHAT_DAYS: "3650" })).RETENTION_CHAT_DAYS).toBe(3650);
+    for (const bad of ["-1", "3651", "1.5", "abc", "1e3x"]) {
+      await expect(loadEnvFresh({ RETENTION_CHAT_DAYS: bad }), `chat ${bad}`).rejects.toThrow("RETENTION_CHAT_DAYS");
+      await expect(loadEnvFresh({ RETENTION_ENQUIRY_DAYS: bad }), `enquiry ${bad}`).rejects.toThrow("RETENTION_ENQUIRY_DAYS");
+    }
+  });
+
   it("default to 30 / 30 / 180 / 14 days", async () => {
     const env = await loadEnvFresh({});
     expect([env.RETENTION_OTP_DAYS, env.RETENTION_SESSION_DAYS, env.RETENTION_ALERT_DAYS, env.UNVERIFIED_ACCOUNT_DAYS]).toEqual([30, 30, 180, 14]);
@@ -101,7 +112,7 @@ describe("one masked summary line per run", () => {
     state.retention = async () => ({ otpCodes: 2, customerSessions: 1, refreshTokens: 0, readAlerts: 3, unverifiedAccounts: 4, skipped: 0, dryRun: true });
     await defaultJobs()[0]!.run();
     expect(lines).toHaveLength(1); // two orgs, one line
-    expect(lines[0]).toBe("retention DRY RUN, nothing removed, would remove: otpCodes=4 customerSessions=2 refreshTokens=0 readAlerts=6 unverifiedAccounts=8 skippedOrgs=0");
+    expect(lines[0]).toBe("retention DRY RUN, nothing removed, would remove: otpCodes=4 customerSessions=2 refreshTokens=0 readAlerts=6 unverifiedAccounts=8 chatConversations=0 chatMessages=0 enquiries=0 skippedOrgs=0");
     expect(lines[0]).not.toMatch(/org_one|org_two/);
   });
 
@@ -113,8 +124,8 @@ describe("one masked summary line per run", () => {
     await job.run();
     await job.run();
     expect(lines).toEqual([
-      "retention removed: otpCodes=2 customerSessions=0 refreshTokens=0 readAlerts=0 unverifiedAccounts=0 skippedOrgs=0",
-      "retention removed: otpCodes=2 customerSessions=0 refreshTokens=0 readAlerts=0 unverifiedAccounts=0 skippedOrgs=0",
+      "retention removed: otpCodes=2 customerSessions=0 refreshTokens=0 readAlerts=0 unverifiedAccounts=0 chatConversations=0 chatMessages=0 enquiries=0 skippedOrgs=0",
+      "retention removed: otpCodes=2 customerSessions=0 refreshTokens=0 readAlerts=0 unverifiedAccounts=0 chatConversations=0 chatMessages=0 enquiries=0 skippedOrgs=0",
     ]);
   });
 });

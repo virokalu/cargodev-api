@@ -238,7 +238,7 @@ export const EXAMPLES: Example[] = [
   send("vehicles.revert-to-local", "MANAGER", "POST", "/api/v1/vehicles/v_fl_to_export/revert-to-local", undefined),
   send("vehicles.serial", "ADMINISTRATOR", "PATCH", "/api/v1/vehicles/v_fc_pending/serial", { serialNumber: 150 }),
   send("vehicles.serial.conflict", "ADMINISTRATOR", "PATCH", "/api/v1/vehicles/v_fc_pending/serial", { serialNumber: 102 }, 409),
-  send("vehicles.serial.reused", "ADMINISTRATOR", "PATCH", "/api/v1/vehicles/v_fc_pending/serial", { serialNumber: 106 }, 409),
+  send("vehicles.serial.reuse", "ADMINISTRATOR", "PATCH", "/api/v1/vehicles/v_fc_pending/serial", { serialNumber: 106 }),
 
   // ---- milestones
   get("milestones.list", "VIEWER", "/api/v1/vehicles/FC102/milestones"),
@@ -299,6 +299,7 @@ export const EXAMPLES: Example[] = [
   get("chat.messages", "OPERATOR", "/api/v1/chat/conversations/conv_1/messages"),
   send("chat.reply", "OPERATOR", "POST", "/api/v1/chat/conversations/conv_1/messages", { body: "It left the port yesterday." }, 201),
   send("chat.handled", "OPERATOR", "POST", "/api/v1/chat/conversations/conv_1/handled", { handled: true }),
+  send("chat.read", "OPERATOR", "POST", "/api/v1/chat/conversations/conv_1/read", undefined),
 
   // ---- public stock and enquiries
   get("stock.list", "MANAGER", "/api/v1/stock"),

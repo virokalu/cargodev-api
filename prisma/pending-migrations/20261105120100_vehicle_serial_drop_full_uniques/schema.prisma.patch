@@ -1,0 +1,16 @@
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index a34563e..9e4d904 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -516,8 +516,9 @@ model Vehicle {
+   documents     VehicleDocument[]
+   statusHistory StatusHistory[]
+ 
+-  @@unique([org_id, serial])
+-  @@unique([org_id, serialPrefix, serialNumber])
++  // Serial uniqueness among NOT soft-deleted vehicles is enforced by two PARTIAL unique indexes that Prisma cannot declare here:
++  //   Vehicle_org_serial_active_key (org_id, serial) and Vehicle_org_prefix_number_active_key (org_id, serialPrefix, serialNumber),
++  //   both WHERE "deletedAt" IS NULL (migration 20261105120000_vehicle_serial_active_unique). See docs/adr/adr-0009-serial-uniqueness-among-active-vehicles.md.
+   // chassisNo uniqueness is a soft-warn (legacy data may have dups), handled in service layer.
+   @@index([org_id, serialPrefix])
+   @@index([org_id, shipmentStatus])

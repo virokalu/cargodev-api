@@ -296,7 +296,10 @@ describe("vehicle create and update answer with the detail shape", () => {
     clearStaffAuthCache();
     const reply = await EXAMPLES.find((e) => e.id === id)!.run(makeCtx(app, fake));
     const data = (reply.body as { data: Record<string, unknown> }).data;
-    expect(Object.keys(data).sort()).toEqual(await detailKeys(fake, String(data["serial"])));
+    // create adds exactly one key to the detail shape: serialReused (since 1.8.0); update adds none
+    const extra = id === "vehicles.create" ? ["serialReused"] : [];
+    expect(Object.keys(data).sort()).toEqual([...(await detailKeys(fake, String(data["serial"]))), ...extra].sort());
+    if (id === "vehicles.create") expect(typeof data["serialReused"]).toBe("boolean");
     for (const key of FORBIDDEN_KEYS) expect(data, `${id} leaks ${key}`).not.toHaveProperty(key);
   });
 });
